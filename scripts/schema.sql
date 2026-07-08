@@ -279,9 +279,10 @@ RETURNS TABLE(user_role TEXT, user_roles TEXT[], user_status TEXT, centre_id UUI
 DECLARE
   found_user RECORD;
 BEGIN
-  SELECT id, role, roles, status, centre_id INTO found_user
-  FROM app_users
-  WHERE email = lower(user_email)
+  -- Alias + qualify columns so the OUT param `centre_id` does not clash with app_users.centre_id.
+  SELECT u.id, u.role, u.roles, u.status, u.centre_id INTO found_user
+  FROM app_users u
+  WHERE u.email = lower(user_email)
   LIMIT 1;
 
   IF found_user.id IS NOT NULL THEN

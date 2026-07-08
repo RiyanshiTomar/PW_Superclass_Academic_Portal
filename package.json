@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "import-faculty": "node scripts/import-faculty.js scripts/faculty-sample.csv",
-    "import-data": "node scripts/import-portal-data.js"
+    "import-data": "node scripts/import-portal-data.js",
+    "seed-passwords": "node scripts/seed-passwords.js"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.0",

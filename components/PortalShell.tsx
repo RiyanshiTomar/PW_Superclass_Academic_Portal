@@ -75,6 +75,7 @@ export default function PortalShell({
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-600 text-white text-xs font-bold shadow-md shadow-violet-500/40">{initials(fullName)}</span>
             <p className="text-sm font-semibold text-white truncate">{fullName || 'User'}</p>
           </div>
+          <Link href="/account" className="block text-center text-xs font-medium text-neutral-400 hover:text-white mb-2 transition-colors">Change password</Link>
           <LogoutButton className="w-full !text-neutral-300 !border-white/15 hover:!bg-white/10 hover:!text-white hover:!border-white/30" />
         </div>
       </aside>

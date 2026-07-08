@@ -11,6 +11,7 @@ const NAV = [
   { label: 'Central Team', href: '/admin/central-team' },
   { label: 'Batch Managers', href: '/admin/batch-managers' },
   { label: 'Branch Heads', href: '/admin/branch-heads' },
+  { label: 'Credentials', href: '/admin/credentials' },
   { label: 'Audit Log', href: '/admin/audit-log' },
 ]
 

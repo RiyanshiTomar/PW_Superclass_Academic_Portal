@@ -44,28 +44,6 @@ type FlatSchedule = {
   subject_id: string | null
 }
 
-function emptyRow(): ScheduleRow {
-  return { faculty_id: '', subject_id: '', start_time: '09:00', end_time: '10:00', days: [false, false, false, false, false, false, false] }
-}
-
-function rowsFromFlat(schedules: FlatSchedule[]): ScheduleRow[] {
-  const map = new Map<string, ScheduleRow>()
-  for (const s of schedules) {
-    const key = `${s.faculty_id}|${s.subject_id ?? ''}|${s.start_time}|${s.end_time}`
-    if (!map.has(key)) {
-      map.set(key, {
-        faculty_id: s.faculty_id,
-        subject_id: s.subject_id ?? '',
-        start_time: s.start_time.slice(0, 5),
-        end_time: s.end_time.slice(0, 5),
-        days: [false, false, false, false, false, false, false],
-      })
-    }
-    map.get(key)!.days[s.day_of_week] = true
-  }
-  return map.size > 0 ? Array.from(map.values()) : [emptyRow()]
-}
-
 function flattenRows(rows: ScheduleRow[]): FlatSchedule[] {
   const result: FlatSchedule[] = []
   for (const row of rows) {
@@ -114,7 +92,7 @@ export default function BatchScheduler() {
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [managerId, setManagerId] = useState('')
-  const [scheduleRows, setScheduleRows] = useState<ScheduleRow[]>([emptyRow()])
+  const [scheduleRows, setScheduleRows] = useState<ScheduleRow[]>([])
   const [userCentres, setUserCentres] = useState<UserCentre[]>([])
 
   // Attach-planner modal
@@ -138,9 +116,30 @@ export default function BatchScheduler() {
   }, [managers, centreId, userCentres])
 
   const programSubjects = useMemo(
-    () => subjects.filter((s) => !programId || s.program_id === programId),
+    () => subjects.filter((s) => s.program_id === programId),
     [subjects, programId]
   )
+
+  const subjName = (id: string) => subjects.find((s) => s.id === id)?.name ?? 'Subject'
+
+  // One row per subject of the program (subject fixed). Prefill from existing schedule on edit.
+  const buildRows = (pid: string, flat: FlatSchedule[] = []): ScheduleRow[] =>
+    subjects
+      .filter((s) => s.program_id === pid)
+      .map((s) => {
+        const forSub = flat.filter((f) => f.subject_id === s.id)
+        if (forSub.length) {
+          const days = [false, false, false, false, false, false, false]
+          forSub.forEach((f) => { days[f.day_of_week] = true })
+          return { subject_id: s.id, faculty_id: forSub[0].faculty_id, start_time: forSub[0].start_time.slice(0, 5), end_time: forSub[0].end_time.slice(0, 5), days }
+        }
+        return { subject_id: s.id, faculty_id: '', start_time: '09:00', end_time: '10:00', days: [false, false, false, false, false, false, false] }
+      })
+
+  const handleProgramChange = (pid: string) => {
+    setProgramId(pid)
+    setScheduleRows(buildRows(pid))
+  }
 
   const loadData = async () => {
     setLoading(true)
@@ -211,7 +210,7 @@ export default function BatchScheduler() {
     setEndDate(b.end_date)
     setManagerId(b.batch_manager_id)
     const { data } = await supabase.from('batch_schedules').select('*').eq('batch_id', b.id)
-    setScheduleRows(rowsFromFlat((data || []) as FlatSchedule[]))
+    setScheduleRows(buildRows(b.program_id, (data || []) as FlatSchedule[]))
     setShowForm(true)
     setMessage(null)
   }
@@ -219,7 +218,7 @@ export default function BatchScheduler() {
   const resetForm = () => {
     setEditingBatch(null)
     setName(''); setProgramId(''); setCentreId(''); setStartDate(''); setEndDate(''); setManagerId('')
-    setScheduleRows([emptyRow()])
+    setScheduleRows([])
     setShowForm(false)
     setMessage(null)
   }
@@ -247,23 +246,28 @@ export default function BatchScheduler() {
 
     const trimmedName = name.trim()
     if (!trimmedName) return fail('Batch name is required.')
+    if (!programId) return fail('Select a program.')
     if (!centreId) return fail('Select a centre first.')
     const dateErr = validateBatchDates(startDate, endDate)
     if (dateErr) return fail(dateErr)
 
-    const flat = flattenRows(scheduleRows)
+    if (programSubjects.length === 0) return fail('This program has no subjects. Add subjects in Admin → Programs first.')
+    if (scheduleRows.length === 0) return fail('Select program & centre to load subjects.')
 
+    const centreIds = new Set(userCentres.filter((uc) => uc.centre_id === centreId).map((uc) => uc.user_id))
+
+    // Every subject MUST have a faculty + timing + at least one day.
     for (const row of scheduleRows) {
+      const sName = subjName(row.subject_id)
+      if (!row.faculty_id) return fail(`Assign a faculty for "${sName}". All subjects are mandatory.`)
       const timeErr = validateTimeRange(row.start_time, row.end_time)
-      if ((row.faculty_id || row.days.some(Boolean)) && timeErr) return fail(timeErr)
-      if (row.faculty_id && !row.days.some(Boolean)) return fail('Each faculty row needs at least one day selected.')
-      if (row.days.some(Boolean) && !row.faculty_id) return fail('Select faculty for every row with days checked.')
-      if (row.faculty_id) {
-        const ids = new Set(userCentres.filter((uc) => uc.centre_id === centreId).map((uc) => uc.user_id))
-        const fac = faculty.find((f) => f.id === row.faculty_id)
-        if (!ids.has(row.faculty_id) && fac?.centre_id !== centreId) return fail(`${fac?.full_name ?? 'Faculty'} does not belong to the selected centre.`)
-      }
+      if (timeErr) return fail(`${sName}: ${timeErr}`)
+      if (!row.days.some(Boolean)) return fail(`Pick at least one day for "${sName}".`)
+      const fac = faculty.find((f) => f.id === row.faculty_id)
+      if (!centreIds.has(row.faculty_id) && fac?.centre_id !== centreId) return fail(`${fac?.full_name ?? 'Faculty'} does not teach at this centre.`)
     }
+
+    const flat = flattenRows(scheduleRows)
 
     for (let i = 0; i < flat.length; i++) {
       for (let j = i + 1; j < flat.length; j++) {
@@ -369,7 +373,7 @@ export default function BatchScheduler() {
               </div>
               <div>
                 <label className="block text-xs font-medium text-neutral-500 mb-1">Program *</label>
-                <select required value={programId} onChange={(e) => setProgramId(e.target.value)} className={inputClass}>
+                <select required value={programId} onChange={(e) => handleProgramChange(e.target.value)} className={inputClass}>
                   <option value="">Select program</option>
                   {programs.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
@@ -401,43 +405,49 @@ export default function BatchScheduler() {
               </div>
             </div>
 
-            {!centreId ? (
-              <Alert type="info">Select a centre above to build the weekly faculty schedule.</Alert>
+            {!programId ? (
+              <Alert type="info">Select a program above — its subjects will load automatically, one row each.</Alert>
+            ) : programSubjects.length === 0 ? (
+              <Alert type="error">This program has no subjects yet. Add them in Admin → Programs first.</Alert>
+            ) : !centreId ? (
+              <Alert type="info">Select a centre to pick faculty for each subject.</Alert>
             ) : centreFaculty.length === 0 ? (
               <Alert type="error">No active faculty found for this centre. Add faculty in Admin first.</Alert>
             ) : (
               <>
-                <div className="flex items-center justify-between mb-2">
+                <div className="mb-2">
                   <h3 className="text-sm font-semibold text-neutral-950 uppercase tracking-wider">Weekly Schedule</h3>
-                  <BtnSecondary type="button" onClick={() => setScheduleRows((r) => [...r, emptyRow()])}>+ Add Row</BtnSecondary>
                 </div>
-                <p className="text-xs text-neutral-500 mb-4">{centreFaculty.length} faculty available for {centres.find((c) => c.id === centreId)?.name}</p>
+                <p className="text-xs text-neutral-500 mb-4">
+                  All <span className="font-semibold text-violet-600">{programSubjects.length} subjects</span> of this program must have a faculty &amp; timing — a batch can&apos;t run on one teacher. ({centreFaculty.length} faculty at {centres.find((c) => c.id === centreId)?.name})
+                </p>
 
                 <div className="overflow-x-auto border border-neutral-200 rounded-xl mb-8">
                   <table className="w-full text-sm min-w-[860px]">
                     <thead>
                       <tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider">
-                        <th className="text-left px-4 py-3 font-semibold min-w-[170px]">Faculty</th>
-                        <th className="text-left px-3 py-3 font-semibold min-w-[150px]">Subject</th>
+                        <th className="text-left px-4 py-3 font-semibold min-w-[150px]">Subject *</th>
+                        <th className="text-left px-3 py-3 font-semibold min-w-[170px]">Faculty *</th>
                         <th className="text-left px-3 py-3 font-semibold">Start</th>
                         <th className="text-left px-3 py-3 font-semibold">End</th>
                         {DAYS.map((d) => <th key={d} className="px-2 py-3 font-semibold text-center w-10">{d}</th>)}
-                        <th className="w-10" />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-neutral-100">
-                      {scheduleRows.map((row, rowIndex) => (
-                        <tr key={rowIndex}>
+                      {scheduleRows.map((row, rowIndex) => {
+                        const filled = row.faculty_id && row.days.some(Boolean)
+                        return (
+                        <tr key={row.subject_id} className={filled ? '' : 'bg-amber-50/40'}>
                           <td className="px-4 py-3">
+                            <span className="inline-flex items-center gap-2 font-semibold text-neutral-900">
+                              <span className={`h-2 w-2 rounded-full ${filled ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                              {subjName(row.subject_id)}
+                            </span>
+                          </td>
+                          <td className="px-3 py-3">
                             <select value={row.faculty_id} onChange={(e) => updateRow(rowIndex, { faculty_id: e.target.value })} className={inputClass}>
                               <option value="">Select faculty</option>
                               {centreFaculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
-                            </select>
-                          </td>
-                          <td className="px-3 py-3">
-                            <select value={row.subject_id} onChange={(e) => updateRow(rowIndex, { subject_id: e.target.value })} className={inputClass} disabled={!programId} title={!programId ? 'Select a program first' : ''}>
-                              <option value="">{programId ? 'Subject (optional)' : 'Pick program'}</option>
-                              {programSubjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                             </select>
                           </td>
                           <td className="px-3 py-3"><input type="time" value={row.start_time} onChange={(e) => updateRow(rowIndex, { start_time: e.target.value })} className={inputClass} /></td>
@@ -449,11 +459,9 @@ export default function BatchScheduler() {
                               </button>
                             </td>
                           ))}
-                          <td className="px-2 py-3">
-                            {scheduleRows.length > 1 && <button type="button" onClick={() => setScheduleRows((r) => r.filter((_, i) => i !== rowIndex))} className="text-red-500 hover:text-red-700 text-xs font-medium">✕</button>}
-                          </td>
                         </tr>
-                      ))}
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>

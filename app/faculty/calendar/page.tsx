@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
-import { DAYS, formatTime } from '@/lib/utils'
+import { DAYS, formatTime, toMinutes } from '@/lib/utils'
+import { minutesToTimeString } from '@/lib/validation'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
 type Lecture = {
@@ -16,6 +17,7 @@ type Lecture = {
   stage: string
   batches: { name: string; centres: { name: string } | { name: string }[] | null } | { name: string; centres: { name: string } | { name: string }[] | null }[] | null
   subjects: { name: string } | { name: string }[] | null
+  classrooms: { name: string } | { name: string }[] | null
 }
 
 function one<T>(v: T | T[] | null | undefined): T | null {
@@ -39,9 +41,12 @@ export default function FacultyCalendarPage() {
 
   // Request modal
   const [selected, setSelected] = useState<Lecture | null>(null)
-  const [mode, setMode] = useState<'reschedule' | 'cancel'>('reschedule')
+  const [mode, setMode] = useState<'reschedule' | 'cancel' | 'extra'>('reschedule')
   const [newDate, setNewDate] = useState('')
   const [newTime, setNewTime] = useState('')
+  const [newDuration, setNewDuration] = useState('60')
+  const [extraTopic, setExtraTopic] = useState('')
+  const [extraChapter, setExtraChapter] = useState('')
   const [reason, setReason] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -52,7 +57,7 @@ export default function FacultyCalendarPage() {
     if (!appUser) { setLoading(false); return }
     const { data } = await supabase
       .from('batch_planners')
-      .select('id, planned_date, start_time, duration_minutes, topic_name, chapter, stage, batches(name, centres(name)), subjects(name)')
+      .select('id, planned_date, start_time, duration_minutes, topic_name, chapter, stage, batches(name, centres(name)), subjects(name), classrooms(name)')
       .eq('faculty_id', appUser.id)
       .in('stage', ['Faculty Assigned', 'Confirmed'])
       .order('planned_date', { ascending: true })
@@ -98,33 +103,51 @@ export default function FacultyCalendarPage() {
     setMode('reschedule')
     setNewDate(l.planned_date)
     setNewTime(l.start_time ? l.start_time.slice(0, 5) : '')
+    setNewDuration(String(l.duration_minutes || 60))
+    setExtraTopic(l.topic_name)
+    setExtraChapter(l.chapter)
     setReason('')
     setMessage(null)
   }
 
   async function submit() {
     if (!selected || !reason.trim()) return
-    if (mode === 'reschedule' && !newDate) return
+    if ((mode === 'reschedule' || mode === 'extra') && !newDate) return
     setSubmitting(true)
     const { data: { user } } = await supabase.auth.getUser()
     const appUser = user ? await getAppUser(supabase, user) : null
     if (!appUser) { setSubmitting(false); setMessage({ type: 'error', text: 'Session expired.' }); return }
 
+    // For an extra class we send the desired slot as requested_* + an end time
+    // derived from the duration, so Central can compute the length on approval.
+    let requestedEnd: string | null = null
+    if (mode === 'extra' && newTime) {
+      const dur = parseInt(newDuration, 10) || selected.duration_minutes || 60
+      requestedEnd = minutesToTimeString(toMinutes(newTime) + dur)
+    }
+
+    const requestType = mode === 'cancel' ? 'cancel' : mode === 'extra' ? 'extra' : 'planner'
     const { error } = await supabase.from('reschedule_requests').insert({
       planner_id: selected.id,
       requested_by: appUser.id,
-      request_type: mode === 'cancel' ? 'cancel' : 'planner',
+      request_type: requestType,
       original_date: selected.planned_date,
       original_start_time: selected.start_time,
       requested_date: mode === 'cancel' ? null : newDate,
       requested_start_time: mode === 'cancel' ? null : newTime || null,
+      requested_end_time: requestedEnd,
+      extra_topic: mode === 'extra' ? (extraTopic.trim() || null) : null,
+      extra_chapter: mode === 'extra' ? (extraChapter.trim() || null) : null,
       reason: reason.trim(),
       status: 'pending',
     })
     setSubmitting(false)
     if (error) { setMessage({ type: 'error', text: 'Failed: ' + error.message }); return }
     setSelected(null)
-    setMessage({ type: 'success', text: mode === 'cancel' ? 'Cancellation request sent to Central Team.' : 'Reschedule request sent to Central Team.' })
+    const sentMsg = mode === 'cancel' ? 'Cancellation request sent to Central Team.'
+      : mode === 'extra' ? 'Extra-class request sent to Central Team.'
+      : 'Reschedule request sent to Central Team.'
+    setMessage({ type: 'success', text: sentMsg })
     await loadData()
   }
 
@@ -234,7 +257,7 @@ export default function FacultyCalendarPage() {
                       <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${confirmed ? 'bg-emerald-200 text-emerald-800' : 'bg-violet-200 text-violet-800'}`}>{l.stage}</span>
                     </div>
                     <div className="text-sm font-medium text-neutral-800 mt-0.5">{batch?.name ?? 'Batch'} — {l.topic_name}</div>
-                    <div className="text-xs text-neutral-500">{centre?.name ?? ''} · Ch {l.chapter}</div>
+                    <div className="text-xs text-neutral-500">{centre?.name ?? ''}{one(l.classrooms)?.name ? ` · ${one(l.classrooms)!.name}` : ''} · Ch {l.chapter}</div>
                   </button>
                 )
               })}
@@ -254,6 +277,7 @@ export default function FacultyCalendarPage() {
 
             <div className="flex gap-2 mb-4">
               <button onClick={() => setMode('reschedule')} className={`flex-1 h-9 rounded-lg text-sm font-semibold ${mode === 'reschedule' ? 'bg-violet-500 text-white' : 'bg-neutral-100 text-neutral-600'}`}>Reschedule</button>
+              <button onClick={() => setMode('extra')} className={`flex-1 h-9 rounded-lg text-sm font-semibold ${mode === 'extra' ? 'bg-emerald-600 text-white' : 'bg-neutral-100 text-neutral-600'}`}>Extra Class</button>
               <button onClick={() => setMode('cancel')} className={`flex-1 h-9 rounded-lg text-sm font-semibold ${mode === 'cancel' ? 'bg-red-600 text-white' : 'bg-neutral-100 text-neutral-600'}`}>Cancel Class</button>
             </div>
 
@@ -270,19 +294,46 @@ export default function FacultyCalendarPage() {
               </div>
             )}
 
+            {mode === 'extra' && (
+              <div className="grid grid-cols-3 gap-3 mb-3">
+                <div>
+                  <label className="block text-xs font-medium text-neutral-500 mb-1">Date</label>
+                  <input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} className={inputClass} />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-neutral-500 mb-1">Time</label>
+                  <input type="time" value={newTime} onChange={(e) => setNewTime(e.target.value)} className={inputClass} />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-neutral-500 mb-1">Mins</label>
+                  <input type="number" min={15} max={480} value={newDuration} onChange={(e) => setNewDuration(e.target.value)} className={inputClass} />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-xs font-medium text-neutral-500 mb-1">Topic</label>
+                  <input value={extraTopic} onChange={(e) => setExtraTopic(e.target.value)} className={inputClass} placeholder="Topic for this class" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-neutral-500 mb-1">Chapter</label>
+                  <input value={extraChapter} onChange={(e) => setExtraChapter(e.target.value)} className={inputClass} placeholder="Ch" />
+                </div>
+              </div>
+            )}
+
             <div className="mb-4">
               <label className="block text-xs font-medium text-neutral-500 mb-1">Reason</label>
-              <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" placeholder={mode === 'cancel' ? 'Why cancel this class?' : 'Why reschedule?'} />
+              <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" placeholder={mode === 'cancel' ? 'Why cancel this class?' : mode === 'extra' ? 'Why do you need an extra class on this topic?' : 'Why reschedule?'} />
             </div>
 
             <p className="text-xs text-neutral-400 mb-4">
               {mode === 'cancel'
                 ? 'On approval, this class is removed and later lectures of the planner slide up to fill the gap.'
+                : mode === 'extra'
+                ? 'On approval, one extra class is added on this same topic (same batch, subject & room). Nothing else shifts.'
                 : 'On approval, this class moves and later lectures of the planner shift by the same amount.'}
             </p>
 
             <div className="flex gap-3">
-              <BtnPrimary className="flex-1" onClick={submit} disabled={submitting || !reason.trim() || (mode === 'reschedule' && !newDate)}>
+              <BtnPrimary className="flex-1" onClick={submit} disabled={submitting || !reason.trim() || ((mode === 'reschedule' || mode === 'extra') && !newDate)}>
                 {submitting ? 'Sending…' : 'Send Request'}
               </BtnPrimary>
               <BtnSecondary className="flex-1" onClick={() => setSelected(null)}>Close</BtnSecondary>

@@ -3,7 +3,10 @@ import { redirect } from 'next/navigation'
 import PortalShell from '@/components/PortalShell'
 import { getAppUser } from '@/lib/auth'
 
-const NAV = [{ label: 'Dashboard', href: '/branch' }]
+const NAV = [
+  { label: 'Dashboard', href: '/branch', icon: '🏫' },
+  { label: 'Attendance', href: '/branch/attendance', icon: '🗓️' },
+]
 
 export default async function BranchLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient()

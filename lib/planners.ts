@@ -68,7 +68,48 @@ async function facultyBusyExcluding(
   return { weekly, dated }
 }
 
-/** Does a proposed lecture conflict with the faculty's other commitments? */
+/** All of a room's committed time (weekly recurring + dated planners),
+ *  excluding a set of batch_planners row ids (the rows being moved). Mirrors
+ *  facultyBusyExcluding — one classroom can only host one class at a time. */
+async function classroomBusyExcluding(
+  supabase: SupabaseClient,
+  classroomId: string,
+  excludeIds: string[]
+): Promise<{ weekly: WeeklyBusy[]; dated: DatedBusy[] }> {
+  const [weeklyRes, datedRes] = await Promise.all([
+    supabase
+      .from('batch_schedules')
+      .select('day_of_week, start_time, end_time')
+      .eq('classroom_id', classroomId),
+    supabase
+      .from('batch_planners')
+      .select('id, planned_date, start_time, duration_minutes')
+      .eq('classroom_id', classroomId)
+      .not('start_time', 'is', null),
+  ])
+
+  const weekly: WeeklyBusy[] = (weeklyRes.data ?? []).map((r) => ({
+    day_of_week: r.day_of_week as number,
+    start: toMinutes((r.start_time as string).slice(0, 5)),
+    end: toMinutes((r.end_time as string).slice(0, 5)),
+  }))
+
+  const exclude = new Set(excludeIds)
+  const dated: DatedBusy[] = (datedRes.data ?? [])
+    .filter((r) => !exclude.has(r.id as string))
+    .map((r) => {
+      const start = toMinutes((r.start_time as string).slice(0, 5))
+      return {
+        date: r.planned_date as string,
+        start,
+        end: start + (r.duration_minutes as number),
+      }
+    })
+
+  return { weekly, dated }
+}
+
+/** Does a proposed lecture conflict with the faculty's (or room's) other commitments? */
 function conflictReason(
   date: string,
   startTime: string,
@@ -159,7 +200,19 @@ async function materialise(
   const { data: centreFac } = await supabase.rpc('list_active_faculty', { p_centre_id: batch.centre_id })
   const centreFacultyIds = new Set(((centreFac as { id: string }[]) ?? []).map((f) => f.id))
 
+  // The batch's weekly timetable decides which room each subject runs in — a
+  // dated planner lecture inherits its room from its subject's schedule row.
+  const { data: sched } = await supabase
+    .from('batch_schedules')
+    .select('subject_id, classroom_id')
+    .eq('batch_id', batch.id)
+  const roomBySubject = new Map<string, string>()
+  for (const s of (sched ?? []) as { subject_id: string | null; classroom_id: string | null }[]) {
+    if (s.subject_id && s.classroom_id) roomBySubject.set(s.subject_id, s.classroom_id)
+  }
+
   const busyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
+  const roomBusyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
   const toInsert: Record<string, unknown>[] = []
 
   for (const l of lectures) {
@@ -174,16 +227,30 @@ async function materialise(
       continue
     }
 
+    const classroomId = l.subject_id ? roomBySubject.get(l.subject_id as string) ?? null : null
+
     if (l.start_time) {
+      const st = (l.start_time as string).slice(0, 5)
+      const dur = l.duration_minutes as number
+      const slot = { date, start: toMinutes(st), end: toMinutes(st) + dur }
+
       if (!busyCache[facultyId]) busyCache[facultyId] = await facultyBusyExcluding(supabase, facultyId, [])
       const busy = busyCache[facultyId]
-      const reason = conflictReason(date, l.start_time as string, l.duration_minutes as number, busy)
+      const reason = conflictReason(date, l.start_time as string, dur, busy)
       if (reason) { errors.push(`${label}: ${reason}`); continue }
-      busy.dated.push({
-        date,
-        start: toMinutes((l.start_time as string).slice(0, 5)),
-        end: toMinutes((l.start_time as string).slice(0, 5)) + (l.duration_minutes as number),
-      })
+
+      // A room is one class at a time — check both weekly + other dated lectures.
+      let roomBusy: { weekly: WeeklyBusy[]; dated: DatedBusy[] } | null = null
+      if (classroomId) {
+        if (!roomBusyCache[classroomId]) roomBusyCache[classroomId] = await classroomBusyExcluding(supabase, classroomId, [])
+        roomBusy = roomBusyCache[classroomId]
+        const rReason = conflictReason(date, l.start_time as string, dur, roomBusy)
+        if (rReason) { errors.push(`${label}: room ${rReason}`); continue }
+      }
+
+      // Both clear — reserve the slot so later lectures in this planner see it.
+      busy.dated.push(slot)
+      if (roomBusy) roomBusy.dated.push(slot)
     }
 
     toInsert.push({
@@ -192,6 +259,7 @@ async function materialise(
       chapter: l.chapter,
       topic_name: l.topic_name,
       faculty_id: facultyId,
+      classroom_id: classroomId,
       planned_date: date,
       start_time: l.start_time,
       duration_minutes: l.duration_minutes,
@@ -301,6 +369,7 @@ type TargetRow = {
   id: string
   link_id: string | null
   faculty_id: string
+  classroom_id: string | null
   planned_date: string
   start_time: string | null
   duration_minutes: number
@@ -317,7 +386,7 @@ export async function cascadeReschedule(
 ): Promise<{ ok: boolean; shifted: number; error?: string }> {
   const { data: target } = await supabase
     .from('batch_planners')
-    .select('id, link_id, faculty_id, planned_date, start_time, duration_minutes')
+    .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes')
     .eq('id', rowId)
     .single<TargetRow>()
   if (!target) return { ok: false, shifted: 0, error: 'Lecture not found.' }
@@ -331,7 +400,7 @@ export async function cascadeReschedule(
   if (target.link_id) {
     const { data } = await supabase
       .from('batch_planners')
-      .select('id, link_id, faculty_id, planned_date, start_time, duration_minutes')
+      .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes')
       .eq('link_id', target.link_id)
       .eq('faculty_id', target.faculty_id)
       .gt('planned_date', target.planned_date)
@@ -339,11 +408,9 @@ export async function cascadeReschedule(
   }
 
   const moving = [target, ...subsequent]
-  const busy = await facultyBusyExcluding(
-    supabase,
-    target.faculty_id,
-    moving.map((m) => m.id)
-  )
+  const movingIds = moving.map((m) => m.id)
+  const busy = await facultyBusyExcluding(supabase, target.faculty_id, movingIds)
+  const roomBusyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
 
   const updates: { id: string; planned_date: string; start_time: string | null }[] = []
   for (const row of moving) {
@@ -353,11 +420,18 @@ export async function cascadeReschedule(
     if (propTime) {
       const reason = conflictReason(propDate, propTime, row.duration_minutes, busy)
       if (reason) return { ok: false, shifted: 0, error: `Cannot reschedule: ${reason}.` }
-      busy.dated.push({
-        date: propDate,
-        start: toMinutes(propTime.slice(0, 5)),
-        end: toMinutes(propTime.slice(0, 5)) + row.duration_minutes,
-      })
+
+      let roomBusy: { weekly: WeeklyBusy[]; dated: DatedBusy[] } | null = null
+      if (row.classroom_id) {
+        if (!roomBusyCache[row.classroom_id]) roomBusyCache[row.classroom_id] = await classroomBusyExcluding(supabase, row.classroom_id, movingIds)
+        roomBusy = roomBusyCache[row.classroom_id]
+        const rReason = conflictReason(propDate, propTime, row.duration_minutes, roomBusy)
+        if (rReason) return { ok: false, shifted: 0, error: `Cannot reschedule: room ${rReason}.` }
+      }
+
+      const slot = { date: propDate, start: toMinutes(propTime.slice(0, 5)), end: toMinutes(propTime.slice(0, 5)) + row.duration_minutes }
+      busy.dated.push(slot)
+      if (roomBusy) roomBusy.dated.push(slot)
     }
     updates.push({ id: row.id, planned_date: propDate, start_time: propTime })
   }
@@ -373,6 +447,72 @@ export async function cascadeReschedule(
   return { ok: true, shifted: subsequent.length }
 }
 
+/** Add ONE extra lecture, cloning an existing (anchor) lecture's batch, link,
+ *  faculty, subject, room, topic & chapter — for "I need one more class on this
+ *  topic". No cascade (it's an addition, not a move), but the new slot is still
+ *  validated against the faculty's and the room's other commitments. */
+export async function addExtraLecture(
+  supabase: SupabaseClient,
+  anchorRowId: string,
+  newDate: string,
+  newTime: string | null,
+  durationMinutes?: number,
+  override?: { topic_name?: string | null; chapter?: string | null }
+): Promise<{ ok: boolean; error?: string }> {
+  const { data: anchor } = await supabase
+    .from('batch_planners')
+    .select('batch_id, link_id, faculty_id, classroom_id, subject_id, chapter, topic_name, duration_minutes, start_time, stage')
+    .eq('id', anchorRowId)
+    .single<{
+      batch_id: string
+      link_id: string | null
+      faculty_id: string
+      classroom_id: string | null
+      subject_id: string | null
+      chapter: string
+      topic_name: string
+      duration_minutes: number
+      start_time: string | null
+      stage: string
+    }>()
+  if (!anchor) return { ok: false, error: 'Original lecture not found.' }
+
+  const startTime = newTime || anchor.start_time
+  if (!startTime) return { ok: false, error: 'Pick a start time for the extra class.' }
+  const dur = durationMinutes && durationMinutes > 0 ? durationMinutes : anchor.duration_minutes
+
+  // Faculty must be free at the new slot.
+  const facBusy = await facultyBusyExcluding(supabase, anchor.faculty_id, [])
+  const facReason = conflictReason(newDate, startTime, dur, facBusy)
+  if (facReason) return { ok: false, error: `Faculty ${facReason}.` }
+
+  // The room must be free too (one class per room at a time).
+  if (anchor.classroom_id) {
+    const roomBusy = await classroomBusyExcluding(supabase, anchor.classroom_id, [])
+    const roomReason = conflictReason(newDate, startTime, dur, roomBusy)
+    if (roomReason) return { ok: false, error: `Room ${roomReason}.` }
+  }
+
+  const topicName = override?.topic_name?.trim() ? override.topic_name.trim() : anchor.topic_name
+  const chapter = override?.chapter?.trim() ? override.chapter.trim() : anchor.chapter
+
+  const { error } = await supabase.from('batch_planners').insert({
+    batch_id: anchor.batch_id,
+    subject_id: anchor.subject_id,
+    chapter: chapter,
+    topic_name: topicName,
+    faculty_id: anchor.faculty_id,
+    classroom_id: anchor.classroom_id,
+    planned_date: newDate,
+    start_time: startTime,
+    duration_minutes: dur,
+    stage: anchor.stage,
+    link_id: anchor.link_id,
+  })
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
+}
+
 /** Cancel one materialised lecture and close the gap: later lectures of the
  *  same link slide earlier to the freed slot, preserving relative spacing. */
 export async function cascadeCancel(
@@ -381,7 +521,7 @@ export async function cascadeCancel(
 ): Promise<{ ok: boolean; shifted: number; error?: string }> {
   const { data: target } = await supabase
     .from('batch_planners')
-    .select('id, link_id, faculty_id, planned_date, start_time, duration_minutes')
+    .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes')
     .eq('id', rowId)
     .single<TargetRow>()
   if (!target) return { ok: false, shifted: 0, error: 'Lecture not found.' }
@@ -390,7 +530,7 @@ export async function cascadeCancel(
   if (target.link_id) {
     const { data } = await supabase
       .from('batch_planners')
-      .select('id, link_id, faculty_id, planned_date, start_time, duration_minutes')
+      .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes')
       .eq('link_id', target.link_id)
       .eq('faculty_id', target.faculty_id)
       .gt('planned_date', target.planned_date)
@@ -402,22 +542,27 @@ export async function cascadeCancel(
   const delta = subsequent.length > 0 ? daysBetween(target.planned_date, subsequent[0].planned_date) : 0
 
   if (subsequent.length > 0 && delta > 0) {
-    const busy = await facultyBusyExcluding(
-      supabase,
-      target.faculty_id,
-      [target.id, ...subsequent.map((s) => s.id)]
-    )
+    const excludeIds = [target.id, ...subsequent.map((s) => s.id)]
+    const busy = await facultyBusyExcluding(supabase, target.faculty_id, excludeIds)
+    const roomBusyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
     const updates: { id: string; planned_date: string }[] = []
     for (const row of subsequent) {
       const propDate = addDaysToDate(row.planned_date, -delta)
       if (row.start_time) {
         const reason = conflictReason(propDate, row.start_time, row.duration_minutes, busy)
         if (reason) return { ok: false, shifted: 0, error: `Cannot cancel & shift: ${reason}.` }
-        busy.dated.push({
-          date: propDate,
-          start: toMinutes(row.start_time.slice(0, 5)),
-          end: toMinutes(row.start_time.slice(0, 5)) + row.duration_minutes,
-        })
+
+        let roomBusy: { weekly: WeeklyBusy[]; dated: DatedBusy[] } | null = null
+        if (row.classroom_id) {
+          if (!roomBusyCache[row.classroom_id]) roomBusyCache[row.classroom_id] = await classroomBusyExcluding(supabase, row.classroom_id, excludeIds)
+          roomBusy = roomBusyCache[row.classroom_id]
+          const rReason = conflictReason(propDate, row.start_time, row.duration_minutes, roomBusy)
+          if (rReason) return { ok: false, shifted: 0, error: `Cannot cancel & shift: room ${rReason}.` }
+        }
+
+        const slot = { date: propDate, start: toMinutes(row.start_time.slice(0, 5)), end: toMinutes(row.start_time.slice(0, 5)) + row.duration_minutes }
+        busy.dated.push(slot)
+        if (roomBusy) roomBusy.dated.push(slot)
       }
       updates.push({ id: row.id, planned_date: propDate })
     }

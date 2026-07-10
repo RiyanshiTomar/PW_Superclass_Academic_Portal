@@ -18,6 +18,7 @@ type MyLecture = {
   duration_minutes: number
   subjects: { name: string } | { name: string }[] | null
   batches: { name: string } | { name: string }[] | null
+  classrooms: { name: string } | { name: string }[] | null
   batch_planner_links: { planner_id: string; planners: { name: string } | { name: string }[] | null } | { planner_id: string; planners: { name: string } | { name: string }[] | null }[] | null
 }
 
@@ -70,7 +71,7 @@ export default function FacultyPlannersPage() {
       // My materialised lectures that have been sent to faculty.
       supabase
         .from('batch_planners')
-        .select('id, link_id, stage, topic_name, chapter, planned_date, start_time, duration_minutes, subjects(name), batches(name), batch_planner_links(planner_id, planners(name))')
+        .select('id, link_id, stage, topic_name, chapter, planned_date, start_time, duration_minutes, subjects(name), batches(name), classrooms(name), batch_planner_links(planner_id, planners(name))')
         .eq('faculty_id', appUser.id)
         .in('stage', ['Faculty Assigned', 'Confirmed', 'Rework'])
         .order('planned_date', { ascending: true }),
@@ -200,7 +201,7 @@ export default function FacultyPlannersPage() {
                   {expanded === g.linkId && (
                     <div className="mt-3 border-t border-neutral-100 pt-3 overflow-x-auto">
                       <table className="w-full text-left text-sm">
-                        <thead><tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider"><th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Topic</th><th className="px-3 py-2">Subject</th></tr></thead>
+                        <thead><tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider"><th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Topic</th><th className="px-3 py-2">Subject</th><th className="px-3 py-2">Room</th></tr></thead>
                         <tbody className="divide-y divide-neutral-100">
                           {g.lectures.map((l) => (
                             <tr key={l.id}>
@@ -208,6 +209,7 @@ export default function FacultyPlannersPage() {
                               <td className="px-3 py-2 text-neutral-500">{formatTime(l.start_time)} · {l.duration_minutes}m</td>
                               <td className="px-3 py-2"><div className="font-medium text-neutral-950">{l.topic_name}</div><div className="text-xs text-neutral-500">Ch {l.chapter}</div></td>
                               <td className="px-3 py-2 text-neutral-600">{subjName(l.subjects)}</td>
+                              <td className="px-3 py-2 text-neutral-600">{one(l.classrooms)?.name ?? '—'}</td>
                             </tr>
                           ))}
                         </tbody>

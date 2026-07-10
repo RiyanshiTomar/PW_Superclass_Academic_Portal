@@ -12,6 +12,7 @@ const NAV = [
   { label: 'Batch Managers', href: '/admin/batch-managers' },
   { label: 'Branch Heads', href: '/admin/branch-heads' },
   { label: 'Credentials', href: '/admin/credentials' },
+  { label: 'Attendance', href: '/admin/attendance' },
   { label: 'Audit Log', href: '/admin/audit-log' },
 ]
 

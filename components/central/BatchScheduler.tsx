@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { checkWeeklyScheduleOverlap } from '@/lib/scheduling'
+import { checkWeeklyScheduleOverlap, checkClassroomScheduleOverlap } from '@/lib/scheduling'
 import { assignPlanner } from '@/lib/planners'
 import { validateBatchDates, validateTimeRange } from '@/lib/validation'
 import { DAYS, timesOverlap } from '@/lib/utils'
@@ -11,8 +11,10 @@ import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/
 type Program = { id: string; name: string }
 type Centre = { id: string; name: string }
 type Subject = { id: string; name: string; program_id: string | null }
+type Classroom = { id: string; name: string; room_no: string | null; centre_id: string; is_active: boolean }
 type Faculty = { id: string; full_name: string; email: string; centre_id: string | null }
 type UserCentre = { user_id: string; centre_id: string }
+type FacultySubject = { faculty_id: string; subject_id: string }
 type Manager = { id: string; full_name: string; role: string | null; roles?: string[]; centre_id: string | null }
 type Planner = { id: string; name: string }
 type Link = { id: string; batch_id: string; planner_id: string; faculty_id: string; stage: string; planners: { name: string } | { name: string }[] | null }
@@ -31,6 +33,7 @@ type Batch = {
 type ScheduleRow = {
   faculty_id: string
   subject_id: string
+  classroom_id: string
   start_time: string
   end_time: string
   days: boolean[]
@@ -42,6 +45,7 @@ type FlatSchedule = {
   end_time: string
   faculty_id: string
   subject_id: string | null
+  classroom_id: string | null
 }
 
 function flattenRows(rows: ScheduleRow[]): FlatSchedule[] {
@@ -56,6 +60,7 @@ function flattenRows(rows: ScheduleRow[]): FlatSchedule[] {
           end_time: row.end_time,
           faculty_id: row.faculty_id,
           subject_id: row.subject_id || null,
+          classroom_id: row.classroom_id || null,
         })
       }
     })
@@ -75,6 +80,7 @@ export default function BatchScheduler() {
   const [programs, setPrograms] = useState<Program[]>([])
   const [centres, setCentres] = useState<Centre[]>([])
   const [subjects, setSubjects] = useState<Subject[]>([])
+  const [classrooms, setClassrooms] = useState<Classroom[]>([])
   const [faculty, setFaculty] = useState<Faculty[]>([])
   const [managers, setManagers] = useState<Manager[]>([])
   const [planners, setPlanners] = useState<Planner[]>([])
@@ -94,6 +100,7 @@ export default function BatchScheduler() {
   const [managerId, setManagerId] = useState('')
   const [scheduleRows, setScheduleRows] = useState<ScheduleRow[]>([])
   const [userCentres, setUserCentres] = useState<UserCentre[]>([])
+  const [facultySubjects, setFacultySubjects] = useState<FacultySubject[]>([])
 
   // Attach-planner modal
   const [attachBatch, setAttachBatch] = useState<Batch | null>(null)
@@ -105,6 +112,32 @@ export default function BatchScheduler() {
     const ids = new Set(userCentres.filter((uc) => uc.centre_id === centreId).map((uc) => uc.user_id))
     return faculty.filter((f) => ids.has(f.id) || f.centre_id === centreId)
   }, [faculty, centreId, userCentres])
+
+  // Active rooms at the selected centre — a class must run in one of these.
+  const centreClassrooms = useMemo(
+    () => (centreId ? classrooms.filter((c) => c.centre_id === centreId && c.is_active) : []),
+    [classrooms, centreId]
+  )
+
+  const roomName = (id: string) => classrooms.find((c) => c.id === id)?.name ?? 'Room'
+
+  // subject_id -> set of faculty ids that teach it (from admin faculty→subjects mapping)
+  const subjectFacultyIds = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const fs of facultySubjects) {
+      if (!m.has(fs.subject_id)) m.set(fs.subject_id, new Set())
+      m.get(fs.subject_id)!.add(fs.faculty_id)
+    }
+    return m
+  }, [facultySubjects])
+
+  // Faculty at this centre who actually teach the given subject.
+  // Falls back to all centre faculty when the subject has no mapping yet (so the form is never a dead-end).
+  const facultyForSubject = (subjectId: string) => {
+    const allowed = subjectFacultyIds.get(subjectId)
+    if (!allowed || allowed.size === 0) return centreFaculty
+    return centreFaculty.filter((f) => allowed.has(f.id))
+  }
 
   const centreManagers = useMemo(() => {
     if (!centreId) return []
@@ -131,9 +164,9 @@ export default function BatchScheduler() {
         if (forSub.length) {
           const days = [false, false, false, false, false, false, false]
           forSub.forEach((f) => { days[f.day_of_week] = true })
-          return { subject_id: s.id, faculty_id: forSub[0].faculty_id, start_time: forSub[0].start_time.slice(0, 5), end_time: forSub[0].end_time.slice(0, 5), days }
+          return { subject_id: s.id, faculty_id: forSub[0].faculty_id, classroom_id: forSub[0].classroom_id || '', start_time: forSub[0].start_time.slice(0, 5), end_time: forSub[0].end_time.slice(0, 5), days }
         }
-        return { subject_id: s.id, faculty_id: '', start_time: '09:00', end_time: '10:00', days: [false, false, false, false, false, false, false] }
+        return { subject_id: s.id, faculty_id: '', classroom_id: '', start_time: '09:00', end_time: '10:00', days: [false, false, false, false, false, false, false] }
       })
 
   const handleProgramChange = (pid: string) => {
@@ -144,16 +177,18 @@ export default function BatchScheduler() {
   const loadData = async () => {
     setLoading(true)
     setMessage(null)
-    const [batchesRes, progRes, centRes, subjRes, facRes, manRes, ucRes, planRes, linkRes] = await Promise.all([
+    const [batchesRes, progRes, centRes, subjRes, classRes, facRes, manRes, ucRes, planRes, linkRes, fsRes] = await Promise.all([
       supabase.from('batches').select('*').order('created_at', { ascending: false }),
       supabase.from('programs').select('*').order('name'),
       supabase.from('centres').select('id, name').order('name'),
       supabase.from('subjects').select('id, name, program_id').order('name'),
+      supabase.from('classrooms').select('id, name, room_no, centre_id, is_active').order('room_no'),
       supabase.rpc('list_active_faculty', { p_centre_id: null }),
       supabase.from('app_users').select('id, full_name, email, role, roles, centre_id').or('role.eq.batch_manager,roles.cs.{batch_manager}').eq('status', 'active').order('full_name'),
       supabase.from('user_centres').select('user_id, centre_id'),
       supabase.from('planners').select('id, name').order('created_at', { ascending: false }),
       supabase.from('batch_planner_links').select('id, batch_id, planner_id, faculty_id, stage, planners(name)'),
+      supabase.from('faculty_subjects').select('faculty_id, subject_id'),
     ])
 
     if (batchesRes.error) setMessage({ type: 'error', text: batchesRes.error.message })
@@ -161,6 +196,7 @@ export default function BatchScheduler() {
     if (progRes.data) setPrograms(progRes.data)
     if (centRes.data) setCentres(centRes.data as Centre[])
     if (subjRes.data) setSubjects(subjRes.data as Subject[])
+    if (classRes.data) setClassrooms(classRes.data as Classroom[])
 
     if (facRes.error) {
       const fb = await supabase.from('app_users').select('id, full_name, email, centre_id').or('role.eq.faculty,roles.cs.{faculty}').eq('status', 'active').order('full_name')
@@ -173,6 +209,7 @@ export default function BatchScheduler() {
     if (ucRes.data) setUserCentres(ucRes.data as UserCentre[])
     if (planRes.data) setPlanners(planRes.data as Planner[])
     if (linkRes.data) setLinks(linkRes.data as unknown as Link[])
+    if (fsRes.data) setFacultySubjects(fsRes.data as FacultySubject[])
     setLoading(false)
   }
 
@@ -192,11 +229,13 @@ export default function BatchScheduler() {
     })
     setScheduleRows((rows) =>
       rows.map((row) => {
-        if (!row.faculty_id) return row
+        // Rooms belong to a centre — clear on centre change so a stale room can't leak across centres.
+        let next = { ...row, classroom_id: '' }
+        if (!row.faculty_id) return next
         const ids = new Set(userCentres.filter((uc) => uc.centre_id === newCentreId).map((uc) => uc.user_id))
         const fac = faculty.find((f) => f.id === row.faculty_id)
-        if (!ids.has(row.faculty_id) && fac?.centre_id !== newCentreId) return { ...row, faculty_id: '' }
-        return row
+        if (!ids.has(row.faculty_id) && fac?.centre_id !== newCentreId) next = { ...next, faculty_id: '' }
+        return next
       })
     )
   }
@@ -256,10 +295,14 @@ export default function BatchScheduler() {
 
     const centreIds = new Set(userCentres.filter((uc) => uc.centre_id === centreId).map((uc) => uc.user_id))
 
-    // Every subject MUST have a faculty + timing + at least one day.
+    if (centreClassrooms.length === 0) return fail('This centre has no rooms yet. Add classrooms in Admin → Centres first.')
+
+    // Every subject MUST have a faculty + room + timing + at least one day.
     for (const row of scheduleRows) {
       const sName = subjName(row.subject_id)
       if (!row.faculty_id) return fail(`Assign a faculty for "${sName}". All subjects are mandatory.`)
+      if (!row.classroom_id) return fail(`Pick a classroom for "${sName}". Every class needs a room.`)
+      if (!centreClassrooms.some((c) => c.id === row.classroom_id)) return fail(`The room chosen for "${sName}" is not at this centre.`)
       const timeErr = validateTimeRange(row.start_time, row.end_time)
       if (timeErr) return fail(`${sName}: ${timeErr}`)
       if (!row.days.some(Boolean)) return fail(`Pick at least one day for "${sName}".`)
@@ -271,8 +314,15 @@ export default function BatchScheduler() {
 
     for (let i = 0; i < flat.length; i++) {
       for (let j = i + 1; j < flat.length; j++) {
-        if (flat[i].faculty_id === flat[j].faculty_id && flat[i].day_of_week === flat[j].day_of_week && timesOverlap(flat[i].start_time, flat[i].end_time, flat[j].start_time, flat[j].end_time)) {
-          return fail(`Overlap in this batch on ${DAYS[flat[i].day_of_week]}.`)
+        const sameDay = flat[i].day_of_week === flat[j].day_of_week
+        if (!sameDay) continue
+        const clash = timesOverlap(flat[i].start_time, flat[i].end_time, flat[j].start_time, flat[j].end_time)
+        if (!clash) continue
+        if (flat[i].faculty_id === flat[j].faculty_id) {
+          return fail(`Faculty double-booked in this batch on ${DAYS[flat[i].day_of_week]}.`)
+        }
+        if (flat[i].classroom_id && flat[i].classroom_id === flat[j].classroom_id) {
+          return fail(`Room "${roomName(flat[i].classroom_id!)}" is used twice at the same time on ${DAYS[flat[i].day_of_week]}.`)
         }
       }
     }
@@ -282,6 +332,10 @@ export default function BatchScheduler() {
       if (overlap) {
         const facName = faculty.find((f) => f.id === sch.faculty_id)?.full_name ?? 'Faculty'
         return fail(`${facName} — ${overlap} on ${DAYS[sch.day_of_week]}.`)
+      }
+      if (sch.classroom_id) {
+        const roomClash = await checkClassroomScheduleOverlap(supabase, sch.classroom_id, sch.day_of_week, sch.start_time, sch.end_time, editingBatch?.id)
+        if (roomClash) return fail(`Room "${roomName(sch.classroom_id)}" — ${roomClash} on ${DAYS[sch.day_of_week]}.`)
       }
     }
 
@@ -298,7 +352,7 @@ export default function BatchScheduler() {
     if (batchId) {
       await supabase.from('batch_schedules').delete().eq('batch_id', batchId)
       if (flat.length > 0) {
-        const rows = flat.map((s) => ({ batch_id: batchId, day_of_week: s.day_of_week, start_time: s.start_time, end_time: s.end_time, faculty_id: s.faculty_id, subject_id: s.subject_id }))
+        const rows = flat.map((s) => ({ batch_id: batchId, day_of_week: s.day_of_week, start_time: s.start_time, end_time: s.end_time, faculty_id: s.faculty_id, subject_id: s.subject_id, classroom_id: s.classroom_id }))
         const { error } = await supabase.from('batch_schedules').insert(rows)
         if (error) return fail(error.message)
       }
@@ -419,15 +473,16 @@ export default function BatchScheduler() {
                   <h3 className="text-sm font-semibold text-neutral-950 uppercase tracking-wider">Weekly Schedule</h3>
                 </div>
                 <p className="text-xs text-neutral-500 mb-4">
-                  All <span className="font-semibold text-violet-600">{programSubjects.length} subjects</span> of this program must have a faculty &amp; timing — a batch can&apos;t run on one teacher. ({centreFaculty.length} faculty at {centres.find((c) => c.id === centreId)?.name})
+                  All <span className="font-semibold text-violet-600">{programSubjects.length} subjects</span> of this program must have a faculty, a room &amp; timing — a batch can&apos;t run on one teacher. ({centreFaculty.length} faculty · {centreClassrooms.length} room{centreClassrooms.length === 1 ? '' : 's'} at {centres.find((c) => c.id === centreId)?.name})
                 </p>
 
                 <div className="overflow-x-auto border border-neutral-200 rounded-xl mb-8">
-                  <table className="w-full text-sm min-w-[860px]">
+                  <table className="w-full text-sm min-w-[1000px]">
                     <thead>
                       <tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider">
                         <th className="text-left px-4 py-3 font-semibold min-w-[150px]">Subject *</th>
                         <th className="text-left px-3 py-3 font-semibold min-w-[170px]">Faculty *</th>
+                        <th className="text-left px-3 py-3 font-semibold min-w-[150px]">Classroom *</th>
                         <th className="text-left px-3 py-3 font-semibold">Start</th>
                         <th className="text-left px-3 py-3 font-semibold">End</th>
                         {DAYS.map((d) => <th key={d} className="px-2 py-3 font-semibold text-center w-10">{d}</th>)}
@@ -435,7 +490,8 @@ export default function BatchScheduler() {
                     </thead>
                     <tbody className="divide-y divide-neutral-100">
                       {scheduleRows.map((row, rowIndex) => {
-                        const filled = row.faculty_id && row.days.some(Boolean)
+                        const filled = row.faculty_id && row.classroom_id && row.days.some(Boolean)
+                        const subjectFaculty = facultyForSubject(row.subject_id)
                         return (
                         <tr key={row.subject_id} className={filled ? '' : 'bg-amber-50/40'}>
                           <td className="px-4 py-3">
@@ -445,9 +501,15 @@ export default function BatchScheduler() {
                             </span>
                           </td>
                           <td className="px-3 py-3">
-                            <select value={row.faculty_id} onChange={(e) => updateRow(rowIndex, { faculty_id: e.target.value })} className={inputClass}>
-                              <option value="">Select faculty</option>
-                              {centreFaculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
+                            <select value={row.faculty_id} onChange={(e) => updateRow(rowIndex, { faculty_id: e.target.value })} className={inputClass} disabled={subjectFaculty.length === 0}>
+                              <option value="">{subjectFaculty.length === 0 ? 'No faculty for this subject' : 'Select faculty'}</option>
+                              {subjectFaculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
+                            </select>
+                          </td>
+                          <td className="px-3 py-3">
+                            <select value={row.classroom_id} onChange={(e) => updateRow(rowIndex, { classroom_id: e.target.value })} className={inputClass} disabled={centreClassrooms.length === 0}>
+                              <option value="">{centreClassrooms.length === 0 ? 'No rooms at centre' : 'Select room'}</option>
+                              {centreClassrooms.map((c) => <option key={c.id} value={c.id}>{c.room_no ? `${c.room_no} · ${c.name}` : c.name}</option>)}
                             </select>
                           </td>
                           <td className="px-3 py-3"><input type="time" value={row.start_time} onChange={(e) => updateRow(rowIndex, { start_time: e.target.value })} className={inputClass} /></td>

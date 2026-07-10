@@ -15,7 +15,13 @@ tsconfig.tsbuildinfo
 
 # misc
 .DS_Store
+Thumbs.db
 *.pem
+*.log
+
+# build tooling caches
+.turbo/
+/coverage
 
 # debug logs
 npm-debug.log*
@@ -38,3 +44,8 @@ yarn-error.log*
 
 # local data CSVs (contain PII — do not commit)
 /Acad Portal*.csv
+
+# Google service account key (attendance sync) — NEVER commit
+/service-account.json
+service-account*.json
+*.credentials.json

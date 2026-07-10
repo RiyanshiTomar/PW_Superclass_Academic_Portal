@@ -4,7 +4,8 @@ import PortalShell from '@/components/PortalShell'
 import { getAppUser } from '@/lib/auth'
 
 const NAV = [
-  { label: 'Dashboard', href: '/batch-manager' },
+  { label: 'Dashboard', href: '/batch-manager', icon: '📋' },
+  { label: 'Attendance', href: '/batch-manager/attendance', icon: '🗓️' },
 ]
 
 export default async function BatchManagerLayout({ children }: { children: React.ReactNode }) {

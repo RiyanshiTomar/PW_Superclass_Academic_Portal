@@ -42,6 +42,42 @@ export async function checkWeeklyScheduleOverlap(
   return false
 }
 
+/** Recurring weekly batch_schedules overlap for a ROOM — one classroom can
+ *  only host one class at a time (checked across every batch at the centre). */
+export async function checkClassroomScheduleOverlap(
+  supabase: SupabaseClient,
+  classroomId: string,
+  dayOfWeek: number,
+  startTime: string,
+  endTime: string,
+  ignoreBatchId?: string
+): Promise<string | false> {
+  let query = supabase
+    .from('batch_schedules')
+    .select('start_time, end_time, batches(name)')
+    .eq('classroom_id', classroomId)
+    .eq('day_of_week', dayOfWeek)
+
+  if (ignoreBatchId) query = query.neq('batch_id', ignoreBatchId)
+
+  const { data } = await query
+  if (!data?.length) return false
+
+  for (const row of data) {
+    if (
+      timesOverlap(
+        startTime,
+        endTime,
+        row.start_time.slice(0, 5),
+        row.end_time.slice(0, 5)
+      )
+    ) {
+      return `Room already hosts batch "${batchName(row.batches)}"`
+    }
+  }
+  return false
+}
+
 /** One-off batch_planners on a specific date */
 export async function checkPlannerTimeOverlap(
   supabase: SupabaseClient,

@@ -6,6 +6,7 @@ import { getAppUser } from '@/lib/auth'
 const NAV = [
   { label: 'Central Hub', href: '/central', icon: '🎛️' },
   { label: 'Reschedule Requests', href: '/central/reschedule-requests', icon: '🔁' },
+  { label: 'Attendance', href: '/central/attendance', icon: '🗓️' },
 ]
 
 export default async function CentralLayout({ children }: { children: React.ReactNode }) {

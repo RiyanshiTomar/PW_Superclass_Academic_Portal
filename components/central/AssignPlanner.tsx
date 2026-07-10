@@ -18,6 +18,7 @@ type Lecture = {
   stage: string
   subjects: { name: string } | { name: string }[] | null
   app_users: { full_name: string } | { full_name: string }[] | null
+  classrooms: { name: string } | { name: string }[] | null
 }
 type Link = {
   id: string
@@ -113,7 +114,7 @@ export default function AssignPlanner() {
     if (!lecturesByLink[link.id]) {
       const { data } = await supabase
         .from('batch_planners')
-        .select('id, topic_name, chapter, planned_date, start_time, duration_minutes, stage, subjects(name), app_users(full_name)')
+        .select('id, topic_name, chapter, planned_date, start_time, duration_minutes, stage, subjects(name), app_users(full_name), classrooms(name)')
         .eq('link_id', link.id)
         .order('planned_date', { ascending: true })
       setLecturesByLink((prev) => ({ ...prev, [link.id]: (data ?? []) as unknown as Lecture[] }))
@@ -123,6 +124,7 @@ export default function AssignPlanner() {
   const inputClass = 'w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500'
   const subjName = (v: Lecture['subjects']) => { const s = one(v); return s?.name ?? '—' }
   const facName = (v: Lecture['app_users']) => { const f = one(v); return f?.full_name ?? '—' }
+  const roomName = (v: Lecture['classrooms']) => { const r = one(v); return r?.name ?? '—' }
 
   return (
     <div className="space-y-6">
@@ -192,7 +194,7 @@ export default function AssignPlanner() {
                       ) : (
                         <div className="overflow-x-auto">
                           <table className="w-full text-left text-sm">
-                            <thead><tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider"><th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Topic</th><th className="px-3 py-2">Subject</th><th className="px-3 py-2">Faculty</th></tr></thead>
+                            <thead><tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider"><th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Topic</th><th className="px-3 py-2">Subject</th><th className="px-3 py-2">Faculty</th><th className="px-3 py-2">Room</th></tr></thead>
                             <tbody className="divide-y divide-neutral-100">
                               {lectures.map((l) => (
                                 <tr key={l.id}>
@@ -201,6 +203,7 @@ export default function AssignPlanner() {
                                   <td className="px-3 py-2"><div className="font-medium text-neutral-950">{l.topic_name}</div><div className="text-xs text-neutral-500">Ch {l.chapter}</div></td>
                                   <td className="px-3 py-2 text-neutral-600">{subjName(l.subjects)}</td>
                                   <td className="px-3 py-2 text-neutral-600">{facName(l.app_users)}</td>
+                                  <td className="px-3 py-2 text-neutral-600">{roomName(l.classrooms)}</td>
                                 </tr>
                               ))}
                             </tbody>

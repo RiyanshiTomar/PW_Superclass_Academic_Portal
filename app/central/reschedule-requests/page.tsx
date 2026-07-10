@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
-import { cascadeReschedule, cascadeCancel } from '@/lib/planners'
+import { cascadeReschedule, cascadeCancel, addExtraLecture } from '@/lib/planners'
+import { toMinutes } from '@/lib/utils'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
 
 type RescheduleRequest = {
@@ -15,6 +16,9 @@ type RescheduleRequest = {
   original_start_time?: string
   requested_date: string | null
   requested_start_time?: string | null
+  requested_end_time?: string | null
+  extra_topic?: string | null
+  extra_chapter?: string | null
   reason: string
   status: string
   review_notes?: string
@@ -28,7 +32,11 @@ type RescheduleRequest = {
 }
 
 function isCancellation(req: RescheduleRequest) {
-  return req.request_type === 'cancel' || !req.requested_date
+  return req.request_type === 'cancel' || (req.request_type !== 'extra' && !req.requested_date)
+}
+
+function isExtra(req: RescheduleRequest) {
+  return req.request_type === 'extra'
 }
 
 export default function RescheduleRequestsPage() {
@@ -71,9 +79,17 @@ export default function RescheduleRequestsPage() {
     // Apply the change to the planner first (cascade), so we don't mark it
     // approved if the shift would create an overlap.
     if (req.planner_id) {
-      const result = isCancellation(req)
-        ? await cascadeCancel(supabase, req.planner_id)
-        : await cascadeReschedule(supabase, req.planner_id, req.requested_date!, req.requested_start_time ?? null)
+      let result: { ok: boolean; error?: string }
+      if (isExtra(req)) {
+        const dur = req.requested_start_time && req.requested_end_time
+          ? toMinutes(req.requested_end_time.slice(0, 5)) - toMinutes(req.requested_start_time.slice(0, 5))
+          : undefined
+        result = await addExtraLecture(supabase, req.planner_id, req.requested_date!, req.requested_start_time ?? null, dur && dur > 0 ? dur : undefined, { topic_name: req.extra_topic ?? null, chapter: req.extra_chapter ?? null })
+      } else if (isCancellation(req)) {
+        result = await cascadeCancel(supabase, req.planner_id)
+      } else {
+        result = await cascadeReschedule(supabase, req.planner_id, req.requested_date!, req.requested_start_time ?? null)
+      }
       if (!result.ok) {
         setReviewingId(null)
         setMessage({ type: 'error', text: result.error ?? 'Could not apply the change.' })
@@ -89,7 +105,7 @@ export default function RescheduleRequestsPage() {
     setReviewingId(null)
     setReviewNotes('')
     if (error) { setMessage({ type: 'error', text: 'Failed to record approval: ' + error.message }); return }
-    setMessage({ type: 'success', text: isCancellation(req) ? 'Cancelled — later lectures shifted up.' : 'Approved — planner updated and subsequent lectures shifted.' })
+    setMessage({ type: 'success', text: isExtra(req) ? 'Approved — extra class added to the faculty calendar.' : isCancellation(req) ? 'Cancelled — later lectures shifted up.' : 'Approved — planner updated and subsequent lectures shifted.' })
     loadRequests()
   }
 
@@ -136,6 +152,7 @@ export default function RescheduleRequestsPage() {
         <div className="space-y-3">
           {requests.map((req) => {
             const cancel = isCancellation(req)
+            const extra = isExtra(req)
             return (
               <Card key={req.id} className="p-4">
                 <div className="flex items-start justify-between gap-4">
@@ -145,12 +162,15 @@ export default function RescheduleRequestsPage() {
                         {req.batch_planners?.batches?.name || 'Batch'} — {req.batch_planners?.subjects?.name || 'Subject'}
                       </p>
                       {cancel && <span className="text-[10px] font-bold uppercase tracking-wider bg-red-50 text-red-700 px-2 py-0.5 rounded-full">Cancellation</span>}
+                      {extra && <span className="text-[10px] font-bold uppercase tracking-wider bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-full">Extra Class</span>}
                     </div>
                     <p className="text-xs text-neutral-500 mt-1">Requested by: {req.app_users?.full_name || 'Unknown'}</p>
                     {req.batch_planners?.topic_name && <p className="text-xs text-neutral-500">Topic: {req.batch_planners.topic_name}</p>}
                     <p className="text-xs text-neutral-500 mt-1">
                       {cancel ? (
                         <>Cancel lecture on {fmt(req.original_date)}{req.original_start_time && ` at ${req.original_start_time.slice(0, 5)}`}</>
+                      ) : extra ? (
+                        <>Add an extra class on {fmt(req.requested_date)}{req.requested_start_time && ` at ${req.requested_start_time.slice(0, 5)}`}{req.requested_end_time && `–${req.requested_end_time.slice(0, 5)}`}{req.extra_topic ? ` — “${req.extra_topic}”${req.extra_chapter ? ` (Ch ${req.extra_chapter})` : ''}` : ''}</>
                       ) : (
                         <>Original: {fmt(req.original_date)}{req.original_start_time && ` at ${req.original_start_time.slice(0, 5)}`} → New: {fmt(req.requested_date)}{req.requested_start_time && ` at ${req.requested_start_time.slice(0, 5)}`}</>
                       )}

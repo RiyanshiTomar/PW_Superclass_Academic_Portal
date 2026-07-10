@@ -25,8 +25,21 @@ export default function CreatePlanner() {
   const [programId, setProgramId] = useState('')
   const [description, setDescription] = useState('')
   const [busy, setBusy] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  const deletePlanner = async (id: string, name: string) => {
+    if (!confirm(`Delete planner "${name}"?\n\nThis permanently removes the planner, all its lectures, and unlinks it from every batch it was assigned to — including lectures already on faculty calendars. This cannot be undone.`)) return
+    setDeletingId(id)
+    setMessage(null)
+    // FKs cascade: planner_lectures, batch_planner_links, and their batch_planners rows all go.
+    const { error } = await supabase.from('planners').delete().eq('id', id)
+    setDeletingId(null)
+    if (error) { setMessage({ type: 'error', text: error.message }); return }
+    setMessage({ type: 'success', text: `Planner "${name}" deleted.` })
+    await loadData()
+  }
 
   const loadData = async () => {
     setLoading(true)
@@ -219,12 +232,21 @@ export default function CreatePlanner() {
         ) : (
           <div className="grid gap-2">
             {planners.map((p) => (
-              <div key={p.id} className="flex items-center justify-between p-3 bg-neutral-50 border border-neutral-200 rounded-xl">
-                <div>
-                  <div className="font-semibold text-neutral-950 text-sm">{p.name}</div>
+              <div key={p.id} className="flex items-center justify-between gap-3 p-3 bg-neutral-50 border border-neutral-200 rounded-xl">
+                <div className="min-w-0">
+                  <div className="font-semibold text-neutral-950 text-sm truncate">{p.name}</div>
                   <div className="text-xs text-neutral-500">{programs.find((pr) => pr.id === p.program_id)?.name ?? 'Any program'}</div>
                 </div>
-                <span className="text-xs font-medium text-neutral-600">{p.planner_lectures?.[0]?.count ?? 0} lectures</span>
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className="text-xs font-medium text-neutral-600">{p.planner_lectures?.[0]?.count ?? 0} lectures</span>
+                  <button
+                    onClick={() => deletePlanner(p.id, p.name)}
+                    disabled={deletingId === p.id}
+                    className="px-3 py-1.5 bg-red-50 hover:bg-red-100 disabled:opacity-50 text-red-700 border border-red-200 rounded-lg text-xs font-semibold"
+                  >
+                    {deletingId === p.id ? 'Deleting…' : 'Delete'}
+                  </button>
+                </div>
               </div>
             ))}
           </div>

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { stageBadgeClass, formatTime } from '@/lib/utils'
+import { notifyRoles } from '@/lib/notifications'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
 
 // A materialised lecture that belongs to me, with its link + planner/batch context.
@@ -142,6 +143,7 @@ export default function FacultyPlannersPage() {
       .eq('stage', 'Faculty Assigned')
     setBusyId(null)
     if (error) { setMessage({ type: 'error', text: error.message }); return }
+    await notifyRoles(supabase, ['central_team'], { type: 'planner', title: 'Planner confirmed', body: `${g.plannerName} · ${g.batchName} confirmed by faculty.`, link: '/central' })
     setMessage({ type: 'success', text: 'Your lectures are confirmed — they now show on your calendar.' })
     await loadData()
   }

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { addDaysToDate, daysBetween, toMinutes } from '@/lib/utils'
 import { isDateInRange } from '@/lib/validation'
+import { notifyUsers } from '@/lib/notifications'
 
 // ============================================================
 // Planner engine: create planners, assign (materialise) them onto
@@ -360,6 +361,14 @@ export async function setLinkStage(
     .from('batch_planners')
     .update({ stage })
     .eq('link_id', linkId)
+
+  // Alert each faculty when their planner is sent to them.
+  if (stage === 'Faculty Assigned') {
+    const { data } = await supabase.from('batch_planners').select('faculty_id').eq('link_id', linkId)
+    await notifyUsers(supabase, (data ?? []).map((r) => r.faculty_id as string), {
+      type: 'planner', title: 'New planner assigned', body: 'Review and confirm your lectures.', link: '/faculty/planners',
+    })
+  }
   return { error: syncErr?.message ?? null }
 }
 

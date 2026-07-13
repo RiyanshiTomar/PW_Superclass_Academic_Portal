@@ -506,7 +506,8 @@ export default function BatchScheduler() {
                     <tbody className="divide-y divide-neutral-100">
                       {scheduleRows.map((row, rowIndex) => {
                         const filled = row.subject_id && row.faculty_id && row.classroom_id && row.days.some(Boolean)
-                        const subjectFaculty = facultyForSubject(row.subject_id)
+                        // Show all faculty of the centre (no subject-based filtering for now).
+                        const subjectFaculty = centreFaculty
                         return (
                         <tr key={rowIndex} className={filled ? '' : 'bg-amber-50/40'}>
                           <td className="px-4 py-3">
@@ -520,7 +521,7 @@ export default function BatchScheduler() {
                           </td>
                           <td className="px-3 py-3">
                             <select value={row.faculty_id} onChange={(e) => updateRow(rowIndex, { faculty_id: e.target.value })} className={inputClass} disabled={subjectFaculty.length === 0}>
-                              <option value="">{subjectFaculty.length === 0 ? 'No faculty for this subject' : 'Select faculty'}</option>
+                              <option value="">{subjectFaculty.length === 0 ? 'No faculty at this centre' : 'Select faculty'}</option>
                               {subjectFaculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                             </select>
                           </td>

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { stageBadgeClass, formatTime } from '@/lib/utils'
+import { notifyRoles } from '@/lib/notifications'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
 type TestRow = {
@@ -54,6 +55,7 @@ export default function FacultyTestsPage() {
     const { error } = await supabase.from('test_schedules').update({ stage: 'Confirmed' }).eq('id', t.id).eq('faculty_id', appUserId).eq('stage', 'Faculty Assigned')
     setBusyId(null)
     if (error) return setMsg({ type: 'error', text: error.message })
+    await notifyRoles(supabase, ['central_team'], { type: 'test', title: 'Test confirmed', body: `${t.name || 'Test'} · ${one(t.batches)?.name ?? ''} confirmed by faculty.`, link: '/central/tests' })
     setMsg({ type: 'success', text: 'Test confirmed — it now shows on your calendar.' })
     await load()
   }
@@ -78,6 +80,7 @@ export default function FacultyTestsPage() {
     })
     setSubmitting(false)
     if (error) return setMsg({ type: 'error', text: 'Failed: ' + error.message })
+    await notifyRoles(supabase, ['central_team'], { type: 'reschedule', title: 'Test reschedule request', body: `${sel.name || 'Test'} — ${one(sel.batches)?.name ?? ''}.`, link: '/central/reschedule-requests' })
     setSel(null)
     setMsg({ type: 'success', text: 'Reschedule request sent to Central Team.' })
     await load()

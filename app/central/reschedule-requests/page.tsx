@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { cascadeReschedule, cascadeCancel, addExtraLecture } from '@/lib/planners'
 import { rescheduleTest } from '@/lib/tests'
+import { notify } from '@/lib/notifications'
 import { toMinutes } from '@/lib/utils'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
 
@@ -24,6 +25,7 @@ type RescheduleRequest = {
   status: string
   review_notes?: string
   created_at: string
+  requested_by?: string
   test_id?: string
   app_users?: { full_name: string }
   batch_planners?: {
@@ -128,6 +130,7 @@ export default function RescheduleRequestsPage() {
     setReviewingId(null)
     setReviewNotes('')
     if (error) { setMessage({ type: 'error', text: 'Failed to record approval: ' + error.message }); return }
+    await notify(supabase, req.requested_by, { type: 'reschedule', title: 'Request approved', body: 'Your request was approved by Central.', link: isTest(req) ? '/faculty/tests' : '/faculty/calendar' })
     setMessage({ type: 'success', text: isTest(req) ? 'Approved — test moved to the new slot.' : isExtra(req) ? 'Approved — extra class added to the faculty calendar.' : isCancellation(req) ? 'Cancelled — later lectures shifted up.' : 'Approved — planner updated and subsequent lectures shifted.' })
     loadRequests()
   }
@@ -147,6 +150,7 @@ export default function RescheduleRequestsPage() {
     setReviewingId(null)
     setReviewNotes('')
     if (error) { setMessage({ type: 'error', text: 'Failed to reject: ' + error.message }); return }
+    await notify(supabase, req.requested_by, { type: 'reschedule', title: 'Request rejected', body: reviewNotes ? `Central: ${reviewNotes}` : 'Your request was rejected by Central.', link: isTest(req) ? '/faculty/tests' : '/faculty/calendar' })
     setMessage({ type: 'success', text: 'Request rejected.' })
     loadRequests()
   }

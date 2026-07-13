@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import LogoutButton from './LogoutButton'
 import Logo from './Logo'
+import NotificationBell from './NotificationBell'
 
 export type NavItem = { label: string; href: string; icon?: string }
 
@@ -74,6 +75,7 @@ export default function PortalShell({
           <div className="flex items-center gap-3 mb-3">
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-600 text-white text-xs font-bold shadow-md shadow-violet-500/40">{initials(fullName)}</span>
             <p className="text-sm font-semibold text-white truncate">{fullName || 'User'}</p>
+            <div className="ml-auto"><NotificationBell align="up" /></div>
           </div>
           <Link href="/account" className="block text-center text-xs font-medium text-neutral-400 hover:text-white mb-2 transition-colors">Change password</Link>
           <LogoutButton className="w-full !text-neutral-300 !border-white/15 hover:!bg-white/10 hover:!text-white hover:!border-white/30" />
@@ -83,7 +85,10 @@ export default function PortalShell({
       <div className="flex-1 flex flex-col min-w-0">
         <header className="lg:hidden bg-neutral-950 px-4 py-3 flex items-center justify-between sticky top-0 z-30">
           <Logo variant="full" onDark size="sm" />
-          <LogoutButton className="!text-neutral-300 !border-white/15 hover:!bg-white/10 hover:!text-white" />
+          <div className="flex items-center gap-2">
+            <NotificationBell align="down" />
+            <LogoutButton className="!text-neutral-300 !border-white/15 hover:!bg-white/10 hover:!text-white" />
+          </div>
         </header>
         <main className="flex-1 p-4 sm:p-6 lg:p-10">
           {/* No transform-based animation here: a lingering transform makes it the

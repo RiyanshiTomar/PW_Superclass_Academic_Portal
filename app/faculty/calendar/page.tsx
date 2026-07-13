@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { DAYS, formatTime, toMinutes } from '@/lib/utils'
 import { minutesToTimeString } from '@/lib/validation'
+import { notifyRoles } from '@/lib/notifications'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
 type Lecture = {
@@ -143,6 +144,12 @@ export default function FacultyCalendarPage() {
     })
     setSubmitting(false)
     if (error) { setMessage({ type: 'error', text: 'Failed: ' + error.message }); return }
+    await notifyRoles(supabase, ['central_team'], {
+      type: 'reschedule',
+      title: mode === 'cancel' ? 'Cancellation request' : mode === 'extra' ? 'Extra-class request' : 'Reschedule request',
+      body: `${appUser.full_name} — ${selected.topic_name || 'a lecture'}.`,
+      link: '/central/reschedule-requests',
+    })
     setSelected(null)
     const sentMsg = mode === 'cancel' ? 'Cancellation request sent to Central Team.'
       : mode === 'extra' ? 'Extra-class request sent to Central Team.'

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { toMinutes } from '@/lib/utils'
+import { notify } from '@/lib/notifications'
 
 // ============================================================
 // Test scheduler engine: chapter completion (topics taught by a date),
@@ -221,6 +222,10 @@ export async function setTestStage(
   const patch: Record<string, unknown> = { stage }
   if (stage === 'Faculty Assigned') patch.assigned_at = new Date().toISOString()
   const { error } = await supabase.from('test_schedules').update(patch).eq('id', testId)
+  if (!error && stage === 'Faculty Assigned') {
+    const { data } = await supabase.from('test_schedules').select('faculty_id, name').eq('id', testId).single<{ faculty_id: string | null; name: string }>()
+    await notify(supabase, data?.faculty_id, { type: 'test', title: 'New test assigned', body: `Confirm the test${data?.name ? ` “${data.name}”` : ''}.`, link: '/faculty/tests' })
+  }
   return { error: error?.message ?? null }
 }
 

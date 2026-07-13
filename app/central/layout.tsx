@@ -5,6 +5,11 @@ import { getAppUser } from '@/lib/auth'
 
 const NAV = [
   { label: 'Central Hub', href: '/central', icon: '🎛️' },
+  { label: 'Students', href: '/central/students', icon: '🎓' },
+  { label: 'Calendar', href: '/central/timetable', icon: '📆' },
+  { label: 'Test Scheduler', href: '/central/tests', icon: '📝' },
+  { label: 'Marks Entry', href: '/central/marks-entry', icon: '✍️' },
+  { label: 'Results', href: '/central/results', icon: '📊' },
   { label: 'Reschedule Requests', href: '/central/reschedule-requests', icon: '🔁' },
   { label: 'Attendance', href: '/central/attendance', icon: '🗓️' },
 ]

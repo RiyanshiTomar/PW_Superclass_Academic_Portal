@@ -17,6 +17,12 @@ type Faculty = {
   centre_id: string | null
 }
 
+type Rate = { id: string; faculty_id: string; rate_type: string; amount: number; effective_from: string; created_at: string }
+
+const todayISO = () => { const d = new Date(); d.setHours(12, 0, 0, 0); return d.toISOString().split('T')[0] }
+const fmtDate = (s: string) => new Date(s + 'T12:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+const rateText = (r: Rate) => `₹${Number(r.amount).toLocaleString('en-IN')}${r.rate_type === 'hourly' ? '/hr' : ''}`
+
 export default function ManageFacultyPage() {
   const supabase = createClient()
   const [faculty, setFaculty] = useState<Faculty[]>([])
@@ -38,9 +44,17 @@ export default function ManageFacultyPage() {
   const [centreId, setCentreId] = useState('')
   const [selectedSubjectIds, setSelectedSubjectIds] = useState<string[]>([])
 
+  // Cost / rates
+  const [rates, setRates] = useState<Rate[]>([])
+  const [rateFor, setRateFor] = useState<Faculty | null>(null)
+  const [rType, setRType] = useState('hourly')
+  const [rAmount, setRAmount] = useState('')
+  const [rFrom, setRFrom] = useState(todayISO())
+  const [savingRate, setSavingRate] = useState(false)
+
   const loadAll = async () => {
     setLoading(true)
-    const [facultyRes, centresRes, programsRes, subjectsRes] = await Promise.all([
+    const [facultyRes, centresRes, programsRes, subjectsRes, ratesRes] = await Promise.all([
       supabase
         .from('app_users')
         .select('id, full_name, email, phone, faculty_type, status, centre_id')
@@ -49,6 +63,7 @@ export default function ManageFacultyPage() {
       supabase.from('centres').select('id, name').order('name'),
       supabase.from('programs').select('id, name').order('name'),
       supabase.from('subjects').select('id, name, program_id').order('name'),
+      supabase.from('faculty_rates').select('id, faculty_id, rate_type, amount, effective_from, created_at').order('effective_from', { ascending: false }),
     ])
 
     if (facultyRes.error) {
@@ -58,7 +73,44 @@ export default function ManageFacultyPage() {
     if (centresRes.data) setCentres(centresRes.data)
     if (programsRes.data) setPrograms(programsRes.data)
     if (subjectsRes.data) setSubjects(subjectsRes.data)
+    if (ratesRes.data) setRates(ratesRes.data as Rate[])
     setLoading(false)
+  }
+
+  // The rate applying today = latest effective_from <= today; plus any future one.
+  const facultyRates = (fid: string) => rates.filter((r) => r.faculty_id === fid) // already sorted desc
+  const currentRate = (fid: string) => facultyRates(fid).find((r) => r.effective_from <= todayISO()) ?? null
+  const upcomingRate = (fid: string) => {
+    const future = facultyRates(fid).filter((r) => r.effective_from > todayISO())
+    return future.length ? future[future.length - 1] : null // nearest upcoming
+  }
+
+  const openRates = (f: Faculty) => {
+    setRateFor(f)
+    setRType(f.faculty_type === 'Hourly/Contract' ? 'hourly' : 'fixed')
+    setRAmount(''); setRFrom(todayISO()); setMessage(null)
+  }
+
+  const addRate = async () => {
+    if (!rateFor) return
+    const amt = Number(rAmount)
+    if (!rAmount.trim() || Number.isNaN(amt) || amt < 0) { setMessage({ type: 'error', text: 'Enter a valid amount.' }); return }
+    if (!rFrom) { setMessage({ type: 'error', text: 'Pick an effective-from date.' }); return }
+    setSavingRate(true)
+    const { data: { user } } = await supabase.auth.getUser()
+    const me = user ? (await supabase.from('app_users').select('id').eq('auth_id', user.id).maybeSingle()).data : null
+    const { error } = await supabase.from('faculty_rates').insert({ faculty_id: rateFor.id, rate_type: rType, amount: amt, effective_from: rFrom, created_by: me?.id ?? null })
+    setSavingRate(false)
+    if (error) { setMessage({ type: 'error', text: error.message }); return }
+    setRAmount('')
+    await loadAll()
+    setMessage({ type: 'success', text: `Rate set for ${rateFor.full_name}.` })
+  }
+
+  const deleteRate = async (id: string) => {
+    if (!confirm('Remove this rate entry?')) return
+    const { error } = await supabase.from('faculty_rates').delete().eq('id', id)
+    if (!error) await loadAll()
   }
 
   useEffect(() => {
@@ -428,6 +480,7 @@ export default function ManageFacultyPage() {
                 <th className="text-left px-4 py-2.5 font-medium">Email</th>
                 <th className="text-left px-4 py-2.5 font-medium">Centre</th>
                 <th className="text-left px-4 py-2.5 font-medium">Type</th>
+                <th className="text-left px-4 py-2.5 font-medium">Cost</th>
                 <th className="text-left px-4 py-2.5 font-medium">Status</th>
                 <th className="text-right px-4 py-2.5 font-medium">Actions</th>
               </tr>
@@ -439,6 +492,14 @@ export default function ManageFacultyPage() {
                   <td className="px-4 py-3 text-gray-600">{f.email}</td>
                   <td className="px-4 py-3 text-gray-600">{centres.find((c) => c.id === f.centre_id)?.name || '—'}</td>
                   <td className="px-4 py-3 text-gray-600 text-xs">{f.faculty_type || '—'}</td>
+                  <td className="px-4 py-3 text-xs">
+                    {currentRate(f.id) ? (
+                      <span className="font-medium text-gray-900">{rateText(currentRate(f.id)!)}</span>
+                    ) : (
+                      <span className="text-gray-300">not set</span>
+                    )}
+                    {upcomingRate(f.id) && <span className="ml-1 text-[10px] text-amber-600">→ {rateText(upcomingRate(f.id)!)} {fmtDate(upcomingRate(f.id)!.effective_from)}</span>}
+                  </td>
                   <td className="px-4 py-3">
                     <span
                       className={`text-xs px-2 py-0.5 rounded-full ${
@@ -451,6 +512,12 @@ export default function ManageFacultyPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-right space-x-2">
+                    <button
+                      onClick={() => openRates(f)}
+                      className="text-violet-600 hover:underline text-xs"
+                    >
+                      Cost
+                    </button>
                     <button
                       onClick={() => handleEdit(f)}
                       className="text-blue-600 hover:underline text-xs"
@@ -476,6 +543,71 @@ export default function ManageFacultyPage() {
           </table>
         )}
       </div>
+
+      {rateFor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={() => setRateFor(null)}>
+          <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl border border-gray-200 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-gray-100">
+              <div>
+                <h3 className="font-semibold text-gray-900">Cost / Rate — {rateFor.full_name}</h3>
+                <p className="text-xs text-gray-500">{rateFor.faculty_type || 'Faculty'} · Set a new rate with an effective date. Old dates keep the old rate.</p>
+              </div>
+              <button onClick={() => setRateFor(null)} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-gray-100 text-gray-400">✕</button>
+            </div>
+
+            <div className="p-5 border-b border-gray-100 flex items-end gap-2 flex-wrap">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
+                <select value={rType} onChange={(e) => setRType(e.target.value)} className="h-10 px-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                  <option value="hourly">Hourly (₹/hr)</option>
+                  <option value="fixed">Fixed (lump sum)</option>
+                </select>
+              </div>
+              <div className="w-32">
+                <label className="block text-xs font-medium text-gray-600 mb-1">Amount (₹)</label>
+                <input type="number" min={0} value={rAmount} onChange={(e) => setRAmount(e.target.value)} placeholder="e.g. 100" className="w-full h-10 px-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Effective from</label>
+                <input type="date" value={rFrom} onChange={(e) => setRFrom(e.target.value)} className="h-10 px-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </div>
+              <button onClick={addRate} disabled={savingRate} className="h-10 px-4 bg-violet-600 hover:bg-violet-700 disabled:bg-violet-300 text-white rounded-lg text-sm font-medium">{savingRate ? 'Saving…' : 'Set rate'}</button>
+            </div>
+
+            {message && (
+              <div className={`mx-5 mb-1 p-2 rounded-lg text-sm ${message.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                {message.text}
+                {message.type === 'error' && message.text.toLowerCase().includes('faculty_rates') && <span className="block text-xs mt-1">→ Run <code>scripts/migration-faculty-rates.sql</code> in Supabase first.</span>}
+              </div>
+            )}
+
+            <div className="p-4 overflow-y-auto">
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Rate history</p>
+              {facultyRates(rateFor.id).length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-4">No rate set yet.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {facultyRates(rateFor.id).map((r) => {
+                    const isCurrent = currentRate(rateFor.id)?.id === r.id
+                    const future = r.effective_from > todayISO()
+                    return (
+                      <li key={r.id} className="flex items-center justify-between p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm">
+                        <div>
+                          <span className="font-semibold text-gray-900">{rateText(r)}</span>
+                          <span className="text-gray-500 text-xs ml-2">from {fmtDate(r.effective_from)}</span>
+                          {isCurrent && <span className="ml-2 text-[10px] font-bold uppercase bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded">Current</span>}
+                          {future && <span className="ml-2 text-[10px] font-bold uppercase bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded">Upcoming</span>}
+                        </div>
+                        <button onClick={() => deleteRate(r.id)} className="text-red-500 hover:text-red-700 text-xs">Remove</button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

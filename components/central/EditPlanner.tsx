@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { rematerialiseLink } from '@/lib/planners'
+import { fetchMaster, coverageReport, type Master } from '@/lib/syllabus'
 import { parsePlannedDate, parseDuration, validateOptionalTime } from '@/lib/validation'
 import { Alert, BtnPrimary, BtnSecondary, Card } from '@/components/PortalShell'
 
@@ -35,12 +36,19 @@ export default function EditPlanner() {
   const [links, setLinks] = useState<LinkLite[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [master, setMaster] = useState<Master | null>(null)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
 
   const selected = planners.find((p) => p.id === selectedId) ?? null
   const subjectPool = useMemo(
     () => subjects.filter((s) => !selected?.program_id || s.program_id === selected.program_id),
     [subjects, selected]
+  )
+  const chapterOptions = useMemo(() => (master ? Array.from(new Set(master.subjects.flatMap((s) => s.chapters.map((c) => c.name)))) : []), [master])
+  const topicOptions = useMemo(() => (master ? Array.from(new Set(master.subjects.flatMap((s) => s.chapters.flatMap((c) => c.topics)))) : []), [master])
+  const coverage = useMemo(
+    () => (master ? coverageReport(master, rows.map((r) => ({ subject_id: r.subject_id || null, chapter: r.chapter, topic_name: r.topic_name }))) : null),
+    [master, rows]
   )
 
   useEffect(() => {
@@ -62,7 +70,9 @@ export default function EditPlanner() {
   const selectPlanner = async (id: string) => {
     setSelectedId(id)
     setMessage(null)
-    if (!id) { setRows([]); setLinks([]); return }
+    if (!id) { setRows([]); setLinks([]); setMaster(null); return }
+    const prog = planners.find((p) => p.id === id)?.program_id ?? null
+    fetchMaster(supabase, prog ?? '').then(setMaster)
     const [lecRes, linkRes] = await Promise.all([
       supabase.from('planner_lectures').select('subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes').eq('planner_id', id).order('sequence_no', { ascending: true }),
       supabase.from('batch_planner_links').select('id, stage, batches(name)').eq('planner_id', id),
@@ -139,7 +149,33 @@ export default function EditPlanner() {
 
   return (
     <div className="space-y-6">
+      <datalist id="ep-chapters">{chapterOptions.map((c) => <option key={c} value={c} />)}</datalist>
+      <datalist id="ep-topics">{topicOptions.map((t) => <option key={t} value={t} />)}</datalist>
+
       {message && <Alert type={message.type === 'info' ? 'info' : message.type}>{message.text}</Alert>}
+
+      {selected && coverage && coverage.hasMaster && (
+        <Card className="p-5">
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="font-semibold text-neutral-950">Syllabus coverage</h4>
+            <span className={`text-sm font-bold ${coverage.chaptersCovered === coverage.chaptersTotal ? 'text-emerald-600' : 'text-amber-600'}`}>{coverage.chaptersCovered}/{coverage.chaptersTotal} chapters fully covered</span>
+          </div>
+          {coverage.unknown.length > 0 && (
+            <div className="mb-2 text-xs bg-rose-50 border border-rose-200 rounded-lg p-2 text-rose-700"><span className="font-semibold">Not in syllabus (check spelling):</span> {coverage.unknown.slice(0, 12).join(', ')}</div>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {coverage.subjects.map((s) => (
+              <span key={s.subjectId} className={`text-xs px-2 py-1 rounded-lg border ${s.chaptersCovered === s.chaptersTotal ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}
+                title={s.missing.length ? `Missing: ${s.missing.map((m) => m.chapter).join(', ')}` : 'Fully covered'}>
+                {s.name}: {s.chaptersCovered}/{s.chaptersTotal}
+              </span>
+            ))}
+          </div>
+          {coverage.chaptersCovered < coverage.chaptersTotal && (
+            <p className="text-xs text-neutral-400 mt-2">Hover a subject to see missing chapters. Use the chapter/topic suggestions so names match the master.</p>
+          )}
+        </Card>
+      )}
 
       <Card className="p-6">
         <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Select Planner to Edit</label>
@@ -192,8 +228,8 @@ export default function EditPlanner() {
                           {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                         </select>
                       </td>
-                      <td className="px-3 py-2"><input value={r.chapter} onChange={(e) => updateRow(i, { chapter: e.target.value })} className={inputClass} placeholder="Ch 1" /></td>
-                      <td className="px-3 py-2"><input value={r.topic_name} onChange={(e) => updateRow(i, { topic_name: e.target.value })} className={inputClass} placeholder="Topic" /></td>
+                      <td className="px-3 py-2"><input list="ep-chapters" value={r.chapter} onChange={(e) => updateRow(i, { chapter: e.target.value })} className={inputClass} placeholder="Ch 1" /></td>
+                      <td className="px-3 py-2"><input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(i, { topic_name: e.target.value })} className={inputClass} placeholder="Topic" /></td>
                       <td className="px-3 py-2"><input type="date" value={r.planned_date} onChange={(e) => updateRow(i, { planned_date: e.target.value })} className={inputClass} /></td>
                       <td className="px-3 py-2"><input type="time" value={r.start_time} onChange={(e) => updateRow(i, { start_time: e.target.value })} className={inputClass} /></td>
                       <td className="px-3 py-2"><input type="number" min={15} max={480} value={r.duration_minutes} onChange={(e) => updateRow(i, { duration_minutes: e.target.value })} className={`${inputClass} w-20`} /></td>

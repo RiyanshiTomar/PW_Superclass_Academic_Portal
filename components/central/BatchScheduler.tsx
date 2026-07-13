@@ -266,6 +266,13 @@ export default function BatchScheduler() {
     setScheduleRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)))
   }
 
+  const addRow = () => setScheduleRows((prev) => [
+    ...prev,
+    { subject_id: programSubjects[0]?.id ?? '', faculty_id: '', classroom_id: '', start_time: '09:00', end_time: '10:00', days: [false, false, false, false, false, false, false] },
+  ])
+
+  const removeRow = (index: number) => setScheduleRows((prev) => prev.filter((_, i) => i !== index))
+
   const toggleDay = (rowIndex: number, dayIndex: number) => {
     if (!centreId) return
     setScheduleRows((prev) =>
@@ -297,18 +304,25 @@ export default function BatchScheduler() {
 
     if (centreClassrooms.length === 0) return fail('This centre has no rooms yet. Add classrooms in Admin → Centres first.')
 
-    // Every subject MUST have a faculty + room + timing + at least one day.
-    for (const row of scheduleRows) {
+    // Each row needs a subject + faculty + room + timing + at least one day.
+    for (let idx = 0; idx < scheduleRows.length; idx++) {
+      const row = scheduleRows[idx]
+      if (!row.subject_id) return fail(`Pick a subject for row ${idx + 1}.`)
       const sName = subjName(row.subject_id)
-      if (!row.faculty_id) return fail(`Assign a faculty for "${sName}". All subjects are mandatory.`)
-      if (!row.classroom_id) return fail(`Pick a classroom for "${sName}". Every class needs a room.`)
+      if (!row.faculty_id) return fail(`Assign a faculty for "${sName}" (row ${idx + 1}).`)
+      if (!row.classroom_id) return fail(`Pick a classroom for "${sName}" (row ${idx + 1}). Every class needs a room.`)
       if (!centreClassrooms.some((c) => c.id === row.classroom_id)) return fail(`The room chosen for "${sName}" is not at this centre.`)
       const timeErr = validateTimeRange(row.start_time, row.end_time)
-      if (timeErr) return fail(`${sName}: ${timeErr}`)
-      if (!row.days.some(Boolean)) return fail(`Pick at least one day for "${sName}".`)
+      if (timeErr) return fail(`${sName} (row ${idx + 1}): ${timeErr}`)
+      if (!row.days.some(Boolean)) return fail(`Pick at least one day for "${sName}" (row ${idx + 1}).`)
       const fac = faculty.find((f) => f.id === row.faculty_id)
       if (!centreIds.has(row.faculty_id) && fac?.centre_id !== centreId) return fail(`${fac?.full_name ?? 'Faculty'} does not teach at this centre.`)
     }
+
+    // Every subject of the program must have at least one slot (extra slots allowed).
+    const covered = new Set(scheduleRows.map((r) => r.subject_id))
+    const missing = programSubjects.filter((s) => !covered.has(s.id))
+    if (missing.length > 0) return fail(`No class yet for: ${missing.map((s) => s.name).join(', ')}. Every subject needs at least one slot.`)
 
     const flat = flattenRows(scheduleRows)
 
@@ -473,7 +487,7 @@ export default function BatchScheduler() {
                   <h3 className="text-sm font-semibold text-neutral-950 uppercase tracking-wider">Weekly Schedule</h3>
                 </div>
                 <p className="text-xs text-neutral-500 mb-4">
-                  All <span className="font-semibold text-violet-600">{programSubjects.length} subjects</span> of this program must have a faculty, a room &amp; timing — a batch can&apos;t run on one teacher. ({centreFaculty.length} faculty · {centreClassrooms.length} room{centreClassrooms.length === 1 ? '' : 's'} at {centres.find((c) => c.id === centreId)?.name})
+                  All <span className="font-semibold text-violet-600">{programSubjects.length} subjects</span> of this program must have at least one slot (faculty, room &amp; timing). Add extra rows for more classes of any subject — overlaps are always blocked. ({centreFaculty.length} faculty · {centreClassrooms.length} room{centreClassrooms.length === 1 ? '' : 's'} at {centres.find((c) => c.id === centreId)?.name})
                 </p>
 
                 <div className="overflow-x-auto border border-neutral-200 rounded-xl mb-8">
@@ -486,19 +500,23 @@ export default function BatchScheduler() {
                         <th className="text-left px-3 py-3 font-semibold">Start</th>
                         <th className="text-left px-3 py-3 font-semibold">End</th>
                         {DAYS.map((d) => <th key={d} className="px-2 py-3 font-semibold text-center w-10">{d}</th>)}
+                        <th className="w-8" />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-neutral-100">
                       {scheduleRows.map((row, rowIndex) => {
-                        const filled = row.faculty_id && row.classroom_id && row.days.some(Boolean)
+                        const filled = row.subject_id && row.faculty_id && row.classroom_id && row.days.some(Boolean)
                         const subjectFaculty = facultyForSubject(row.subject_id)
                         return (
-                        <tr key={row.subject_id} className={filled ? '' : 'bg-amber-50/40'}>
+                        <tr key={rowIndex} className={filled ? '' : 'bg-amber-50/40'}>
                           <td className="px-4 py-3">
-                            <span className="inline-flex items-center gap-2 font-semibold text-neutral-900">
-                              <span className={`h-2 w-2 rounded-full ${filled ? 'bg-emerald-500' : 'bg-amber-400'}`} />
-                              {subjName(row.subject_id)}
-                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className={`h-2 w-2 rounded-full shrink-0 ${filled ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                              <select value={row.subject_id} onChange={(e) => updateRow(rowIndex, { subject_id: e.target.value, faculty_id: '' })} className={inputClass}>
+                                <option value="">Select subject</option>
+                                {programSubjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                              </select>
+                            </div>
                           </td>
                           <td className="px-3 py-3">
                             <select value={row.faculty_id} onChange={(e) => updateRow(rowIndex, { faculty_id: e.target.value })} className={inputClass} disabled={subjectFaculty.length === 0}>
@@ -521,12 +539,19 @@ export default function BatchScheduler() {
                               </button>
                             </td>
                           ))}
+                          <td className="px-2 py-3 text-center">
+                            <button type="button" onClick={() => removeRow(rowIndex)} title="Remove this row" className="text-neutral-300 hover:text-red-600 text-xl leading-none">×</button>
+                          </td>
                         </tr>
                         )
                       })}
                     </tbody>
                   </table>
                 </div>
+
+                <button type="button" onClick={addRow} className="mb-8 inline-flex items-center gap-1 text-sm font-semibold text-violet-600 hover:text-violet-700">
+                  + Add another class
+                </button>
               </>
             )}
 

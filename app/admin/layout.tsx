@@ -7,6 +7,7 @@ const NAV = [
   { label: 'Dashboard', href: '/admin' },
   { label: 'Centres', href: '/admin/centres' },
   { label: 'Programs', href: '/admin/programs' },
+  { label: 'Syllabus', href: '/admin/syllabus' },
   { label: 'Faculty', href: '/admin/faculty' },
   { label: 'Central Team', href: '/admin/central-team' },
   { label: 'Batch Managers', href: '/admin/batch-managers' },

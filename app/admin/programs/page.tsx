@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { mergeProgram } from '@/lib/merge'
 
 type Subject = { id: string; name: string }
 type Program = { id: string; name: string; subjects: Subject[] }
@@ -18,6 +19,9 @@ export default function ManageProgramsPage() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [newSubjectName, setNewSubjectName] = useState('')
+  const [mergeSrc, setMergeSrc] = useState<Program | null>(null)
+  const [mergeTarget, setMergeTarget] = useState('')
+  const [merging, setMerging] = useState(false)
 
   const loadPrograms = async () => {
     setLoading(true)
@@ -141,14 +145,44 @@ export default function ManageProgramsPage() {
     if (!error) loadPrograms()
   }
 
+  const handleMerge = async () => {
+    if (!mergeSrc || !mergeTarget) return
+    setMerging(true)
+    setMessage(null)
+    const res = await mergeProgram(supabase, mergeSrc.id, mergeTarget)
+    setMerging(false)
+    if (!res.ok) { setMessage({ type: 'error', text: 'Merge failed: ' + (res.error ?? '') }); return }
+    const targetName = programs.find((p) => p.id === mergeTarget)?.name ?? 'target'
+    setMessage({ type: 'success', text: `Merged "${mergeSrc.name}" into "${targetName}". All its batches & subjects moved over.` })
+    setMergeSrc(null); setMergeTarget('')
+    loadPrograms()
+  }
+
   const handleDeleteProgram = async (id: string) => {
-    if (!confirm('Delete this program and all its subjects? This cannot be undone.')) return
-    const { error } = await supabase.from('programs').delete().eq('id', id)
-    if (error) {
-      alert('Cannot delete — this program may have batches linked to it.')
-    } else {
-      loadPrograms()
+    const prog = programs.find((p) => p.id === id)
+    const name = prog?.name ?? 'this program'
+
+    // Guard: batches use ON DELETE RESTRICT, so a linked batch would block us.
+    // Tell the user to reassign/remove those batches first (Batch Scheduler → Edit).
+    const { count } = await supabase.from('batches').select('id', { count: 'exact', head: true }).eq('program_id', id)
+    if (count && count > 0) {
+      alert(`Can't delete "${name}" — ${count} batch(es) still use it.\n\nReassign them to the correct program (Central → Batch Scheduler → Edit) or delete those batches first, then try again.`)
+      return
     }
+
+    if (!confirm(`Delete program "${name}" and ALL its subjects, chapters & topics? This cannot be undone.`)) return
+
+    // Subjects use ON DELETE SET NULL from programs, so delete them explicitly
+    // (their chapters/topics cascade). Then remove the program.
+    const subIds = (prog?.subjects ?? []).map((s) => s.id)
+    if (subIds.length > 0) {
+      const { error: sErr } = await supabase.from('subjects').delete().in('id', subIds)
+      if (sErr) { alert('Failed to remove subjects: ' + sErr.message); return }
+    }
+    const { error } = await supabase.from('programs').delete().eq('id', id)
+    if (error) { alert('Failed to delete program: ' + error.message); return }
+    setMessage({ type: 'success', text: `Deleted "${name}" and its syllabus.` })
+    loadPrograms()
   }
 
   return (
@@ -262,6 +296,15 @@ export default function ManageProgramsPage() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
+                      setMergeSrc(p); setMergeTarget(''); setMessage(null)
+                    }}
+                    className="text-violet-600 hover:underline"
+                  >
+                    Merge
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
                       handleDeleteProgram(p.id)
                     }}
                     className="text-red-600 hover:underline"
@@ -309,6 +352,24 @@ export default function ManageProgramsPage() {
           ))
         )}
       </div>
+
+      {mergeSrc && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={() => setMergeSrc(null)}>
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl border border-gray-200 p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-semibold text-gray-900 mb-1">Merge program</h3>
+            <p className="text-sm text-gray-500 mb-4">Move everything from <span className="font-semibold">{mergeSrc.name}</span> into another program — its batches, subjects & chapters all get re-pointed, then <span className="font-semibold">{mergeSrc.name}</span> is deleted. Nothing else breaks.</p>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Merge into</label>
+            <select value={mergeTarget} onChange={(e) => setMergeTarget(e.target.value)} className="w-full h-10 px-3 border border-gray-300 rounded-lg text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-violet-500">
+              <option value="">Select the program to keep</option>
+              {programs.filter((p) => p.id !== mergeSrc.id).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <div className="flex gap-2">
+              <button onClick={handleMerge} disabled={!mergeTarget || merging} className="h-10 px-4 bg-violet-600 hover:bg-violet-700 disabled:bg-violet-300 text-white rounded-lg text-sm font-medium">{merging ? 'Merging…' : 'Merge'}</button>
+              <button onClick={() => setMergeSrc(null)} className="h-10 px-4 border border-gray-300 rounded-lg text-sm font-medium text-gray-700">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

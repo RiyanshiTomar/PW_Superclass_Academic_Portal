@@ -6,6 +6,8 @@ import { getAppUser } from '@/lib/auth'
 const NAV = [
   { label: 'My Batches', href: '/faculty', icon: '📚' },
   { label: 'My Planners', href: '/faculty/planners', icon: '🗂️' },
+  { label: 'My Tests', href: '/faculty/tests', icon: '📝' },
+  { label: 'Results', href: '/faculty/results', icon: '📊' },
   { label: 'Calendar', href: '/faculty/calendar', icon: '📅' },
 ]
 

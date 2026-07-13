@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { cascadeReschedule, cascadeCancel, addExtraLecture } from '@/lib/planners'
+import { rescheduleTest } from '@/lib/tests'
 import { toMinutes } from '@/lib/utils'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
 
@@ -23,16 +24,26 @@ type RescheduleRequest = {
   status: string
   review_notes?: string
   created_at: string
+  test_id?: string
   app_users?: { full_name: string }
   batch_planners?: {
     topic_name: string
     batches?: { name: string }
     subjects?: { name: string }
   }
+  test_schedules?: {
+    name: string
+    batches?: { name: string }
+    subjects?: { name: string }
+  }
+}
+
+function isTest(req: RescheduleRequest) {
+  return req.request_type === 'test' || !!req.test_id
 }
 
 function isCancellation(req: RescheduleRequest) {
-  return req.request_type === 'cancel' || (req.request_type !== 'extra' && !req.requested_date)
+  return req.request_type === 'cancel' || (req.request_type !== 'extra' && !isTest(req) && !req.requested_date)
 }
 
 function isExtra(req: RescheduleRequest) {
@@ -60,7 +71,8 @@ export default function RescheduleRequestsPage() {
       .select(`
         *,
         app_users!reschedule_requests_requested_by_fkey(full_name),
-        batch_planners(topic_name, batches(name), subjects(name))
+        batch_planners(topic_name, batches(name), subjects(name)),
+        test_schedules(name, batches(name), subjects(name))
       `)
       .order('created_at', { ascending: false })
     if (filter !== 'all') query = query.eq('status', filter)
@@ -75,6 +87,17 @@ export default function RescheduleRequestsPage() {
     const { data: { user } } = await supabase.auth.getUser()
     const appUser = user ? await getAppUser(supabase, user) : null
     if (!appUser) { setReviewingId(null); setMessage({ type: 'error', text: 'Session expired.' }); return }
+
+    // A test reschedule re-validates the new slot (room/faculty/batch) then moves it.
+    if (isTest(req) && req.test_id) {
+      const newTime = (req.requested_start_time ?? req.original_start_time ?? '').slice(0, 5)
+      const result = await rescheduleTest(supabase, req.test_id, req.requested_date!, newTime)
+      if (!result.ok) {
+        setReviewingId(null)
+        setMessage({ type: 'error', text: result.error ?? 'Could not reschedule the test.' })
+        return
+      }
+    }
 
     // Apply the change to the planner first (cascade), so we don't mark it
     // approved if the shift would create an overlap.
@@ -105,7 +128,7 @@ export default function RescheduleRequestsPage() {
     setReviewingId(null)
     setReviewNotes('')
     if (error) { setMessage({ type: 'error', text: 'Failed to record approval: ' + error.message }); return }
-    setMessage({ type: 'success', text: isExtra(req) ? 'Approved — extra class added to the faculty calendar.' : isCancellation(req) ? 'Cancelled — later lectures shifted up.' : 'Approved — planner updated and subsequent lectures shifted.' })
+    setMessage({ type: 'success', text: isTest(req) ? 'Approved — test moved to the new slot.' : isExtra(req) ? 'Approved — extra class added to the faculty calendar.' : isCancellation(req) ? 'Cancelled — later lectures shifted up.' : 'Approved — planner updated and subsequent lectures shifted.' })
     loadRequests()
   }
 
@@ -151,6 +174,7 @@ export default function RescheduleRequestsPage() {
       ) : (
         <div className="space-y-3">
           {requests.map((req) => {
+            const test = isTest(req)
             const cancel = isCancellation(req)
             const extra = isExtra(req)
             return (
@@ -159,8 +183,11 @@ export default function RescheduleRequestsPage() {
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
                       <p className="text-sm font-semibold text-neutral-900">
-                        {req.batch_planners?.batches?.name || 'Batch'} — {req.batch_planners?.subjects?.name || 'Subject'}
+                        {test
+                          ? `${req.test_schedules?.batches?.name || 'Batch'} — ${req.test_schedules?.name || 'Test'}`
+                          : `${req.batch_planners?.batches?.name || 'Batch'} — ${req.batch_planners?.subjects?.name || 'Subject'}`}
                       </p>
+                      {test && <span className="text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full">Test</span>}
                       {cancel && <span className="text-[10px] font-bold uppercase tracking-wider bg-red-50 text-red-700 px-2 py-0.5 rounded-full">Cancellation</span>}
                       {extra && <span className="text-[10px] font-bold uppercase tracking-wider bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-full">Extra Class</span>}
                     </div>

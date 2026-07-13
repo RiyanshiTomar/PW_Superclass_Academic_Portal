@@ -86,7 +86,10 @@ export default function PortalShell({
           <LogoutButton className="!text-neutral-300 !border-white/15 hover:!bg-white/10 hover:!text-white" />
         </header>
         <main className="flex-1 p-4 sm:p-6 lg:p-10">
-          <div className="animate-fade-up">{children}</div>
+          {/* No transform-based animation here: a lingering transform makes it the
+              containing block for position:fixed modals, pushing them off-screen on
+              long/scrolled pages. Keep page content transform-free. */}
+          <div>{children}</div>
         </main>
       </div>
     </div>

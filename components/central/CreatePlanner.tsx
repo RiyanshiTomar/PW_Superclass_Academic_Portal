@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { createPlanner, type PlannerLectureInput } from '@/lib/planners'
+import { fetchMaster, coverageReport, type Coverage } from '@/lib/syllabus'
 import { parseCSVWithHeaders, toMinutes } from '@/lib/utils'
 import { parsePlannedDate, parseDuration, validateOptionalTime } from '@/lib/validation'
 import { Alert, BtnPrimary, Card } from '@/components/PortalShell'
@@ -27,6 +28,7 @@ export default function CreatePlanner() {
   const [busy, setBusy] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
+  const [coverage, setCoverage] = useState<Coverage | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const deletePlanner = async (id: string, name: string) => {
@@ -70,6 +72,7 @@ export default function CreatePlanner() {
     }
     setBusy(true)
     setMessage(null)
+    setCoverage(null)
     try {
       const text = await file.text()
       const { headers, rows } = parseCSVWithHeaders(text)
@@ -165,6 +168,12 @@ export default function CreatePlanner() {
       )
       if ('error' in res) { setMessage({ type: 'error', text: res.error }); return }
 
+      // Coverage vs the syllabus master (needs a program to compare against).
+      if (programId) {
+        const master = await fetchMaster(supabase, programId)
+        setCoverage(coverageReport(master, lectures))
+      }
+
       let msg = `Planner "${name.trim()}" created with ${lectures.length} lecture(s).`
       if (errs.length) msg += ` ${errs.length} row(s) skipped: ${errs.slice(0, 3).join('; ')}`
       setMessage({ type: 'success', text: msg + ' Assign it to a batch under "Assign".' })
@@ -183,6 +192,49 @@ export default function CreatePlanner() {
   return (
     <div className="space-y-6">
       {message && <Alert type={message.type === 'info' ? 'info' : message.type}>{message.text}</Alert>}
+
+      {coverage && (
+        !coverage.hasMaster ? (
+          <Card className="p-4 bg-amber-50 border-amber-200">
+            <p className="text-sm text-amber-800">No syllabus master for this program yet — add subjects/chapters/topics in <span className="font-semibold">Admin → Syllabus</span> to enable coverage checks.</p>
+          </Card>
+        ) : (
+          <Card className="p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="font-semibold text-neutral-950">Syllabus coverage</h4>
+              <span className={`text-sm font-bold ${coverage.chaptersCovered === coverage.chaptersTotal ? 'text-emerald-600' : 'text-amber-600'}`}>
+                {coverage.chaptersCovered}/{coverage.chaptersTotal} chapters fully covered
+              </span>
+            </div>
+            {coverage.unknown.length > 0 && (
+              <div className="mb-3 text-xs bg-rose-50 border border-rose-200 rounded-lg p-3 text-rose-700">
+                <span className="font-semibold">Not in syllabus (check spelling):</span> {coverage.unknown.slice(0, 12).join(', ')}{coverage.unknown.length > 12 ? ` +${coverage.unknown.length - 12} more` : ''}
+              </div>
+            )}
+            <div className="space-y-2">
+              {coverage.subjects.map((s) => (
+                <div key={s.subjectId} className="border border-neutral-200 rounded-lg p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-neutral-900">{s.name}</span>
+                    <span className={`text-xs font-semibold ${s.chaptersCovered === s.chaptersTotal ? 'text-emerald-600' : 'text-amber-600'}`}>{s.chaptersCovered}/{s.chaptersTotal}</span>
+                  </div>
+                  {s.missing.length > 0 && (
+                    <ul className="mt-1 text-xs text-neutral-600 space-y-0.5">
+                      {s.missing.map((m) => (
+                        <li key={m.chapter}>
+                          <span className="text-amber-600">⚠</span> {m.chapter}
+                          {m.missingTopics.length > 0 && <span className="text-neutral-400"> — missing: {m.missingTopics.slice(0, 5).join(', ')}{m.missingTopics.length > 5 ? '…' : ''}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-neutral-400 mt-3">Tip: fix names or add the missing lectures, then re-upload (existing planner names are matched to the master).</p>
+          </Card>
+        )
+      )}
 
       <Card className="p-6">
         <h3 className="font-bold text-neutral-950 mb-1">Create a Planner</h3>

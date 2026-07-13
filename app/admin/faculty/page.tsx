@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { parseCSVWithHeaders } from '@/lib/utils'
 
 type Centre = { id: string; name: string }
 type Subject = { id: string; name: string; program_id: string }
@@ -45,6 +46,9 @@ export default function ManageFacultyPage() {
   const [selectedSubjectIds, setSelectedSubjectIds] = useState<string[]>([])
 
   // Cost / rates
+  const [importing, setImporting] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
+
   const [rates, setRates] = useState<Rate[]>([])
   const [rateFor, setRateFor] = useState<Faculty | null>(null)
   const [rType, setRType] = useState('hourly')
@@ -116,6 +120,43 @@ export default function ManageFacultyPage() {
   useEffect(() => {
     loadAll()
   }, [])
+
+  // Fix faculty NAMES only, from a CSV (Name + Email). Matched by email; nothing
+  // else is touched — centre, type, phone, subjects, cost/rates all stay as-is.
+  // Faculty whose email isn't found are skipped (not created).
+  const handleImportCSV = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setImporting(true); setMessage(null)
+    try {
+      const { headers, rows } = parseCSVWithHeaders(await file.text())
+      // Prefer the teacher/faculty name; never grab "Center name" / batch / program columns.
+      let iName = headers.findIndex((h) => h.includes('teacher') || h.includes('faculty name') || h === 'name' || h.includes('full name'))
+      if (iName < 0) iName = headers.findIndex((h) => h.includes('name') && !h.includes('cent') && !h.includes('batch') && !h.includes('program') && !h.includes('scheme') && !h.includes('course'))
+      const iEmail = headers.findIndex((h) => h.includes('email') || h.includes('mail'))
+      if (iEmail < 0 || iName < 0) { setMessage({ type: 'error', text: 'CSV needs a Teacher Name and an Email column.' }); return }
+      const cell = (row: string[], i: number) => (i >= 0 ? (row[i] ?? '').trim() : '')
+
+      let updated = 0, unchanged = 0, notFound = 0, skipped = 0
+      for (const row of rows) {
+        const email = cell(row, iEmail).toLowerCase()
+        const name = cell(row, iName)
+        if (!email || !name) { skipped++; continue }
+        const { data: existing } = await supabase.from('app_users').select('id, full_name').eq('email', email).maybeSingle()
+        if (!existing) { notFound++; continue }
+        if (existing.full_name === name) { unchanged++; continue }
+        await supabase.from('app_users').update({ full_name: name }).eq('id', existing.id) // ONLY the name
+        updated++
+      }
+      setMessage({ type: 'success', text: `Names fixed: ${updated} updated, ${unchanged} already correct${notFound ? `, ${notFound} email not found` : ''}${skipped ? `, ${skipped} skipped` : ''}. Nothing else was changed.` })
+      await loadAll()
+    } catch (err) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to parse CSV.' })
+    } finally {
+      setImporting(false)
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
 
   const resetForm = () => {
     setFullName('')
@@ -311,12 +352,18 @@ export default function ManageFacultyPage() {
           <p className="text-sm text-gray-500">{faculty.length} faculty registered.</p>
         </div>
         {!showForm && (
-          <button
-            onClick={() => setShowForm(true)}
-            className="h-10 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium"
-          >
-            + Add Faculty
-          </button>
+          <div className="flex items-center gap-2">
+            <label className={`inline-flex items-center h-10 px-4 rounded-lg text-sm font-medium cursor-pointer ${importing ? 'bg-gray-200 text-gray-400' : 'bg-gray-900 hover:bg-gray-800 text-white'}`}>
+              {importing ? 'Fixing names…' : 'Fix names (CSV)'}
+              <input ref={fileRef} type="file" accept=".csv" className="sr-only" onChange={handleImportCSV} disabled={importing} />
+            </label>
+            <button
+              onClick={() => setShowForm(true)}
+              className="h-10 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium"
+            >
+              + Add Faculty
+            </button>
+          </div>
         )}
       </div>
 

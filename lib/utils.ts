@@ -65,16 +65,41 @@ export function splitCSVLine(line: string): string[] {
   return row
 }
 
-/** Parse CSV keeping the header row so columns can be matched by name (any order). */
-export function parseCSVWithHeaders(text: string): { headers: string[]; rows: string[][] } {
-  const lines = text.split(/\r?\n/).filter((line) => line.trim())
-  if (lines.length === 0) return { headers: [], rows: [] }
-  const headers = splitCSVLine(lines[0]).map((h) => h.toLowerCase().trim())
+/** Tokenise a whole CSV into rows of cells, correctly handling quoted fields
+ *  that contain commas OR newlines (e.g. a multi-line cell), and "" escapes. */
+export function parseCSVRows(text: string): string[][] {
   const rows: string[][] = []
-  for (let i = 1; i < lines.length; i++) {
-    const row = splitCSVLine(lines[i])
-    if (row.some((cell) => cell.length > 0)) rows.push(row)
+  let row: string[] = []
+  let field = ''
+  let inQuotes = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++ } // escaped quote
+        else inQuotes = false
+      } else field += c
+    } else if (c === '"') {
+      inQuotes = true
+    } else if (c === ',') {
+      row.push(field); field = ''
+    } else if (c === '\n') {
+      row.push(field); rows.push(row); row = []; field = ''
+    } else if (c !== '\r') {
+      field += c
+    }
   }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row) }
+  return rows
+}
+
+/** Parse CSV keeping the header row so columns can be matched by name (any order).
+ *  Robust to quoted commas/newlines inside cells. */
+export function parseCSVWithHeaders(text: string): { headers: string[]; rows: string[][] } {
+  const all = parseCSVRows(text)
+  if (all.length === 0) return { headers: [], rows: [] }
+  const headers = all[0].map((h) => h.toLowerCase().trim())
+  const rows = all.slice(1).filter((r) => r.some((cell) => cell.trim().length > 0))
   return { headers, rows }
 }
 

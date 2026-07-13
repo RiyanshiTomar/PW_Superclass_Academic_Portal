@@ -60,7 +60,7 @@ export default function FacultyCalendarPage() {
       .from('batch_planners')
       .select('id, planned_date, start_time, duration_minutes, topic_name, chapter, stage, batches(name, centres(name)), subjects(name), classrooms(name)')
       .eq('faculty_id', appUser.id)
-      .in('stage', ['Faculty Assigned', 'Confirmed'])
+      .eq('stage', 'Confirmed')   // calendar shows only what the faculty has confirmed
       .order('planned_date', { ascending: true })
     setLectures((data ?? []) as unknown as Lecture[])
     setLoading(false)
@@ -162,7 +162,7 @@ export default function FacultyCalendarPage() {
 
   return (
     <div className="max-w-5xl mx-auto">
-      <PageHeader title="Calendar" description="Your assigned and confirmed lectures. Click a class to request a reschedule or cancellation." />
+      <PageHeader title="Calendar" description="Your confirmed lectures. Confirm assigned planners in My Planners — they appear here once confirmed. Click a class to request a reschedule or cancellation." />
 
       {message && <Alert type={message.type === 'info' ? 'info' : message.type}>{message.text}</Alert>}
 
@@ -232,8 +232,7 @@ export default function FacultyCalendarPage() {
           </div>
         )}
         <div className="flex gap-4 mt-4 text-xs text-neutral-500">
-          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-violet-100 inline-block" /> Assigned</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-100 inline-block" /> Confirmed</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-100 inline-block" /> Confirmed lecture</span>
         </div>
       </Card>
 

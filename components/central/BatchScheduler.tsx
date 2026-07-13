@@ -30,14 +30,17 @@ type Batch = {
   status: string
 }
 
+// Each day of a row carries its OWN timing (Mon can differ from Tue for the
+// same subject). active=false means that day has no class.
+type DaySlot = { active: boolean; start: string; end: string }
 type ScheduleRow = {
   faculty_id: string
   subject_id: string
   classroom_id: string
-  start_time: string
-  end_time: string
-  days: boolean[]
+  days: DaySlot[]   // length 7 (Sun..Sat)
 }
+
+const emptyDays = (): DaySlot[] => Array.from({ length: 7 }, () => ({ active: false, start: '09:00', end: '10:00' }))
 
 type FlatSchedule = {
   day_of_week: number
@@ -52,12 +55,12 @@ function flattenRows(rows: ScheduleRow[]): FlatSchedule[] {
   const result: FlatSchedule[] = []
   for (const row of rows) {
     if (!row.faculty_id) continue
-    row.days.forEach((active, dayIndex) => {
-      if (active) {
+    row.days.forEach((d, dayIndex) => {
+      if (d.active) {
         result.push({
           day_of_week: dayIndex,
-          start_time: row.start_time,
-          end_time: row.end_time,
+          start_time: d.start,
+          end_time: d.end,
           faculty_id: row.faculty_id,
           subject_id: row.subject_id || null,
           classroom_id: row.classroom_id || null,
@@ -155,19 +158,24 @@ export default function BatchScheduler() {
 
   const subjName = (id: string) => subjects.find((s) => s.id === id)?.name ?? 'Subject'
 
-  // One row per subject of the program (subject fixed). Prefill from existing schedule on edit.
-  const buildRows = (pid: string, flat: FlatSchedule[] = []): ScheduleRow[] =>
-    subjects
-      .filter((s) => s.program_id === pid)
-      .map((s) => {
-        const forSub = flat.filter((f) => f.subject_id === s.id)
-        if (forSub.length) {
-          const days = [false, false, false, false, false, false, false]
-          forSub.forEach((f) => { days[f.day_of_week] = true })
-          return { subject_id: s.id, faculty_id: forSub[0].faculty_id, classroom_id: forSub[0].classroom_id || '', start_time: forSub[0].start_time.slice(0, 5), end_time: forSub[0].end_time.slice(0, 5), days }
-        }
-        return { subject_id: s.id, faculty_id: '', classroom_id: '', start_time: '09:00', end_time: '10:00', days: [false, false, false, false, false, false, false] }
-      })
+  // Rebuild rows from an existing schedule. A row = one (subject + faculty + room)
+  // group, with each day carrying its own timing. Every program subject gets at
+  // least an empty row so all subjects are shown.
+  const buildRows = (pid: string, flat: FlatSchedule[] = []): ScheduleRow[] => {
+    const groups = new Map<string, ScheduleRow>()
+    for (const f of flat) {
+      const key = `${f.subject_id ?? ''}|${f.faculty_id}|${f.classroom_id ?? ''}`
+      if (!groups.has(key)) groups.set(key, { subject_id: f.subject_id ?? '', faculty_id: f.faculty_id, classroom_id: f.classroom_id || '', days: emptyDays() })
+      const row = groups.get(key)!
+      row.days[f.day_of_week] = { active: true, start: f.start_time.slice(0, 5), end: f.end_time.slice(0, 5) }
+    }
+    const rows = Array.from(groups.values())
+    // Ensure a row exists for every subject of the program.
+    for (const s of subjects.filter((x) => x.program_id === pid)) {
+      if (!rows.some((r) => r.subject_id === s.id)) rows.push({ subject_id: s.id, faculty_id: '', classroom_id: '', days: emptyDays() })
+    }
+    return rows
+  }
 
   const handleProgramChange = (pid: string) => {
     setProgramId(pid)
@@ -268,7 +276,7 @@ export default function BatchScheduler() {
 
   const addRow = () => setScheduleRows((prev) => [
     ...prev,
-    { subject_id: programSubjects[0]?.id ?? '', faculty_id: '', classroom_id: '', start_time: '09:00', end_time: '10:00', days: [false, false, false, false, false, false, false] },
+    { subject_id: programSubjects[0]?.id ?? '', faculty_id: '', classroom_id: '', days: emptyDays() },
   ])
 
   const removeRow = (index: number) => setScheduleRows((prev) => prev.filter((_, i) => i !== index))
@@ -278,8 +286,17 @@ export default function BatchScheduler() {
     setScheduleRows((prev) =>
       prev.map((r, i) => {
         if (i !== rowIndex) return r
-        const days = [...r.days]
-        days[dayIndex] = !days[dayIndex]
+        const days = r.days.map((d, di) => (di === dayIndex ? { ...d, active: !d.active } : d))
+        return { ...r, days }
+      })
+    )
+  }
+
+  const updateDayTime = (rowIndex: number, dayIndex: number, patch: Partial<DaySlot>) => {
+    setScheduleRows((prev) =>
+      prev.map((r, i) => {
+        if (i !== rowIndex) return r
+        const days = r.days.map((d, di) => (di === dayIndex ? { ...d, ...patch } : d))
         return { ...r, days }
       })
     )
@@ -312,9 +329,12 @@ export default function BatchScheduler() {
       if (!row.faculty_id) return fail(`Assign a faculty for "${sName}" (row ${idx + 1}).`)
       if (!row.classroom_id) return fail(`Pick a classroom for "${sName}" (row ${idx + 1}). Every class needs a room.`)
       if (!centreClassrooms.some((c) => c.id === row.classroom_id)) return fail(`The room chosen for "${sName}" is not at this centre.`)
-      const timeErr = validateTimeRange(row.start_time, row.end_time)
-      if (timeErr) return fail(`${sName} (row ${idx + 1}): ${timeErr}`)
-      if (!row.days.some(Boolean)) return fail(`Pick at least one day for "${sName}" (row ${idx + 1}).`)
+      const activeDays = row.days.map((d, di) => ({ ...d, di })).filter((d) => d.active)
+      if (activeDays.length === 0) return fail(`Pick at least one day for "${sName}" (row ${idx + 1}).`)
+      for (const d of activeDays) {
+        const timeErr = validateTimeRange(d.start, d.end)
+        if (timeErr) return fail(`${sName} · ${DAYS[d.di]} (row ${idx + 1}): ${timeErr}`)
+      }
       const fac = faculty.find((f) => f.id === row.faculty_id)
       if (!centreIds.has(row.faculty_id) && fac?.centre_id !== centreId) return fail(`${fac?.full_name ?? 'Faculty'} does not teach at this centre.`)
     }
@@ -491,21 +511,19 @@ export default function BatchScheduler() {
                 </p>
 
                 <div className="overflow-x-auto border border-neutral-200 rounded-xl mb-8">
-                  <table className="w-full text-sm min-w-[1000px]">
+                  <table className="w-full text-sm min-w-[900px]">
                     <thead>
                       <tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider">
                         <th className="text-left px-4 py-3 font-semibold min-w-[150px]">Subject *</th>
-                        <th className="text-left px-3 py-3 font-semibold min-w-[170px]">Faculty *</th>
+                        <th className="text-left px-3 py-3 font-semibold min-w-[160px]">Faculty *</th>
                         <th className="text-left px-3 py-3 font-semibold min-w-[150px]">Classroom *</th>
-                        <th className="text-left px-3 py-3 font-semibold">Start</th>
-                        <th className="text-left px-3 py-3 font-semibold">End</th>
-                        {DAYS.map((d) => <th key={d} className="px-2 py-3 font-semibold text-center w-10">{d}</th>)}
+                        <th className="text-left px-3 py-3 font-semibold min-w-[300px]">Days &amp; Timings *</th>
                         <th className="w-8" />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-neutral-100">
                       {scheduleRows.map((row, rowIndex) => {
-                        const filled = row.subject_id && row.faculty_id && row.classroom_id && row.days.some(Boolean)
+                        const filled = row.subject_id && row.faculty_id && row.classroom_id && row.days.some((d) => d.active)
                         // Show all faculty of the centre (no subject-based filtering for now).
                         const subjectFaculty = centreFaculty
                         return (
@@ -531,16 +549,24 @@ export default function BatchScheduler() {
                               {centreClassrooms.map((c) => <option key={c.id} value={c.id}>{c.room_no ? `${c.room_no} · ${c.name}` : c.name}</option>)}
                             </select>
                           </td>
-                          <td className="px-3 py-3"><input type="time" value={row.start_time} onChange={(e) => updateRow(rowIndex, { start_time: e.target.value })} className={inputClass} /></td>
-                          <td className="px-3 py-3"><input type="time" value={row.end_time} onChange={(e) => updateRow(rowIndex, { end_time: e.target.value })} className={inputClass} /></td>
-                          {DAYS.map((_, dayIndex) => (
-                            <td key={dayIndex} className="px-2 py-3 text-center">
-                              <button type="button" onClick={() => toggleDay(rowIndex, dayIndex)} className={`w-8 h-8 rounded-lg border text-xs font-bold transition-colors ${row.days[dayIndex] ? 'bg-violet-500 text-white border-violet-600' : 'bg-white text-neutral-300 border-neutral-200 hover:border-neutral-400'}`}>
-                                {row.days[dayIndex] ? '✓' : '—'}
-                              </button>
-                            </td>
-                          ))}
-                          <td className="px-2 py-3 text-center">
+                          <td className="px-3 py-3">
+                            <div className="flex flex-wrap gap-1 mb-1.5">
+                              {DAYS.map((d, dayIndex) => (
+                                <button key={dayIndex} type="button" onClick={() => toggleDay(rowIndex, dayIndex)} className={`w-9 h-8 rounded-lg border text-[11px] font-bold transition-colors ${row.days[dayIndex].active ? 'bg-violet-500 text-white border-violet-600' : 'bg-white text-neutral-400 border-neutral-200 hover:border-neutral-400'}`}>{d}</button>
+                              ))}
+                            </div>
+                            <div className="space-y-1">
+                              {row.days.some((d) => d.active) ? row.days.map((d, dayIndex) => d.active && (
+                                <div key={dayIndex} className="flex items-center gap-2 text-xs">
+                                  <span className="w-9 font-semibold text-neutral-500">{DAYS[dayIndex]}</span>
+                                  <input type="time" value={d.start} onChange={(e) => updateDayTime(rowIndex, dayIndex, { start: e.target.value })} className="h-8 px-2 bg-neutral-50 border border-neutral-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                                  <span className="text-neutral-400">–</span>
+                                  <input type="time" value={d.end} onChange={(e) => updateDayTime(rowIndex, dayIndex, { end: e.target.value })} className="h-8 px-2 bg-neutral-50 border border-neutral-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                                </div>
+                              )) : <span className="text-[11px] text-neutral-400">Pick day(s) above, then set each day&apos;s time.</span>}
+                            </div>
+                          </td>
+                          <td className="px-2 py-3 text-center align-top">
                             <button type="button" onClick={() => removeRow(rowIndex)} title="Remove this row" className="text-neutral-300 hover:text-red-600 text-xl leading-none">×</button>
                           </td>
                         </tr>

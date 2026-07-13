@@ -357,17 +357,24 @@ export async function setLinkStage(
   const { error } = await supabase.from('batch_planner_links').update(patch).eq('id', linkId)
   if (error) return { error: error.message }
 
-  const { error: syncErr } = await supabase
-    .from('batch_planners')
-    .update({ stage })
-    .eq('link_id', linkId)
-
-  // Alert each faculty when their planner is sent to them.
+  let syncErr: { message: string } | null = null
   if (stage === 'Faculty Assigned') {
-    const { data } = await supabase.from('batch_planners').select('faculty_id').eq('link_id', linkId)
+    const today = new Date().toISOString().split('T')[0]
+    // Lectures already in the past are done — auto-confirm them so they sit on
+    // the faculty calendar without asking for confirmation. Only upcoming
+    // lectures (today onward) go to the faculty to confirm.
+    const past = await supabase.from('batch_planners').update({ stage: 'Confirmed' }).eq('link_id', linkId).lt('planned_date', today)
+    const upcoming = await supabase.from('batch_planners').update({ stage: 'Faculty Assigned' }).eq('link_id', linkId).gte('planned_date', today)
+    syncErr = past.error ?? upcoming.error ?? null
+
+    // Alert only faculty who actually have upcoming lectures to confirm.
+    const { data } = await supabase.from('batch_planners').select('faculty_id').eq('link_id', linkId).gte('planned_date', today)
     await notifyUsers(supabase, (data ?? []).map((r) => r.faculty_id as string), {
-      type: 'planner', title: 'New planner assigned', body: 'Review and confirm your lectures.', link: '/faculty/planners',
+      type: 'planner', title: 'New planner assigned', body: 'Review and confirm your upcoming lectures.', link: '/faculty/planners',
     })
+  } else {
+    const { error } = await supabase.from('batch_planners').update({ stage }).eq('link_id', linkId)
+    syncErr = error
   }
   return { error: syncErr?.message ?? null }
 }

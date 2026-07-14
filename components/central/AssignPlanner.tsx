@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { assignPlanner, setLinkStage } from '@/lib/planners'
+import { assignPlanner, setLinkStage, cascadeReschedule } from '@/lib/planners'
+import { notifyUsers } from '@/lib/notifications'
 import { stageBadgeClass, formatTime } from '@/lib/utils'
 import { Alert, BtnPrimary, Card } from '@/components/PortalShell'
 
@@ -10,6 +11,7 @@ type Planner = { id: string; name: string }
 type Batch = { id: string; name: string; centre_id: string; start_date: string; end_date: string }
 type Lecture = {
   id: string
+  faculty_id: string | null
   topic_name: string
   chapter: string
   planned_date: string
@@ -49,6 +51,11 @@ export default function AssignPlanner() {
   const [plannerId, setPlannerId] = useState('')
   const [batchId, setBatchId] = useState('')
   const [assigning, setAssigning] = useState(false)
+
+  // Central-side "shift forward from here" (e.g. teacher on leave).
+  const [shiftId, setShiftId] = useState<string | null>(null)
+  const [shiftDate, setShiftDate] = useState('')
+  const [shiftBusy, setShiftBusy] = useState(false)
 
   const loadData = async () => {
     setLoading(true)
@@ -112,13 +119,33 @@ export default function AssignPlanner() {
     if (expanded === link.id) { setExpanded(null); return }
     setExpanded(link.id)
     if (!lecturesByLink[link.id]) {
-      const { data } = await supabase
-        .from('batch_planners')
-        .select('id, topic_name, chapter, planned_date, start_time, duration_minutes, stage, subjects(name), app_users(full_name), classrooms(name)')
-        .eq('link_id', link.id)
-        .order('planned_date', { ascending: true })
-      setLecturesByLink((prev) => ({ ...prev, [link.id]: (data ?? []) as unknown as Lecture[] }))
+      await reloadLectures(link.id)
     }
+  }
+
+  const reloadLectures = async (linkId: string) => {
+    const { data } = await supabase
+      .from('batch_planners')
+      .select('id, faculty_id, topic_name, chapter, planned_date, start_time, duration_minutes, stage, subjects(name), app_users(full_name), classrooms(name)')
+      .eq('link_id', linkId)
+      .order('planned_date', { ascending: true })
+    setLecturesByLink((prev) => ({ ...prev, [linkId]: (data ?? []) as unknown as Lecture[] }))
+  }
+
+  // Move this lecture to a new date; later lectures of the SAME faculty in the
+  // link slide by the same amount (used when a teacher goes on leave).
+  const applyShift = async (linkId: string, lecture: Lecture) => {
+    if (!shiftDate) { setMessage({ type: 'error', text: 'Pick the new date to shift to.' }); return }
+    setShiftBusy(true); setMessage(null)
+    const res = await cascadeReschedule(supabase, lecture.id, shiftDate, null)
+    setShiftBusy(false)
+    if (!res.ok) { setMessage({ type: 'error', text: res.error ?? 'Could not shift.' }); return }
+    if (lecture.faculty_id) {
+      await notifyUsers(supabase, [lecture.faculty_id], { type: 'planner', title: 'Lectures rescheduled', body: `Central shifted your lecture to ${new Date(shiftDate + 'T12:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}. ${res.shifted} later lecture(s) moved along.`, link: '/faculty/planners' })
+    }
+    setMessage({ type: 'success', text: `Shifted. ${res.shifted} later lecture(s) of this faculty moved along; overlaps re-checked.` })
+    setShiftId(null); setShiftDate('')
+    await reloadLectures(linkId)
   }
 
   const inputClass = 'w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500'
@@ -194,16 +221,27 @@ export default function AssignPlanner() {
                       ) : (
                         <div className="overflow-x-auto">
                           <table className="w-full text-left text-sm">
-                            <thead><tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider"><th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Topic</th><th className="px-3 py-2">Subject</th><th className="px-3 py-2">Faculty</th><th className="px-3 py-2">Room</th></tr></thead>
+                            <thead><tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider"><th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Topic</th><th className="px-3 py-2">Subject</th><th className="px-3 py-2">Faculty</th><th className="px-3 py-2">Room</th><th className="px-3 py-2 text-right">Shift</th></tr></thead>
                             <tbody className="divide-y divide-neutral-100">
                               {lectures.map((l) => (
                                 <tr key={l.id}>
-                                  <td className="px-3 py-2">{new Date(l.planned_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</td>
-                                  <td className="px-3 py-2 text-neutral-500">{formatTime(l.start_time)} · {l.duration_minutes}m</td>
+                                  <td className="px-3 py-2 whitespace-nowrap">{new Date(l.planned_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</td>
+                                  <td className="px-3 py-2 text-neutral-500 whitespace-nowrap">{formatTime(l.start_time)} · {l.duration_minutes}m</td>
                                   <td className="px-3 py-2"><div className="font-medium text-neutral-950">{l.topic_name}</div><div className="text-xs text-neutral-500">Ch {l.chapter}</div></td>
                                   <td className="px-3 py-2 text-neutral-600">{subjName(l.subjects)}</td>
                                   <td className="px-3 py-2 text-neutral-600">{facName(l.app_users)}</td>
                                   <td className="px-3 py-2 text-neutral-600">{roomName(l.classrooms)}</td>
+                                  <td className="px-3 py-2 text-right whitespace-nowrap">
+                                    {shiftId === l.id ? (
+                                      <span className="inline-flex items-center gap-1.5">
+                                        <input type="date" value={shiftDate} onChange={(e) => setShiftDate(e.target.value)} className="h-8 px-2 bg-white border border-neutral-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                                        <button onClick={() => applyShift(link.id, l)} disabled={shiftBusy} className="px-2 py-1 bg-violet-600 hover:bg-violet-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">{shiftBusy ? '…' : 'Apply'}</button>
+                                        <button onClick={() => { setShiftId(null); setShiftDate('') }} className="px-2 py-1 text-neutral-400 hover:text-neutral-700 text-xs">✕</button>
+                                      </span>
+                                    ) : (
+                                      <button onClick={() => { setShiftId(l.id); setShiftDate(l.planned_date) }} className="px-2.5 py-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-semibold rounded-lg" title="Move this lecture forward; later lectures of this faculty slide too">Shift ▸</button>
+                                    )}
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>

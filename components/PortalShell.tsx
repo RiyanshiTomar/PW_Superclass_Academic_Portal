@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import { useEffect, useState } from 'react'
 import LogoutButton from './LogoutButton'
 import Logo from './Logo'
 import NotificationBell from './NotificationBell'
@@ -34,6 +35,11 @@ export default function PortalShell({
   navItems,
 }: PortalShellProps) {
   const pathname = usePathname()
+  const [menuOpen, setMenuOpen] = useState(false)
+  // Close the mobile drawer whenever the route changes.
+  useEffect(() => { setMenuOpen(false) }, [pathname])
+
+  const isActive = (href: string) => pathname === href || (href !== homeHref && pathname.startsWith(href + '/'))
 
   return (
     <div className="min-h-screen bg-mesh flex">
@@ -84,12 +90,47 @@ export default function PortalShell({
 
       <div className="flex-1 flex flex-col min-w-0">
         <header className="lg:hidden bg-neutral-950 px-4 py-3 flex items-center justify-between sticky top-0 z-30">
-          <Logo variant="full" onDark size="sm" />
-          <div className="flex items-center gap-2">
-            <NotificationBell align="down" />
-            <LogoutButton className="!text-neutral-300 !border-white/15 hover:!bg-white/10 hover:!text-white" />
+          <div className="flex items-center gap-2.5">
+            <button onClick={() => setMenuOpen(true)} aria-label="Open menu" className="grid h-9 w-9 place-items-center rounded-lg text-neutral-300 hover:bg-white/10">
+              <span className="text-xl leading-none">☰</span>
+            </button>
+            <Logo variant="full" onDark size="sm" />
           </div>
+          <NotificationBell align="down" />
         </header>
+
+        {/* Mobile nav drawer */}
+        {menuOpen && (
+          <div className="lg:hidden fixed inset-0 z-40 bg-black/50" onClick={() => setMenuOpen(false)}>
+            <div className="w-72 max-w-[82%] h-full bg-neutral-950 text-neutral-300 flex flex-col overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+              <div className="px-5 py-5 border-b border-white/10 flex items-start justify-between">
+                <div>
+                  <Logo variant="full" onDark size="sm" />
+                  <span className="block text-[10px] font-semibold text-violet-400/70 uppercase tracking-[0.2em] mt-2">{roleLabel(role)} Portal</span>
+                </div>
+                <button onClick={() => setMenuOpen(false)} aria-label="Close menu" className="h-8 w-8 grid place-items-center rounded-lg hover:bg-white/10 text-neutral-400">✕</button>
+              </div>
+              <nav className="flex-1 px-3 py-4 space-y-1.5">
+                {navItems.map((item) => (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    onClick={() => setMenuOpen(false)}
+                    className={`flex items-center gap-3 px-3.5 py-3 rounded-xl text-sm font-semibold ${isActive(item.href) ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white' : 'text-neutral-400 hover:bg-white/5 hover:text-white'}`}
+                  >
+                    {item.icon && <span className="text-lg leading-none">{item.icon}</span>}
+                    {item.label}
+                  </Link>
+                ))}
+              </nav>
+              <div className="px-4 py-4 border-t border-white/10">
+                <p className="text-sm font-semibold text-white truncate mb-2">{fullName || 'User'}</p>
+                <Link href="/account" onClick={() => setMenuOpen(false)} className="block text-center text-xs font-medium text-neutral-400 hover:text-white mb-2">Change password</Link>
+                <LogoutButton className="w-full !text-neutral-300 !border-white/15 hover:!bg-white/10 hover:!text-white" />
+              </div>
+            </div>
+          </div>
+        )}
         <main className="flex-1 p-4 sm:p-6 lg:p-10">
           {/* No transform-based animation here: a lingering transform makes it the
               containing block for position:fixed modals, pushing them off-screen on

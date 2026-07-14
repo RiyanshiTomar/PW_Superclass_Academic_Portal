@@ -33,6 +33,14 @@ export default function SyllabusPage() {
   const [mergeSubjTarget, setMergeSubjTarget] = useState('')
   const [mergingSubj, setMergingSubj] = useState(false)
 
+  // Concept-tags library (distinct subjects + chapters across ALL programs)
+  const [libOpen, setLibOpen] = useState(false)
+  const [library, setLibrary] = useState<{ name: string; chapters: string[] }[]>([])
+  const [libSel, setLibSel] = useState<Set<string>>(new Set())
+  const [libSearch, setLibSearch] = useState('')
+  const [libLoading, setLibLoading] = useState(false)
+  const [libBusy, setLibBusy] = useState(false)
+
   useEffect(() => {
     supabase.from('programs').select('id, name').order('name').then(({ data }) => {
       if (data) setPrograms(data as Program[])
@@ -85,6 +93,48 @@ export default function SyllabusPage() {
     if (!confirm(`Delete subject "${s.name}" with all its chapters & topics?`)) return
     const { error } = await supabase.from('subjects').delete().eq('id', s.id)
     if (error) return setMsg({ type: 'error', text: 'Cannot delete — subject may be used by a batch/planner.' })
+    await loadProgram(programId)
+  }
+
+  // Build the library = every distinct subject name across all programs, with
+  // the union of its chapters. Lets a new program pull standard subjects+chapters.
+  const openLibrary = async () => {
+    if (!programId) { setMsg({ type: 'error', text: 'Pick a program first.' }); return }
+    setLibOpen(true); setLibSel(new Set()); setLibSearch(''); setLibLoading(true)
+    const { data: subs } = await supabase.from('subjects').select('id, name')
+    const subIds = (subs ?? []).map((s) => s.id)
+    const { data: chaps } = subIds.length ? await supabase.from('chapters').select('subject_id, name, sequence_no').in('subject_id', subIds).order('sequence_no') : { data: [] as { subject_id: string; name: string }[] }
+    const chBySub = new Map<string, string[]>()
+    for (const c of (chaps ?? []) as { subject_id: string; name: string }[]) {
+      if (!chBySub.has(c.subject_id)) chBySub.set(c.subject_id, [])
+      chBySub.get(c.subject_id)!.push(c.name)
+    }
+    const byName = new Map<string, { name: string; chapters: string[]; seen: Set<string> }>()
+    for (const s of (subs ?? []) as { id: string; name: string }[]) {
+      const key = s.name.toLowerCase().trim()
+      if (!byName.has(key)) byName.set(key, { name: s.name, chapters: [], seen: new Set() })
+      const e = byName.get(key)!
+      for (const cn of chBySub.get(s.id) ?? []) { const ck = cn.toLowerCase().trim(); if (!e.seen.has(ck)) { e.seen.add(ck); e.chapters.push(cn) } }
+    }
+    setLibrary(Array.from(byName.values()).map((e) => ({ name: e.name, chapters: e.chapters })).sort((a, b) => a.name.localeCompare(b.name)))
+    setLibLoading(false)
+  }
+
+  const addFromLibrary = async () => {
+    if (!programId || libSel.size === 0) return
+    setLibBusy(true); setMsg(null)
+    const chosen = library.filter((l) => libSel.has(l.name))
+    await supabase.from('subjects').upsert(chosen.map((l) => ({ program_id: programId, name: l.name })), { onConflict: 'program_id,name', ignoreDuplicates: true })
+    const { data: subs } = await supabase.from('subjects').select('id, name').eq('program_id', programId)
+    const subId = new Map((subs ?? []).map((s) => [s.name, s.id]))
+    const chapRows: { subject_id: string; name: string; sequence_no: number }[] = []
+    for (const l of chosen) {
+      const sid = subId.get(l.name); if (!sid) continue
+      l.chapters.forEach((cn, i) => chapRows.push({ subject_id: sid, name: cn, sequence_no: i }))
+    }
+    if (chapRows.length) await supabase.from('chapters').upsert(chapRows, { onConflict: 'subject_id,name', ignoreDuplicates: true })
+    setLibBusy(false); setLibOpen(false)
+    setMsg({ type: 'success', text: `Added ${chosen.length} subject(s) with ${chapRows.length} chapter(s) to this program.` })
     await loadProgram(programId)
   }
 
@@ -282,6 +332,7 @@ export default function SyllabusPage() {
           <div className="flex gap-2">
             <input value={newSubject} onChange={(e) => setNewSubject(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addSubject()} placeholder="New subject name" className={`${input} flex-1`} />
             <button onClick={addSubject} className="h-9 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">Add subject</button>
+            <button onClick={openLibrary} className="h-9 px-4 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-sm font-medium whitespace-nowrap">+ From library</button>
           </div>
 
           {subjects.length === 0 ? (
@@ -387,6 +438,52 @@ export default function SyllabusPage() {
             <div className="flex gap-2">
               <button onClick={handleMergeSubject} disabled={!mergeSubjTarget || mergingSubj} className="h-10 px-4 bg-violet-600 hover:bg-violet-700 disabled:bg-violet-300 text-white rounded-lg text-sm font-medium">{mergingSubj ? 'Merging…' : 'Merge'}</button>
               <button onClick={() => setMergeSubj(null)} className="h-10 px-4 border border-gray-300 rounded-lg text-sm font-medium text-gray-700">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {libOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={() => setLibOpen(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-2xl shadow-2xl border border-gray-200 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-gray-100">
+              <div>
+                <h3 className="font-semibold text-gray-900">Add subjects from library</h3>
+                <p className="text-xs text-gray-500">Pick subjects — their chapters come along automatically. Copies into this program (existing ones are skipped).</p>
+              </div>
+              <button onClick={() => setLibOpen(false)} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-gray-100 text-gray-400">✕</button>
+            </div>
+            <div className="p-4 border-b border-gray-100">
+              <input value={libSearch} onChange={(e) => setLibSearch(e.target.value)} placeholder="Search subjects…" className="w-full h-9 px-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+            </div>
+            <div className="p-4 overflow-y-auto flex-1">
+              {libLoading ? (
+                <p className="text-sm text-gray-400 text-center py-6">Loading library…</p>
+              ) : library.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-6">Library is empty — import a syllabus first.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {library.filter((l) => l.name.toLowerCase().includes(libSearch.toLowerCase())).map((l) => {
+                    const sel = libSel.has(l.name)
+                    return (
+                      <label key={l.name} className={`flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer ${sel ? 'bg-violet-50 border-violet-300' : 'bg-gray-50 border-gray-200 hover:border-violet-200'}`}>
+                        <input type="checkbox" checked={sel} onChange={() => setLibSel((prev) => { const n = new Set(prev); n.has(l.name) ? n.delete(l.name) : n.add(l.name); return n })} className="mt-1" />
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-gray-900">{l.name} <span className="text-xs text-gray-400">· {l.chapters.length} chapters</span></div>
+                          {l.chapters.length > 0 && <div className="text-[11px] text-gray-500 truncate">{l.chapters.join(', ')}</div>}
+                        </div>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="p-4 border-t border-gray-100 flex items-center justify-between">
+              <span className="text-xs text-gray-500">{libSel.size} selected</span>
+              <div className="flex gap-2">
+                <button onClick={() => setLibOpen(false)} className="h-10 px-4 border border-gray-300 rounded-lg text-sm font-medium text-gray-700">Cancel</button>
+                <button onClick={addFromLibrary} disabled={libSel.size === 0 || libBusy} className="h-10 px-4 bg-violet-600 hover:bg-violet-700 disabled:bg-violet-300 text-white rounded-lg text-sm font-medium">{libBusy ? 'Adding…' : `Add ${libSel.size || ''} to program`}</button>
+              </div>
             </div>
           </div>
         </div>

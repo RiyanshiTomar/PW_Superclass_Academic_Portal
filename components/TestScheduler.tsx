@@ -126,12 +126,14 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     [subjects, formBatch]
   )
 
-  // Load eligible chapters when a part test has batch + subject + date.
+  // Load the subject's chapters (with a % taught hint). All are selectable —
+  // central schedules a year ahead; the ≥60% check happens later via alerts.
   useEffect(() => {
-    if (partType !== 'Part' || !batchId || !subjectId || !testDate) { setEligible([]); return }
+    if (partType !== 'Part' || !batchId || !subjectId) { setEligible([]); return }
     let cancelled = false
     setLoadingChapters(true)
-    getEligibleChapters(supabase, { batchId, subjectId, byDate: testDate }).then((rows) => {
+    const byDate = testDate || new Date().toISOString().split('T')[0]
+    getEligibleChapters(supabase, { batchId, subjectId, byDate }).then((rows) => {
       if (!cancelled) { setEligible(rows); setLoadingChapters(false) }
     })
     return () => { cancelled = true }
@@ -179,9 +181,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     if (partType === 'Part') {
       if (!subjectId) return setMsg({ type: 'error', text: 'Pick a subject for the part test.' })
       chapterIds = [...selectedChapters]
-      if (chapterIds.length === 0) return setMsg({ type: 'error', text: 'Select at least one ≥60%-covered chapter.' })
-      const eligibleIds = new Set(eligible.filter((c) => c.eligible).map((c) => c.chapter_id))
-      if (chapterIds.some((id) => !eligibleIds.has(id))) return setMsg({ type: 'error', text: 'A selected chapter is not yet 60% covered.' })
+      if (chapterIds.length === 0) return setMsg({ type: 'error', text: 'Select at least one chapter for the part test.' })
     }
 
     setSaving(true)
@@ -235,7 +235,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       <PageHeader
         title="Test Scheduler"
         description={isPrivileged
-          ? 'Schedule batch tests. Validated against the batch’s classes, room and faculty — nothing overlaps. Part tests only offer chapters that are ≥60% taught.'
+          ? 'Schedule batch tests (a whole year ahead if you like). Validated against the batch’s classes, room and faculty — nothing overlaps. Pick any chapters for part tests; the % is just a coverage hint.'
           : 'Tests for your batches, by stage. Central Team schedules; faculty confirm.'}
         action={isPrivileged && !showForm ? <BtnPrimary onClick={() => { resetForm(); setShowForm(true) }}>+ Schedule Test</BtnPrimary> : undefined}
       />
@@ -310,20 +310,20 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                   </select>
                 </div>
                 <div className="border border-neutral-200 rounded-xl p-4 bg-neutral-50/50">
-                  <p className="text-xs font-semibold text-neutral-600 mb-2">Chapters — only ≥60% taught (by the test date) can be selected</p>
-                  {!subjectId || !testDate ? (
-                    <p className="text-xs text-neutral-400">Pick a subject and date to load chapters.</p>
+                  <p className="text-xs font-semibold text-neutral-600 mb-2">Chapters — pick the ones this test covers. The % is how much is taught by the test date (just a hint; we&apos;ll alert you later if it stays below 60%).</p>
+                  {!subjectId ? (
+                    <p className="text-xs text-neutral-400">Pick a subject to load chapters.</p>
                   ) : loadingChapters ? (
-                    <p className="text-xs text-neutral-400">Checking coverage…</p>
+                    <p className="text-xs text-neutral-400">Loading chapters…</p>
                   ) : eligible.length === 0 ? (
                     <p className="text-xs text-neutral-400">No chapters found for this subject in the syllabus master.</p>
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {eligible.map((c) => (
-                        <label key={c.chapter_id} className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm ${c.eligible ? 'bg-white border-neutral-200 cursor-pointer hover:border-violet-300' : 'bg-neutral-100 border-neutral-200 text-neutral-400 cursor-not-allowed'}`}>
-                          <input type="checkbox" disabled={!c.eligible} checked={selectedChapters.has(c.chapter_id)} onChange={() => toggleChapter(c.chapter_id)} />
+                        <label key={c.chapter_id} className="flex items-center gap-2 px-3 py-2 rounded-lg border bg-white border-neutral-200 cursor-pointer hover:border-violet-300 text-sm">
+                          <input type="checkbox" checked={selectedChapters.has(c.chapter_id)} onChange={() => toggleChapter(c.chapter_id)} />
                           <span className="flex-1">{c.name}</span>
-                          <span className={`text-[11px] font-bold ${c.pct >= 60 ? 'text-emerald-600' : 'text-neutral-400'}`}>{c.pct}%{c.topics_total > 0 ? ` · ${c.topics_covered}/${c.topics_total}` : ''}</span>
+                          <span className={`text-[11px] font-bold ${c.pct >= 60 ? 'text-emerald-600' : 'text-amber-500'}`}>{c.pct}%{c.topics_total > 0 ? ` · ${c.topics_covered}/${c.topics_total}` : ''}</span>
                         </label>
                       ))}
                     </div>

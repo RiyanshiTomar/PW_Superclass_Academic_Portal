@@ -10,7 +10,7 @@ type Classroom = { id: string; name: string; room_no: string | null; centre_id: 
 type Kind = 'class' | 'lecture' | 'test'
 type Block = {
   key: string; roomId: string; startMin: number; endMin: number; kind: Kind
-  batch: string; title: string; faculty: string; tag?: string
+  batch: string; subject: string; topic: string; faculty: string; tag?: string
 }
 
 function one<T>(v: T | T[] | null): T | null { return !v ? null : Array.isArray(v) ? v[0] ?? null : v }
@@ -77,18 +77,35 @@ export default function CentreTimetable() {
       if (cancelled) return
       if (schedRes.error) setErr(schedRes.error.message)
 
+      // The planner drives what topic a class covers on a given day. Build a
+      // batch+subject → topic(s) lookup from that day's planner lectures so each
+      // recurring class block can show the day's topic alongside its subject.
+      const planTopics = new Map<string, string[]>()
+      ;(planRes.data ?? []).forEach((p) => {
+        const bn = one(p.batches as never)?.['name'] as string | undefined
+        const sn = one(p.subjects as never)?.['name'] as string | undefined
+        const t = ((p.topic_name as string) || '').trim()
+        if (!bn || !sn || !t) return
+        const k = `${bn}||${sn}`
+        const arr = planTopics.get(k) ?? []
+        arr.push(t)
+        planTopics.set(k, arr)
+      })
+
       const out: Block[] = []
       ;(schedRes.data ?? []).forEach((s, i) => {
         const st = toMinutes((s.start_time as string).slice(0, 5))
-        out.push({ key: `c${i}`, roomId: (s.classroom_id as string) ?? '∅', startMin: st, endMin: toMinutes((s.end_time as string).slice(0, 5)), kind: 'class', batch: one(s.batches as never)?.['name'] ?? 'Batch', title: one(s.subjects as never)?.['name'] ?? '—', faculty: one(s.app_users as never)?.['full_name'] ?? '—' })
+        const batch = one(s.batches as never)?.['name'] ?? 'Batch'
+        const subject = one(s.subjects as never)?.['name'] ?? '—'
+        out.push({ key: `c${i}`, roomId: (s.classroom_id as string) ?? '∅', startMin: st, endMin: toMinutes((s.end_time as string).slice(0, 5)), kind: 'class', batch, subject, topic: (planTopics.get(`${batch}||${subject}`) ?? []).join(', '), faculty: one(s.app_users as never)?.['full_name'] ?? '—' })
       })
       ;(planRes.data ?? []).forEach((p, i) => {
         const st = toMinutes((p.start_time as string).slice(0, 5))
-        out.push({ key: `p${i}`, roomId: (p.classroom_id as string) ?? '∅', startMin: st, endMin: st + (p.duration_minutes as number), kind: 'lecture', batch: one(p.batches as never)?.['name'] ?? 'Batch', title: (p.topic_name as string) || (one(p.subjects as never)?.['name'] ?? 'Lecture'), faculty: one(p.app_users as never)?.['full_name'] ?? '—', tag: 'Planner' })
+        out.push({ key: `p${i}`, roomId: (p.classroom_id as string) ?? '∅', startMin: st, endMin: st + (p.duration_minutes as number), kind: 'lecture', batch: one(p.batches as never)?.['name'] ?? 'Batch', subject: one(p.subjects as never)?.['name'] ?? 'Lecture', topic: (p.topic_name as string) || '', faculty: one(p.app_users as never)?.['full_name'] ?? '—', tag: 'Planner' })
       })
       ;(testRes.data ?? []).forEach((t, i) => {
         const st = toMinutes((t.start_time as string).slice(0, 5))
-        out.push({ key: `t${i}`, roomId: (t.classroom_id as string) ?? '∅', startMin: st, endMin: st + (t.duration_minutes as number), kind: 'test', batch: one(t.batches as never)?.['name'] ?? 'Batch', title: (t.name as string) || 'Test', faculty: one(t.app_users as never)?.['full_name'] ?? '—', tag: (t.test_type as string) })
+        out.push({ key: `t${i}`, roomId: (t.classroom_id as string) ?? '∅', startMin: st, endMin: st + (t.duration_minutes as number), kind: 'test', batch: one(t.batches as never)?.['name'] ?? 'Batch', subject: (t.name as string) || 'Test', topic: '', faculty: one(t.app_users as never)?.['full_name'] ?? '—', tag: (t.test_type as string) })
       })
       setBlocks(out)
       setLoadingDay(false)
@@ -205,13 +222,14 @@ export default function CentreTimetable() {
                           const top = (b.startMin - rangeStart) * PX_PER_MIN
                           const height = Math.max((b.endMin - b.startMin) * PX_PER_MIN, 32)
                           return (
-                            <div key={b.key} className={`absolute left-1 right-1 rounded-lg border px-1.5 py-1 overflow-hidden ${blockClass(b)}`} style={{ top, height }} title={`${formatTime(minToHHMM(b.startMin))}–${formatTime(minToHHMM(b.endMin))} · ${b.batch} · ${b.title} · ${b.faculty}`}>
+                            <div key={b.key} className={`absolute left-1 right-1 rounded-lg border px-1.5 py-1 overflow-hidden ${blockClass(b)}`} style={{ top, height }} title={`${formatTime(minToHHMM(b.startMin))}–${formatTime(minToHHMM(b.endMin))} · ${b.batch} · ${b.subject}${b.topic ? ` · ${b.topic}` : ''} · ${b.faculty}`}>
                               <div className="flex items-center gap-1 text-[10px] font-bold leading-tight">
                                 {formatTime(minToHHMM(b.startMin))}
                                 {b.tag && <span className={`px-1 rounded text-[8px] uppercase tracking-wide ${b.kind === 'test' ? 'bg-white/25' : 'bg-black/10'}`}>{b.tag}</span>}
                               </div>
                               <div className="text-[11px] font-semibold leading-tight truncate">{b.batch}</div>
-                              <div className="text-[10px] leading-tight truncate">{b.title}</div>
+                              <div className="text-[10px] leading-tight truncate">{b.subject}</div>
+                              {b.topic && <div className="text-[10px] leading-tight truncate italic opacity-90">{b.topic}</div>}
                               <div className="text-[10px] leading-tight truncate opacity-80">{b.faculty}</div>
                             </div>
                           )

@@ -221,8 +221,9 @@ async function materialise(
     const label = `${l.topic_name || 'Lecture'} (${date})`
     const facultyId = l.faculty_id as string | null
 
-    if (!facultyId) { errors.push(`${label}: no faculty on this lecture`); continue }
-    if (!centreFacultyIds.has(facultyId)) { errors.push(`${label}: faculty does not teach at this batch's centre`); continue }
+    // Faculty is OPTIONAL — a lecture can be left unassigned (TBD) and the
+    // teacher filled in later. Only validate the centre when one is set.
+    if (facultyId && !centreFacultyIds.has(facultyId)) { errors.push(`${label}: faculty does not teach at this batch's centre`); continue }
     if (!isDateInRange(new Date(date + 'T12:00:00'), batch.start_date, batch.end_date)) {
       errors.push(`${label}: outside batch date range`)
       continue
@@ -235,10 +236,14 @@ async function materialise(
       const dur = l.duration_minutes as number
       const slot = { date, start: toMinutes(st), end: toMinutes(st) + dur }
 
-      if (!busyCache[facultyId]) busyCache[facultyId] = await facultyBusyExcluding(supabase, facultyId, [])
-      const busy = busyCache[facultyId]
-      const reason = conflictReason(date, l.start_time as string, dur, busy)
-      if (reason) { errors.push(`${label}: ${reason}`); continue }
+      // Faculty conflict only matters when a teacher is actually assigned.
+      let busy: { weekly: WeeklyBusy[]; dated: DatedBusy[] } | null = null
+      if (facultyId) {
+        if (!busyCache[facultyId]) busyCache[facultyId] = await facultyBusyExcluding(supabase, facultyId, [])
+        busy = busyCache[facultyId]
+        const reason = conflictReason(date, l.start_time as string, dur, busy)
+        if (reason) { errors.push(`${label}: ${reason}`); continue }
+      }
 
       // A room is one class at a time — check both weekly + other dated lectures.
       let roomBusy: { weekly: WeeklyBusy[]; dated: DatedBusy[] } | null = null
@@ -250,7 +255,7 @@ async function materialise(
       }
 
       // Both clear — reserve the slot so later lectures in this planner see it.
-      busy.dated.push(slot)
+      if (busy) busy.dated.push(slot)
       if (roomBusy) roomBusy.dated.push(slot)
     }
 
@@ -367,9 +372,10 @@ export async function setLinkStage(
     const upcoming = await supabase.from('batch_planners').update({ stage: 'Faculty Assigned' }).eq('link_id', linkId).gte('planned_date', today)
     syncErr = past.error ?? upcoming.error ?? null
 
-    // Alert only faculty who actually have upcoming lectures to confirm.
+    // Alert only faculty who actually have upcoming lectures to confirm
+    // (skip unassigned/TBD lectures — no one to notify yet).
     const { data } = await supabase.from('batch_planners').select('faculty_id').eq('link_id', linkId).gte('planned_date', today)
-    await notifyUsers(supabase, (data ?? []).map((r) => r.faculty_id as string), {
+    await notifyUsers(supabase, (data ?? []).map((r) => r.faculty_id as string | null).filter((id): id is string => !!id), {
       type: 'planner', title: 'New planner assigned', body: 'Review and confirm your upcoming lectures.', link: '/faculty/planners',
     })
   } else {
@@ -384,12 +390,14 @@ export async function setLinkStage(
 type TargetRow = {
   id: string
   link_id: string | null
-  faculty_id: string
+  faculty_id: string | null
   classroom_id: string | null
   planned_date: string
   start_time: string | null
   duration_minutes: number
 }
+
+const NO_BUSY = (): { weekly: WeeklyBusy[]; dated: DatedBusy[] } => ({ weekly: [], dated: [] })
 
 /** Reschedule one materialised lecture to a new date/time and slide every
  *  later lecture of the same planner-link by the same day delta, re-checking
@@ -412,8 +420,9 @@ export async function cascadeReschedule(
 
   // Subsequent lectures of the SAME teacher in this planner-link (a planner can
   // span many teachers — only the requesting teacher's later lectures slide).
+  // A TBD (no-faculty) lecture has no "same teacher" chain, so only it moves.
   let subsequent: TargetRow[] = []
-  if (target.link_id) {
+  if (target.link_id && target.faculty_id) {
     const { data } = await supabase
       .from('batch_planners')
       .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes')
@@ -425,7 +434,7 @@ export async function cascadeReschedule(
 
   const moving = [target, ...subsequent]
   const movingIds = moving.map((m) => m.id)
-  const busy = await facultyBusyExcluding(supabase, target.faculty_id, movingIds)
+  const busy = target.faculty_id ? await facultyBusyExcluding(supabase, target.faculty_id, movingIds) : NO_BUSY()
   const roomBusyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
 
   const updates: { id: string; planned_date: string; start_time: string | null }[] = []
@@ -482,7 +491,7 @@ export async function addExtraLecture(
     .single<{
       batch_id: string
       link_id: string | null
-      faculty_id: string
+      faculty_id: string | null
       classroom_id: string | null
       subject_id: string | null
       chapter: string
@@ -497,10 +506,12 @@ export async function addExtraLecture(
   if (!startTime) return { ok: false, error: 'Pick a start time for the extra class.' }
   const dur = durationMinutes && durationMinutes > 0 ? durationMinutes : anchor.duration_minutes
 
-  // Faculty must be free at the new slot.
-  const facBusy = await facultyBusyExcluding(supabase, anchor.faculty_id, [])
-  const facReason = conflictReason(newDate, startTime, dur, facBusy)
-  if (facReason) return { ok: false, error: `Faculty ${facReason}.` }
+  // Faculty must be free at the new slot (only when the lecture has a teacher).
+  if (anchor.faculty_id) {
+    const facBusy = await facultyBusyExcluding(supabase, anchor.faculty_id, [])
+    const facReason = conflictReason(newDate, startTime, dur, facBusy)
+    if (facReason) return { ok: false, error: `Faculty ${facReason}.` }
+  }
 
   // The room must be free too (one class per room at a time).
   if (anchor.classroom_id) {
@@ -543,7 +554,7 @@ export async function cascadeCancel(
   if (!target) return { ok: false, shifted: 0, error: 'Lecture not found.' }
 
   let subsequent: TargetRow[] = []
-  if (target.link_id) {
+  if (target.link_id && target.faculty_id) {
     const { data } = await supabase
       .from('batch_planners')
       .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes')
@@ -557,7 +568,7 @@ export async function cascadeCancel(
   // Gap = distance to the next lecture; everything slides up by that much.
   const delta = subsequent.length > 0 ? daysBetween(target.planned_date, subsequent[0].planned_date) : 0
 
-  if (subsequent.length > 0 && delta > 0) {
+  if (subsequent.length > 0 && delta > 0 && target.faculty_id) {
     const excludeIds = [target.id, ...subsequent.map((s) => s.id)]
     const busy = await facultyBusyExcluding(supabase, target.faculty_id, excludeIds)
     const roomBusyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}

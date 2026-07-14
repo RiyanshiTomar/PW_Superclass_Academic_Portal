@@ -92,7 +92,7 @@ export default function CreatePlanner() {
       let iTime = col('start'); if (iTime < 0) iTime = headers.findIndex((h) => h.includes('time') && !h.includes('end'))
       const iDur = col('duration', 'min')
       const missing: string[] = []
-      if (iChap < 0) missing.push('Chapter'); if (iTopic < 0) missing.push('Topic'); if (iFac < 0) missing.push('Faculty Email'); if (iDate < 0) missing.push('Date')
+      if (iChap < 0) missing.push('Chapter'); if (iTopic < 0) missing.push('Topic'); if (iDate < 0) missing.push('Date')
       if (missing.length) { setMessage({ type: 'error', text: `CSV header missing column(s): ${missing.join(', ')}. Names can be in any order.` }); return }
 
       const pool = subjects.filter((s) => !programId || s.program_id === programId)
@@ -125,7 +125,8 @@ export default function CreatePlanner() {
   const updateDraft = (i: number, patch: Partial<Draft>) => setDraft((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
   const addDraftRow = () => setDraft((prev) => [...prev, { subject_id: '', faculty_id: '', chapter: '', topic_name: '', planned_date: '', start_time: '', duration_minutes: '60' }])
   const removeDraftRow = (i: number) => setDraft((prev) => prev.filter((_, idx) => idx !== i))
-  const rowValid = (r: Draft) => !!(r.chapter.trim() && r.topic_name.trim() && r.faculty_id && parsePlannedDate(r.planned_date) && parseDuration(r.duration_minutes || '60') && !validateOptionalTime(r.start_time))
+  // Faculty is optional (can stay Unassigned/TBD and be filled in later).
+  const rowValid = (r: Draft) => !!(r.chapter.trim() && r.topic_name.trim() && parsePlannedDate(r.planned_date) && parseDuration(r.duration_minutes || '60') && !validateOptionalTime(r.start_time))
 
   const cancelReview = () => { setReviewing(false); setDraft([]); setMessage(null) }
 
@@ -135,13 +136,12 @@ export default function CreatePlanner() {
     for (let i = 0; i < draft.length; i++) {
       const r = draft[i]; const rn = i + 1
       if (!r.chapter.trim() || !r.topic_name.trim()) return setMessage({ type: 'error', text: `Row ${rn}: chapter & topic required.` })
-      if (!r.faculty_id) return setMessage({ type: 'error', text: `Row ${rn}: pick a faculty.` })
       if (!parsePlannedDate(r.planned_date)) return setMessage({ type: 'error', text: `Row ${rn}: valid date (YYYY-MM-DD) required.` })
       const startErr = validateOptionalTime(r.start_time)
       if (startErr) return setMessage({ type: 'error', text: `Row ${rn}: start ${startErr}` })
       const dur = parseDuration(r.duration_minutes || '60')
       if (!dur) return setMessage({ type: 'error', text: `Row ${rn}: duration must be 15–480 min.` })
-      clean.push({ subject_id: r.subject_id || null, faculty_id: r.faculty_id, chapter: r.chapter.trim(), topic_name: r.topic_name.trim(), planned_date: r.planned_date, start_time: r.start_time || null, duration_minutes: dur })
+      clean.push({ subject_id: r.subject_id || null, faculty_id: r.faculty_id || null, chapter: r.chapter.trim(), topic_name: r.topic_name.trim(), planned_date: r.planned_date, start_time: r.start_time || null, duration_minutes: dur })
     }
     if (clean.length === 0) return setMessage({ type: 'error', text: 'Add at least one lecture.' })
     setBusy(true)
@@ -198,7 +198,7 @@ export default function CreatePlanner() {
                 <thead>
                   <tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider">
                     <th className="text-left px-3 py-2 min-w-[140px]">Subject</th>
-                    <th className="text-left px-3 py-2 min-w-[160px]">Faculty *</th>
+                    <th className="text-left px-3 py-2 min-w-[160px]">Faculty</th>
                     <th className="text-left px-3 py-2">Chapter *</th>
                     <th className="text-left px-3 py-2 min-w-[150px]">Topic *</th>
                     <th className="text-left px-3 py-2">Date *</th>
@@ -218,7 +218,7 @@ export default function CreatePlanner() {
                       </td>
                       <td className="px-3 py-2">
                         <select value={r.faculty_id} onChange={(e) => updateDraft(i, { faculty_id: e.target.value })} className={cell}>
-                          <option value="">Select faculty</option>
+                          <option value="">Unassigned (assign later)</option>
                           {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                         </select>
                       </td>
@@ -271,8 +271,8 @@ export default function CreatePlanner() {
             <h4 className="font-semibold text-violet-900 mb-2">CSV Format</h4>
             <code className="text-xs bg-white px-3 py-2 rounded border border-violet-200 block">Subject, Chapter, Topic, Faculty Email, Date, Start Time, End Time, Duration</code>
             <ul className="text-xs text-violet-700 mt-2 space-y-0.5">
-              <li>• <span className="font-semibold">Required:</span> Chapter, Topic, Faculty Email, Date (YYYY-MM-DD) — but even if some are wrong, you can fix them in the preview.</li>
-              <li>• <span className="font-semibold">Optional:</span> Subject, Start + End Time (HH:MM) or Duration (min).</li>
+              <li>• <span className="font-semibold">Required:</span> Chapter, Topic, Date (YYYY-MM-DD) — but even if some are wrong, you can fix them in the preview.</li>
+              <li>• <span className="font-semibold">Optional:</span> Subject, Faculty Email (leave blank = Unassigned/TBD, assign later), Start + End Time (HH:MM) or Duration (min).</li>
             </ul>
           </Card>
         </>

@@ -102,7 +102,7 @@ export default function EditPlanner() {
       const r = rows[i]
       const rn = i + 1
       if (!r.chapter.trim() || !r.topic_name.trim()) return setMessage({ type: 'error', text: `Row ${rn}: chapter & topic required.` })
-      if (!r.faculty_id) return setMessage({ type: 'error', text: `Row ${rn}: faculty required.` })
+      // Faculty is optional (Unassigned/TBD, fill in later).
       if (!parsePlannedDate(r.planned_date)) return setMessage({ type: 'error', text: `Row ${rn}: valid date required.` })
       const timeErr = validateOptionalTime(r.start_time)
       if (timeErr) return setMessage({ type: 'error', text: `Row ${rn}: ${timeErr}` })
@@ -110,7 +110,7 @@ export default function EditPlanner() {
       if (!dur) return setMessage({ type: 'error', text: `Row ${rn}: duration must be 15–480 min.` })
       clean.push({
         subject_id: r.subject_id || null,
-        faculty_id: r.faculty_id,
+        faculty_id: r.faculty_id || null,
         chapter: r.chapter.trim(),
         topic_name: r.topic_name.trim(),
         planned_date: r.planned_date,
@@ -224,7 +224,7 @@ export default function EditPlanner() {
                       </td>
                       <td className="px-3 py-2">
                         <select value={r.faculty_id} onChange={(e) => updateRow(i, { faculty_id: e.target.value })} className={inputClass}>
-                          <option value="">Select</option>
+                          <option value="">Unassigned (TBD)</option>
                           {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                         </select>
                       </td>

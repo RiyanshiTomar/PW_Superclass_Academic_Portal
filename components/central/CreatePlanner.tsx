@@ -50,11 +50,13 @@ function datesForDay(start: string, end: string, dow: number): string[] {
 export default function CreatePlanner() {
   const supabase = createClient()
   const [batches, setBatches] = useState<Batch[]>([])
+  const [centres, setCentres] = useState<{ id: string; name: string }[]>([])
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [faculty, setFaculty] = useState<Faculty[]>([])
   const [planners, setPlanners] = useState<PlannerRow[]>([])
   const [loading, setLoading] = useState(true)
 
+  const [centreId, setCentreId] = useState('')
   const [batchId, setBatchId] = useState('')
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -68,6 +70,8 @@ export default function CreatePlanner() {
   const [master, setMaster] = useState<Master | null>(null)
 
   const batch = useMemo(() => batches.find((b) => b.id === batchId) ?? null, [batches, batchId])
+  // Batches at the chosen centre (names can repeat across centres, so filter first).
+  const centreBatches = useMemo(() => (centreId ? batches.filter((b) => b.centre_id === centreId) : []), [batches, centreId])
   const programSubjects = useMemo(() => (batch ? subjects.filter((s) => s.program_id === batch.program_id) : []), [subjects, batch])
   const subjName = (id: string) => subjects.find((s) => s.id === id)?.name ?? '—'
   const facEmail = (id: string) => faculty.find((f) => f.id === id)?.email ?? ''
@@ -87,13 +91,15 @@ export default function CreatePlanner() {
 
   const loadData = async () => {
     setLoading(true)
-    const [batchRes, subjRes, facRes, planRes] = await Promise.all([
+    const [batchRes, centreRes, subjRes, facRes, planRes] = await Promise.all([
       supabase.from('batches').select('id, name, centre_id, program_id, start_date, end_date, status').neq('status', 'Merged').order('created_at', { ascending: false }),
+      supabase.from('centres').select('id, name').order('name'),
       supabase.from('subjects').select('id, name, program_id').order('name'),
       supabase.rpc('list_active_faculty', { p_centre_id: null }),
       supabase.from('planners').select('id, name, program_id, created_at, planner_lectures(count)').order('created_at', { ascending: false }),
     ])
     if (batchRes.data) setBatches(batchRes.data as Batch[])
+    if (centreRes.data) setCentres(centreRes.data as { id: string; name: string }[])
     if (subjRes.data) setSubjects(subjRes.data as Subject[])
     if (facRes.data) setFaculty(Array.from(new Map((facRes.data as Faculty[]).map((f) => [f.id, f])).values()) as Faculty[])
     if (planRes.data) setPlanners(planRes.data as unknown as PlannerRow[])
@@ -273,13 +279,20 @@ export default function CreatePlanner() {
       {!reviewing ? (
         <Card className="p-6">
           <h3 className="font-bold text-neutral-950 mb-1">Create a Planner</h3>
-          <p className="text-sm text-neutral-500 mb-5">Pick a batch — its class-dates are generated from the weekly schedule (only the days each subject actually runs). Then just fill Chapter &amp; Topic; time, room &amp; faculty come from the schedule.</p>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <p className="text-sm text-neutral-500 mb-5">Pick a centre, then a batch — its class-dates are generated from the weekly schedule (only the days each subject actually runs). Then just fill Chapter &amp; Topic; time, room &amp; faculty come from the schedule.</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Centre *</label>
+              <select value={centreId} onChange={(e) => { setCentreId(e.target.value); setBatchId(''); setReviewing(false); setDraft([]); setMaster(null); setName(''); setMessage(null) }} className={inputClass} disabled={busy || loading}>
+                <option value="">{loading ? 'Loading…' : 'Select a centre'}</option>
+                {centres.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
             <div>
               <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Batch *</label>
-              <select value={batchId} onChange={(e) => selectBatch(e.target.value)} className={inputClass} disabled={busy}>
-                <option value="">{busy ? 'Loading…' : 'Select a batch'}</option>
-                {batches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+              <select value={batchId} onChange={(e) => selectBatch(e.target.value)} className={inputClass} disabled={busy || !centreId}>
+                <option value="">{!centreId ? 'Select a centre first' : busy ? 'Loading…' : centreBatches.length ? 'Select a batch' : 'No batches at this centre'}</option>
+                {centreBatches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
               </select>
             </div>
             <div>

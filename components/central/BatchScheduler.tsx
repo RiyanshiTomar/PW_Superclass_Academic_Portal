@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { checkWeeklyScheduleOverlap, checkClassroomScheduleOverlap } from '@/lib/scheduling'
 import { assignPlanner } from '@/lib/planners'
+import { mergeBatch } from '@/lib/merge'
 import { validateBatchDates, validateTimeRange } from '@/lib/validation'
-import { DAYS, timesOverlap } from '@/lib/utils'
+import { DAYS, timesOverlap, daysBetween } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
 type Program = { id: string; name: string }
@@ -28,6 +29,7 @@ type Batch = {
   end_date: string
   batch_manager_id: string
   status: string
+  buffer_days: number
 }
 
 // Each day of a row carries its OWN timing (Mon can differ from Tue for the
@@ -90,8 +92,6 @@ export default function BatchScheduler() {
   const [managers, setManagers] = useState<Manager[]>([])
   const [planners, setPlanners] = useState<Planner[]>([])
   const [links, setLinks] = useState<Link[]>([])
-  // batch_id -> number of scheduled slots with no faculty yet (TBD)
-  const [unassignedByBatch, setUnassignedByBatch] = useState<Map<string, number>>(new Map())
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -104,7 +104,10 @@ export default function BatchScheduler() {
   const [centreId, setCentreId] = useState('')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
+  const [bufferDays, setBufferDays] = useState('0')
   const [managerId, setManagerId] = useState('')
+  // batch_id -> its last planned lecture date (for lateness vs end_date)
+  const [lastLectureByBatch, setLastLectureByBatch] = useState<Map<string, string>>(new Map())
   const [scheduleRows, setScheduleRows] = useState<ScheduleRow[]>([])
   const [userCentres, setUserCentres] = useState<UserCentre[]>([])
   const [facultySubjects, setFacultySubjects] = useState<FacultySubject[]>([])
@@ -113,6 +116,12 @@ export default function BatchScheduler() {
   const [attachBatch, setAttachBatch] = useState<Batch | null>(null)
   const [attachPlanner, setAttachPlanner] = useState('')
   const [attaching, setAttaching] = useState(false)
+
+  // Merge-batches modal
+  const [mergeOpen, setMergeOpen] = useState(false)
+  const [survivorId, setSurvivorId] = useState('')
+  const [absorbedId, setAbsorbedId] = useState('')
+  const [merging, setMerging] = useState(false)
 
   const centreFaculty = useMemo(() => {
     if (!centreId) return []
@@ -162,6 +171,30 @@ export default function BatchScheduler() {
 
   const subjName = (id: string) => subjects.find((s) => s.id === id)?.name ?? 'Subject'
 
+  // planner ids linked to each batch (for the same-planner merge rule)
+  const plannersByBatch = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const l of links) {
+      if (!m.has(l.batch_id)) m.set(l.batch_id, new Set())
+      m.get(l.batch_id)!.add(l.planner_id)
+    }
+    return m
+  }, [links])
+
+  // Batches you can merge INTO the chosen survivor: same centre, not already
+  // merged, and sharing at least one planner with it.
+  const mergeCandidates = useMemo(() => {
+    const survivor = batches.find((b) => b.id === survivorId)
+    if (!survivor) return []
+    const sPl = plannersByBatch.get(survivorId) ?? new Set<string>()
+    return batches.filter((b) =>
+      b.id !== survivorId &&
+      b.status !== 'Merged' &&
+      b.centre_id === survivor.centre_id &&
+      Array.from(plannersByBatch.get(b.id) ?? new Set<string>()).some((p) => sPl.has(p))
+    )
+  }, [batches, survivorId, plannersByBatch])
+
   // Rebuild rows from an existing schedule. A row = one (subject + faculty + room)
   // group, with each day carrying its own timing. Every program subject gets at
   // least an empty row so all subjects are shown.
@@ -189,7 +222,7 @@ export default function BatchScheduler() {
   const loadData = async () => {
     setLoading(true)
     setMessage(null)
-    const [batchesRes, progRes, centRes, subjRes, classRes, facRes, manRes, ucRes, planRes, linkRes, fsRes, schedRes] = await Promise.all([
+    const [batchesRes, progRes, centRes, subjRes, classRes, facRes, manRes, ucRes, planRes, linkRes, fsRes, bpRes] = await Promise.all([
       supabase.from('batches').select('*').order('created_at', { ascending: false }),
       supabase.from('programs').select('*').order('name'),
       supabase.from('centres').select('id, name').order('name'),
@@ -201,7 +234,7 @@ export default function BatchScheduler() {
       supabase.from('planners').select('id, name').order('created_at', { ascending: false }),
       supabase.from('batch_planner_links').select('id, batch_id, planner_id, faculty_id, stage, planners(name)'),
       supabase.from('faculty_subjects').select('faculty_id, subject_id'),
-      supabase.from('batch_schedules').select('batch_id, faculty_id'),
+      supabase.from('batch_planners').select('batch_id, planned_date'),
     ])
 
     if (batchesRes.error) setMessage({ type: 'error', text: batchesRes.error.message })
@@ -223,12 +256,13 @@ export default function BatchScheduler() {
     if (planRes.data) setPlanners(planRes.data as Planner[])
     if (linkRes.data) setLinks(linkRes.data as unknown as Link[])
     if (fsRes.data) setFacultySubjects(fsRes.data as FacultySubject[])
-    if (schedRes.data) {
-      const m = new Map<string, number>()
-      for (const s of schedRes.data as { batch_id: string; faculty_id: string | null }[]) {
-        if (!s.faculty_id) m.set(s.batch_id, (m.get(s.batch_id) ?? 0) + 1)
+    if (bpRes.data) {
+      const m = new Map<string, string>()
+      for (const r of bpRes.data as { batch_id: string; planned_date: string }[]) {
+        const cur = m.get(r.batch_id)
+        if (!cur || r.planned_date > cur) m.set(r.batch_id, r.planned_date)
       }
-      setUnassignedByBatch(m)
+      setLastLectureByBatch(m)
     }
     setLoading(false)
   }
@@ -267,6 +301,7 @@ export default function BatchScheduler() {
     setCentreId(b.centre_id)
     setStartDate(b.start_date)
     setEndDate(b.end_date)
+    setBufferDays(String(b.buffer_days ?? 0))
     setManagerId(b.batch_manager_id)
     const { data } = await supabase.from('batch_schedules').select('*').eq('batch_id', b.id)
     setScheduleRows(buildRows(b.program_id, (data || []) as FlatSchedule[]))
@@ -276,7 +311,7 @@ export default function BatchScheduler() {
 
   const resetForm = () => {
     setEditingBatch(null)
-    setName(''); setProgramId(''); setCentreId(''); setStartDate(''); setEndDate(''); setManagerId('')
+    setName(''); setProgramId(''); setCentreId(''); setStartDate(''); setEndDate(''); setBufferDays('0'); setManagerId('')
     setScheduleRows([])
     setShowForm(false)
     setMessage(null)
@@ -333,13 +368,12 @@ export default function BatchScheduler() {
 
     if (centreClassrooms.length === 0) return fail('This centre has no rooms yet. Add classrooms in Admin → Centres first.')
 
-    // Each row needs a subject + room + timing + at least one day. Faculty is
-    // OPTIONAL — a slot can be left "Unassigned" (TBD) and the teacher filled
-    // in later (e.g. teacher on leave / not decided yet).
+    // Each row needs a subject + faculty + room + timing + at least one day.
     for (let idx = 0; idx < scheduleRows.length; idx++) {
       const row = scheduleRows[idx]
       if (!row.subject_id) return fail(`Pick a subject for row ${idx + 1}.`)
       const sName = subjName(row.subject_id)
+      if (!row.faculty_id) return fail(`Assign a faculty for "${sName}" (row ${idx + 1}).`)
       if (!row.classroom_id) return fail(`Pick a classroom for "${sName}" (row ${idx + 1}). Every class needs a room.`)
       if (!centreClassrooms.some((c) => c.id === row.classroom_id)) return fail(`The room chosen for "${sName}" is not at this centre.`)
       const activeDays = row.days.map((d, di) => ({ ...d, di })).filter((d) => d.active)
@@ -348,11 +382,8 @@ export default function BatchScheduler() {
         const timeErr = validateTimeRange(d.start, d.end)
         if (timeErr) return fail(`${sName} · ${DAYS[d.di]} (row ${idx + 1}): ${timeErr}`)
       }
-      // Only validate the teacher's centre when a teacher is actually assigned.
-      if (row.faculty_id) {
-        const fac = faculty.find((f) => f.id === row.faculty_id)
-        if (!centreIds.has(row.faculty_id) && fac?.centre_id !== centreId) return fail(`${fac?.full_name ?? 'Faculty'} does not teach at this centre.`)
-      }
+      const fac = faculty.find((f) => f.id === row.faculty_id)
+      if (!centreIds.has(row.faculty_id) && fac?.centre_id !== centreId) return fail(`${fac?.full_name ?? 'Faculty'} does not teach at this centre.`)
     }
 
     // Every subject of the program must have at least one slot (extra slots allowed).
@@ -396,10 +427,10 @@ export default function BatchScheduler() {
 
     let batchId = editingBatch?.id
     if (editingBatch) {
-      const { error } = await supabase.from('batches').update({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId }).eq('id', editingBatch.id)
+      const { error } = await supabase.from('batches').update({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, buffer_days: parseInt(bufferDays, 10) || 0, batch_manager_id: managerId }).eq('id', editingBatch.id)
       if (error) return fail(error.message)
     } else {
-      const { data, error } = await supabase.from('batches').insert({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId }).select().single()
+      const { data, error } = await supabase.from('batches').insert({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, buffer_days: parseInt(bufferDays, 10) || 0, batch_manager_id: managerId }).select().single()
       if (error) return fail(error.message)
       batchId = data.id
     }
@@ -459,6 +490,21 @@ export default function BatchScheduler() {
     await loadData()
   }
 
+  async function handleMerge() {
+    if (!survivorId || !absorbedId) { setMessage({ type: 'error', text: 'Pick both batches.' }); return }
+    const survivor = batches.find((b) => b.id === survivorId)
+    const absorbed = batches.find((b) => b.id === absorbedId)
+    if (!confirm(`Merge "${absorbed?.name}" INTO "${survivor?.name}"?\n\nAll students move to "${survivor?.name}". "${absorbed?.name}" is archived — its future classes/tests are removed, past records (attendance/results) are kept. This can't be auto-undone.`)) return
+    setMerging(true); setMessage(null)
+    const today = new Date().toISOString().split('T')[0]
+    const res = await mergeBatch(supabase, { survivorId, absorbedId, today })
+    setMerging(false)
+    if (!res.ok) { setMessage({ type: 'error', text: res.error ?? 'Merge failed.' }); return }
+    setMessage({ type: 'success', text: `Merged — ${res.movedStudents} student(s) moved to ${survivor?.name}. ${absorbed?.name} archived.` })
+    setMergeOpen(false); setSurvivorId(''); setAbsorbedId('')
+    await loadData()
+  }
+
   const inputClass = 'w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent'
 
   return (
@@ -466,7 +512,12 @@ export default function BatchScheduler() {
       <PageHeader
         title="Batch Scheduler"
         description="Create batches and their week-wise recurring faculty schedule. Pick a subject per row. Overlapping timings are blocked. Optionally merge a batch with an existing planner."
-        action={!showForm ? <BtnPrimary onClick={() => setShowForm(true)}>+ Create Batch</BtnPrimary> : undefined}
+        action={!showForm ? (
+          <div className="flex gap-2">
+            <BtnSecondary onClick={() => { setMergeOpen(true); setMessage(null); setSurvivorId(''); setAbsorbedId('') }}>Merge Batches</BtnSecondary>
+            <BtnPrimary onClick={() => setShowForm(true)}>+ Create Batch</BtnPrimary>
+          </div>
+        ) : undefined}
       />
 
       {message && <Alert type={message.type === 'info' ? 'info' : message.type}>{message.text}</Alert>}
@@ -503,6 +554,11 @@ export default function BatchScheduler() {
                 <input required type="date" value={endDate} min={startDate || undefined} onChange={(e) => setEndDate(e.target.value)} className={inputClass} />
               </div>
               <div>
+                <label className="block text-xs font-medium text-neutral-500 mb-1">Buffer (days)</label>
+                <input type="number" min={0} max={120} value={bufferDays} onChange={(e) => setBufferDays(e.target.value)} className={inputClass} placeholder="0" />
+                <p className="text-[11px] text-neutral-400 mt-1">Cushion after end date before a batch counts as “late” (reschedules/tests can push lectures back).</p>
+              </div>
+              <div>
                 <label className="block text-xs font-medium text-neutral-500 mb-1">Batch Manager *</label>
                 <select required value={managerId} onChange={(e) => setManagerId(e.target.value)} className={inputClass} disabled={!centreId}>
                   <option value="">{centreId ? 'Select manager' : 'Select centre first'}</option>
@@ -520,13 +576,15 @@ export default function BatchScheduler() {
               <Alert type="error">This program has no subjects yet. Add them in Admin → Programs first.</Alert>
             ) : !centreId ? (
               <Alert type="info">Select a centre to pick faculty for each subject.</Alert>
+            ) : centreFaculty.length === 0 ? (
+              <Alert type="error">No active faculty found for this centre. Add faculty in Admin first.</Alert>
             ) : (
               <>
                 <div className="mb-2">
                   <h3 className="text-sm font-semibold text-neutral-950 uppercase tracking-wider">Weekly Schedule</h3>
                 </div>
                 <p className="text-xs text-neutral-500 mb-4">
-                  All <span className="font-semibold text-violet-600">{programSubjects.length} subjects</span> of this program must have at least one slot (room &amp; timing). Faculty is optional — leave it <span className="font-semibold text-sky-600">Unassigned</span> if the teacher is on leave / not decided, and fill it in later. Add extra rows for more classes of any subject — overlaps are always blocked. ({centreFaculty.length} faculty · {centreClassrooms.length} room{centreClassrooms.length === 1 ? '' : 's'} at {centres.find((c) => c.id === centreId)?.name})
+                  All <span className="font-semibold text-violet-600">{programSubjects.length} subjects</span> of this program must have at least one slot (faculty, room &amp; timing). Add extra rows for more classes of any subject — overlaps are always blocked. ({centreFaculty.length} faculty · {centreClassrooms.length} room{centreClassrooms.length === 1 ? '' : 's'} at {centres.find((c) => c.id === centreId)?.name})
                 </p>
 
                 <div className="overflow-x-auto border border-neutral-200 rounded-xl mb-8">
@@ -542,18 +600,14 @@ export default function BatchScheduler() {
                     </thead>
                     <tbody className="divide-y divide-neutral-100">
                       {scheduleRows.map((row, rowIndex) => {
-                        // A slot is "complete enough to save" with subject + room + a day.
-                        // Faculty is optional: a filled slot with no teacher is a valid TBD.
-                        const hasSlot = row.subject_id && row.classroom_id && row.days.some((d) => d.active)
-                        const tbd = hasSlot && !row.faculty_id
-                        const dotClass = !hasSlot ? 'bg-amber-400' : tbd ? 'bg-sky-400' : 'bg-emerald-500'
+                        const filled = row.subject_id && row.faculty_id && row.classroom_id && row.days.some((d) => d.active)
                         // Show all faculty of the centre (no subject-based filtering for now).
                         const subjectFaculty = centreFaculty
                         return (
-                        <tr key={rowIndex} className={!hasSlot ? 'bg-amber-50/40' : ''}>
+                        <tr key={rowIndex} className={filled ? '' : 'bg-amber-50/40'}>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-2">
-                              <span className={`h-2 w-2 rounded-full shrink-0 ${dotClass}`} title={!hasSlot ? 'Needs subject, room & a day' : tbd ? 'Faculty not assigned yet (TBD)' : 'Ready'} />
+                              <span className={`h-2 w-2 rounded-full shrink-0 ${filled ? 'bg-emerald-500' : 'bg-amber-400'}`} />
                               <select value={row.subject_id} onChange={(e) => updateRow(rowIndex, { subject_id: e.target.value, faculty_id: '' })} className={inputClass}>
                                 <option value="">Select subject</option>
                                 {programSubjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -561,11 +615,10 @@ export default function BatchScheduler() {
                             </div>
                           </td>
                           <td className="px-3 py-3">
-                            <select value={row.faculty_id} onChange={(e) => updateRow(rowIndex, { faculty_id: e.target.value })} className={inputClass}>
-                              <option value="">Unassigned (assign later)</option>
+                            <select value={row.faculty_id} onChange={(e) => updateRow(rowIndex, { faculty_id: e.target.value })} className={inputClass} disabled={subjectFaculty.length === 0}>
+                              <option value="">{subjectFaculty.length === 0 ? 'No faculty at this centre' : 'Select faculty'}</option>
                               {subjectFaculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                             </select>
-                            {tbd && <p className="mt-1 text-[10px] font-semibold text-sky-600">TBD — assign a teacher later</p>}
                           </td>
                           <td className="px-3 py-3">
                             <select value={row.classroom_id} onChange={(e) => updateRow(rowIndex, { classroom_id: e.target.value })} className={inputClass} disabled={centreClassrooms.length === 0}>
@@ -627,15 +680,19 @@ export default function BatchScheduler() {
                     <h3 className="font-bold text-neutral-950">{b.name}</h3>
                     <span className="text-[10px] font-bold uppercase tracking-wider bg-neutral-100 text-neutral-600 px-2 py-0.5 rounded-full">{b.status}</span>
                   </div>
-                  {(unassignedByBatch.get(b.id) ?? 0) > 0 && (
-                    <button onClick={() => handleEdit(b)} className="mb-3 inline-flex items-center gap-1 text-[11px] font-semibold bg-sky-50 text-sky-700 border border-sky-200 rounded-full px-2.5 py-1 hover:bg-sky-100">
-                      ⚠ {unassignedByBatch.get(b.id)} slot{unassignedByBatch.get(b.id) === 1 ? '' : 's'} need faculty
-                    </button>
-                  )}
                   <div className="space-y-1.5 text-sm text-neutral-600 mb-4">
                     <p>{programs.find((p) => p.id === b.program_id)?.name}</p>
                     <p>{centres.find((c) => c.id === b.centre_id)?.name}</p>
                     <p className="text-xs text-neutral-400">{new Date(b.start_date).toLocaleDateString()} – {new Date(b.end_date).toLocaleDateString()}</p>
+                    {(() => {
+                      const last = lastLectureByBatch.get(b.id)
+                      if (!last) return null
+                      const delay = daysBetween(b.end_date, last)          // >0 → runs past end date
+                      const over = delay - (b.buffer_days ?? 0)            // >0 → past the buffer too
+                      const cls = delay <= 0 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : over <= 0 ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-red-50 text-red-700 border-red-200'
+                      const label = delay <= 0 ? 'On track' : over <= 0 ? `Buffer: ${delay}/${b.buffer_days ?? 0}d used` : `Late by ${over}d`
+                      return <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${cls}`} title={`Last lecture ${new Date(last).toLocaleDateString()} · planned end ${new Date(b.end_date).toLocaleDateString()}${b.buffer_days ? ` + ${b.buffer_days}d buffer` : ''}`}>{label}</span>
+                    })()}
                   </div>
                   <div className="mb-4">
                     <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 mb-1">Linked Planners</p>
@@ -678,6 +735,40 @@ export default function BatchScheduler() {
             <div className="flex gap-3">
               <BtnPrimary className="flex-1" onClick={handleAttach} disabled={attaching}>{attaching ? 'Attaching…' : 'Attach'}</BtnPrimary>
               <BtnSecondary className="flex-1" onClick={() => setAttachBatch(null)}>Cancel</BtnSecondary>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mergeOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-950/50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl p-8 max-w-md w-full shadow-2xl border border-neutral-200">
+            <h3 className="text-xl font-bold text-neutral-950 mb-1">Merge Batches</h3>
+            <p className="text-sm text-neutral-500 mb-6">Combine two batches that run the <span className="font-semibold">same planner</span> at the same centre. Students move into the batch you keep; the other is archived (its future classes &amp; tests are removed, past records stay).</p>
+            <div className="space-y-4 mb-4">
+              <div>
+                <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Keep this batch (survivor)</label>
+                <select value={survivorId} onChange={(e) => { setSurvivorId(e.target.value); setAbsorbedId('') }} className={inputClass}>
+                  <option value="">Select batch to keep</option>
+                  {batches.filter((b) => b.status !== 'Merged').map((b) => <option key={b.id} value={b.id}>{b.name} · {centres.find((c) => c.id === b.centre_id)?.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Merge in &amp; archive</label>
+                <select value={absorbedId} onChange={(e) => setAbsorbedId(e.target.value)} className={inputClass} disabled={!survivorId}>
+                  <option value="">{survivorId ? (mergeCandidates.length ? 'Select batch to merge in' : 'No same-planner batch at this centre') : 'Pick the survivor first'}</option>
+                  {mergeCandidates.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+              </div>
+            </div>
+            {survivorId && absorbedId && (
+              <div className="mb-4 text-xs bg-violet-50 border border-violet-200 rounded-lg p-3 text-violet-800">
+                Students of <b>{batches.find((b) => b.id === absorbedId)?.name}</b> will move into <b>{batches.find((b) => b.id === survivorId)?.name}</b>. The merged-in batch is archived; its past attendance &amp; results are kept.
+              </div>
+            )}
+            <div className="flex gap-3">
+              <BtnPrimary className="flex-1" onClick={handleMerge} disabled={merging || !survivorId || !absorbedId}>{merging ? 'Merging…' : 'Merge'}</BtnPrimary>
+              <BtnSecondary className="flex-1" onClick={() => setMergeOpen(false)}>Cancel</BtnSecondary>
             </div>
           </div>
         </div>

@@ -201,16 +201,26 @@ async function materialise(
   const { data: centreFac } = await supabase.rpc('list_active_faculty', { p_centre_id: batch.centre_id })
   const centreFacultyIds = new Set(((centreFac as { id: string }[]) ?? []).map((f) => f.id))
 
-  // The batch's weekly timetable decides which room each subject runs in — a
-  // dated planner lecture inherits its room from its subject's schedule row.
+  // The batch's weekly timetable is the source of a lecture's TIME and ROOM: a
+  // dated planner lecture rides the matching weekly class slot (same subject +
+  // same weekday). We index those slots by (subject : day_of_week).
   const { data: sched } = await supabase
     .from('batch_schedules')
-    .select('subject_id, classroom_id')
+    .select('subject_id, classroom_id, day_of_week, start_time, end_time')
     .eq('batch_id', batch.id)
+  type WeeklySlot = { start: string; durationMinutes: number; classroom_id: string | null }
+  const slotBySubjectDay = new Map<string, WeeklySlot>()
   const roomBySubject = new Map<string, string>()
-  for (const s of (sched ?? []) as { subject_id: string | null; classroom_id: string | null }[]) {
-    if (s.subject_id && s.classroom_id) roomBySubject.set(s.subject_id, s.classroom_id)
+  for (const s of (sched ?? []) as { subject_id: string | null; classroom_id: string | null; day_of_week: number; start_time: string; end_time: string }[]) {
+    if (!s.subject_id) continue
+    if (s.classroom_id && !roomBySubject.has(s.subject_id)) roomBySubject.set(s.subject_id, s.classroom_id)
+    const key = `${s.subject_id}:${s.day_of_week}`
+    if (!slotBySubjectDay.has(key)) {
+      const st = s.start_time.slice(0, 5)
+      slotBySubjectDay.set(key, { start: st, durationMinutes: toMinutes(s.end_time.slice(0, 5)) - toMinutes(st), classroom_id: s.classroom_id ?? null })
+    }
   }
+  const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
   const busyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
   const roomBusyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
@@ -229,34 +239,44 @@ async function materialise(
       continue
     }
 
-    const classroomId = l.subject_id ? roomBySubject.get(l.subject_id as string) ?? null : null
+    const dow = new Date(date + 'T12:00:00').getDay()
+    const slot = l.subject_id ? slotBySubjectDay.get(`${l.subject_id}:${dow}`) ?? null : null
 
-    if (l.start_time) {
-      const st = (l.start_time as string).slice(0, 5)
-      const dur = l.duration_minutes as number
-      const slot = { date, start: toMinutes(st), end: toMinutes(st) + dur }
+    let startTime: string | null
+    let duration: number
+    let classroomId: string | null
 
-      // Faculty conflict only matters when a teacher is actually assigned.
-      let busy: { weekly: WeeklyBusy[]; dated: DatedBusy[] } | null = null
+    if (slot) {
+      // Ride the weekly class slot: its time & room, already overlap-validated
+      // when the schedule was built — no re-check needed.
+      startTime = slot.start
+      duration = slot.durationMinutes
+      classroomId = slot.classroom_id
+    } else if (l.start_time) {
+      // Legacy / explicit time (e.g. an older planner) — validate like before.
+      startTime = l.start_time as string
+      duration = l.duration_minutes as number
+      classroomId = l.subject_id ? roomBySubject.get(l.subject_id as string) ?? null : null
+      const st = startTime.slice(0, 5)
+      const reserve = { date, start: toMinutes(st), end: toMinutes(st) + duration }
       if (facultyId) {
         if (!busyCache[facultyId]) busyCache[facultyId] = await facultyBusyExcluding(supabase, facultyId, [])
-        busy = busyCache[facultyId]
-        const reason = conflictReason(date, l.start_time as string, dur, busy)
+        const busy = busyCache[facultyId]
+        const reason = conflictReason(date, startTime, duration, busy)
         if (reason) { errors.push(`${label}: ${reason}`); continue }
+        busy.dated.push(reserve)
       }
-
-      // A room is one class at a time — check both weekly + other dated lectures.
-      let roomBusy: { weekly: WeeklyBusy[]; dated: DatedBusy[] } | null = null
       if (classroomId) {
         if (!roomBusyCache[classroomId]) roomBusyCache[classroomId] = await classroomBusyExcluding(supabase, classroomId, [])
-        roomBusy = roomBusyCache[classroomId]
-        const rReason = conflictReason(date, l.start_time as string, dur, roomBusy)
+        const roomBusy = roomBusyCache[classroomId]
+        const rReason = conflictReason(date, startTime, duration, roomBusy)
         if (rReason) { errors.push(`${label}: room ${rReason}`); continue }
+        roomBusy.dated.push(reserve)
       }
-
-      // Both clear — reserve the slot so later lectures in this planner see it.
-      if (busy) busy.dated.push(slot)
-      if (roomBusy) roomBusy.dated.push(slot)
+    } else {
+      // No weekly class for this subject on this weekday, and no explicit time.
+      errors.push(`${label}: no ${WEEKDAYS[dow]} class for this subject in the weekly schedule — add it or move the date`)
+      continue
     }
 
     toInsert.push({
@@ -267,8 +287,8 @@ async function materialise(
       faculty_id: facultyId,
       classroom_id: classroomId,
       planned_date: date,
-      start_time: l.start_time,
-      duration_minutes: l.duration_minutes,
+      start_time: startTime,
+      duration_minutes: duration,
       stage,
       link_id: linkId,
       planner_lecture_id: l.id,

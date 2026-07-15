@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { rematerialiseLink } from '@/lib/planners'
 import { fetchMaster, coverageReport, type Master } from '@/lib/syllabus'
-import { parsePlannedDate, parseDuration, validateOptionalTime } from '@/lib/validation'
+import { parsePlannedDate } from '@/lib/validation'
 import { Alert, BtnPrimary, BtnSecondary, Card } from '@/components/PortalShell'
 
 type Planner = { id: string; name: string; program_id: string | null }
@@ -17,8 +17,6 @@ type EditRow = {
   chapter: string
   topic_name: string
   planned_date: string
-  start_time: string
-  duration_minutes: string
 }
 
 function batchName(v: LinkLite['batches']): string {
@@ -74,7 +72,7 @@ export default function EditPlanner() {
     const prog = planners.find((p) => p.id === id)?.program_id ?? null
     fetchMaster(supabase, prog ?? '').then(setMaster)
     const [lecRes, linkRes] = await Promise.all([
-      supabase.from('planner_lectures').select('subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes').eq('planner_id', id).order('sequence_no', { ascending: true }),
+      supabase.from('planner_lectures').select('subject_id, faculty_id, chapter, topic_name, planned_date').eq('planner_id', id).order('sequence_no', { ascending: true }),
       supabase.from('batch_planner_links').select('id, stage, batches(name)').eq('planner_id', id),
     ])
     setRows((lecRes.data ?? []).map((l) => ({
@@ -83,14 +81,12 @@ export default function EditPlanner() {
       chapter: (l.chapter as string) ?? '',
       topic_name: (l.topic_name as string) ?? '',
       planned_date: (l.planned_date as string) ?? '',
-      start_time: l.start_time ? (l.start_time as string).slice(0, 5) : '',
-      duration_minutes: String(l.duration_minutes ?? 60),
     })))
     setLinks((linkRes.data ?? []) as unknown as LinkLite[])
   }
 
   const updateRow = (i: number, patch: Partial<EditRow>) => setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
-  const addRow = () => setRows((prev) => [...prev, { subject_id: '', faculty_id: '', chapter: '', topic_name: '', planned_date: '', start_time: '', duration_minutes: '60' }])
+  const addRow = () => setRows((prev) => [...prev, { subject_id: '', faculty_id: '', chapter: '', topic_name: '', planned_date: '' }])
   const removeRow = (i: number) => setRows((prev) => prev.filter((_, idx) => idx !== i))
 
   const handleSave = async () => {
@@ -102,20 +98,17 @@ export default function EditPlanner() {
       const r = rows[i]
       const rn = i + 1
       if (!r.chapter.trim() || !r.topic_name.trim()) return setMessage({ type: 'error', text: `Row ${rn}: chapter & topic required.` })
-      // Faculty is optional (Unassigned/TBD, fill in later).
+      if (!r.faculty_id) return setMessage({ type: 'error', text: `Row ${rn}: faculty required.` })
       if (!parsePlannedDate(r.planned_date)) return setMessage({ type: 'error', text: `Row ${rn}: valid date required.` })
-      const timeErr = validateOptionalTime(r.start_time)
-      if (timeErr) return setMessage({ type: 'error', text: `Row ${rn}: ${timeErr}` })
-      const dur = parseDuration(r.duration_minutes)
-      if (!dur) return setMessage({ type: 'error', text: `Row ${rn}: duration must be 15–480 min.` })
+      // Time & room come from the batch's weekly schedule at assign time.
       clean.push({
         subject_id: r.subject_id || null,
-        faculty_id: r.faculty_id || null,
+        faculty_id: r.faculty_id,
         chapter: r.chapter.trim(),
         topic_name: r.topic_name.trim(),
         planned_date: r.planned_date,
-        start_time: r.start_time || null,
-        duration_minutes: dur,
+        start_time: null,
+        duration_minutes: 60,
         sequence_no: i,
       })
     }
@@ -208,8 +201,6 @@ export default function EditPlanner() {
                     <th className="text-left px-3 py-2 font-semibold">Chapter</th>
                     <th className="text-left px-3 py-2 font-semibold min-w-[150px]">Topic</th>
                     <th className="text-left px-3 py-2 font-semibold">Date</th>
-                    <th className="text-left px-3 py-2 font-semibold">Time</th>
-                    <th className="text-left px-3 py-2 font-semibold">Mins</th>
                     <th className="w-10" />
                   </tr>
                 </thead>
@@ -224,15 +215,13 @@ export default function EditPlanner() {
                       </td>
                       <td className="px-3 py-2">
                         <select value={r.faculty_id} onChange={(e) => updateRow(i, { faculty_id: e.target.value })} className={inputClass}>
-                          <option value="">Unassigned (TBD)</option>
+                          <option value="">Select</option>
                           {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                         </select>
                       </td>
                       <td className="px-3 py-2"><input list="ep-chapters" value={r.chapter} onChange={(e) => updateRow(i, { chapter: e.target.value })} className={inputClass} placeholder="Ch 1" /></td>
                       <td className="px-3 py-2"><input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(i, { topic_name: e.target.value })} className={inputClass} placeholder="Topic" /></td>
                       <td className="px-3 py-2"><input type="date" value={r.planned_date} onChange={(e) => updateRow(i, { planned_date: e.target.value })} className={inputClass} /></td>
-                      <td className="px-3 py-2"><input type="time" value={r.start_time} onChange={(e) => updateRow(i, { start_time: e.target.value })} className={inputClass} /></td>
-                      <td className="px-3 py-2"><input type="number" min={15} max={480} value={r.duration_minutes} onChange={(e) => updateRow(i, { duration_minutes: e.target.value })} className={`${inputClass} w-20`} /></td>
                       <td className="px-2 py-2"><button onClick={() => removeRow(i)} className="text-red-500 hover:text-red-700 text-xs font-medium">✕</button></td>
                     </tr>
                   ))}

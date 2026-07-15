@@ -54,6 +54,8 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const [loadingChapters, setLoadingChapters] = useState(false)
   const [selectedChapters, setSelectedChapters] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
+  // Set when a save fails on a class/lecture clash → offer "test priority" shift.
+  const [canShift, setCanShift] = useState(false)
 
   const isPrivileged = scope === 'central' || scope === 'admin'
 
@@ -63,7 +65,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     const au = user ? await getAppUser(supabase, user) : null
     setAppUser(au)
     const [bRes, cRes, sRes, clRes, fRes, ucRes, tRes] = await Promise.all([
-      supabase.from('batches').select('id, name, centre_id, program_id, batch_manager_id').order('name'),
+      supabase.from('batches').select('id, name, centre_id, program_id, batch_manager_id').neq('status', 'Merged').order('name'),
       supabase.from('centres').select('id, name, branch_head_id').order('name'),
       supabase.from('subjects').select('id, name, program_id').order('name'),
       supabase.from('classrooms').select('id, name, room_no, centre_id, is_active').order('room_no'),
@@ -149,7 +151,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     setShowForm(false); setEditingId(null)
     setBatchId(''); setName(''); setTestDate(''); setStartTime('10:00'); setDuration('60')
     setTestType('Objective'); setPartType('Full'); setSubjectId(''); setFacultyId(''); setClassroomId('')
-    setEligible([]); setSelectedChapters(new Set())
+    setEligible([]); setSelectedChapters(new Set()); setCanShift(false)
   }
 
   const startEdit = (t: TestRow) => {
@@ -167,15 +169,16 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     setSelectedChapters((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
   }
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setMsg(null)
+  const submit = (e: React.FormEvent) => { e.preventDefault(); doSubmit(false) }
+
+  const doSubmit = async (testPriority: boolean) => {
+    setMsg(null); setCanShift(false)
     if (!batchId) return setMsg({ type: 'error', text: 'Pick a batch.' })
     if (!name.trim()) return setMsg({ type: 'error', text: 'Give the test a name.' })
     if (!testDate) return setMsg({ type: 'error', text: 'Pick a test date.' })
     const dur = parseInt(duration, 10)
     if (!dur || dur < 15 || dur > 480) return setMsg({ type: 'error', text: 'Duration must be 15–480 minutes.' })
-    if (!facultyId) return setMsg({ type: 'error', text: 'Assign a faculty (invigilator).' })
+    // Invigilator is optional — can be assigned later.
     if (!classroomId) return setMsg({ type: 'error', text: 'Pick a room.' })
     let chapterIds: string[] = []
     if (partType === 'Part') {
@@ -189,7 +192,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       batch_id: batchId,
       subject_id: partType === 'Part' ? subjectId : null,
       classroom_id: classroomId,
-      faculty_id: facultyId,
+      faculty_id: facultyId || null,
       name: name.trim(),
       test_date: testDate,
       start_time: startTime,
@@ -198,10 +201,17 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       part_type: partType,
       created_by: appUser?.id ?? null,
     }
-    const res = editingId ? await updateTest(supabase, editingId, input, chapterIds) : await createTest(supabase, input, chapterIds)
+    const res = editingId ? await updateTest(supabase, editingId, input, chapterIds, { testPriority }) : await createTest(supabase, input, chapterIds, { testPriority })
     setSaving(false)
-    if (!res.ok) return setMsg({ type: 'error', text: res.error ?? 'Could not save the test.' })
-    setMsg({ type: 'success', text: editingId ? 'Test updated (saved as draft).' : 'Test saved as draft. Use “Send to Faculty” to assign.' })
+    if (!res.ok) {
+      setMsg({ type: 'error', text: res.error ?? 'Could not save the test.' })
+      // A class/lecture clash can be resolved by giving the test priority; a
+      // clash with another TEST cannot, so only offer the shift for the former.
+      setCanShift(!testPriority && /class|planned lecture/i.test(res.error ?? ''))
+      return
+    }
+    const shiftNote = res.shifted ? ` ${res.shifted} clashing lecture(s) shifted forward.` : ''
+    setMsg({ type: 'success', text: (editingId ? 'Test updated (saved as draft).' : 'Test saved as draft. Use “Send to Faculty” to assign.') + shiftNote })
     resetForm()
     await loadData()
   }
@@ -285,9 +295,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium text-neutral-500 mb-1">Faculty (invigilator) *</label>
+                <label className="block text-xs font-medium text-neutral-500 mb-1">Faculty (invigilator)</label>
                 <select value={facultyId} onChange={(e) => setFacultyId(e.target.value)} className={input} disabled={!formBatch}>
-                  <option value="">{formBatch ? 'Select faculty' : 'Pick batch first'}</option>
+                  <option value="">{formBatch ? 'Unassigned (optional)' : 'Pick batch first'}</option>
                   {formFaculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                 </select>
               </div>
@@ -332,10 +342,16 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
               </div>
             )}
 
-            <div className="flex gap-3">
+            <div className="flex flex-wrap gap-3">
               <BtnPrimary type="submit" disabled={saving}>{saving ? 'Saving…' : editingId ? 'Save Changes' : 'Save as Draft'}</BtnPrimary>
+              {canShift && (
+                <button type="button" onClick={() => doSubmit(true)} disabled={saving} className="h-10 px-5 bg-amber-500 hover:bg-amber-600 disabled:bg-neutral-300 text-white rounded-xl text-sm font-semibold">
+                  {saving ? 'Working…' : 'Give test priority → shift planner forward'}
+                </button>
+              )}
               <BtnSecondary type="button" onClick={resetForm}>Cancel</BtnSecondary>
             </div>
+            {canShift && <p className="mt-2 text-xs text-amber-700">There&rsquo;s a class at this time. This will push that class (and its subject&rsquo;s later lectures) one class-date forward and place the test here.</p>}
           </form>
         </Card>
       )}

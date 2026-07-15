@@ -46,6 +46,54 @@ export async function mergeSubject(
   return { ok: true }
 }
 
+/** Merge two batches that run the SAME planner (e.g. two small batches sat
+ *  together at a centre). Students of `absorbedId` move into `survivorId`; the
+ *  absorbed batch's FUTURE schedule/lectures/tests are removed (so no ghost
+ *  classes on the calendar) while all PAST records (attendance, results) stay
+ *  intact; the absorbed batch is archived (status 'Merged'). Non-destructive to
+ *  history. Precondition: same centre + at least one shared planner. */
+export async function mergeBatch(
+  supabase: SupabaseClient,
+  args: { survivorId: string; absorbedId: string; today: string }
+): Promise<{ ok: boolean; error?: string; movedStudents?: number }> {
+  const { survivorId, absorbedId, today } = args
+  if (!survivorId || !absorbedId || survivorId === absorbedId) return { ok: false, error: 'Pick two different batches.' }
+
+  const { data: batches } = await supabase.from('batches').select('id, name, centre_id, status').in('id', [survivorId, absorbedId])
+  const survivor = (batches ?? []).find((b) => b.id === survivorId)
+  const absorbed = (batches ?? []).find((b) => b.id === absorbedId)
+  if (!survivor || !absorbed) return { ok: false, error: 'Batch not found.' }
+  if (survivor.centre_id !== absorbed.centre_id) return { ok: false, error: 'Both batches must be at the same centre.' }
+  if (absorbed.status === 'Merged') return { ok: false, error: 'That batch is already merged.' }
+
+  // Same-planner precondition: the two batches must share at least one planner.
+  const { data: links } = await supabase.from('batch_planner_links').select('batch_id, planner_id').in('batch_id', [survivorId, absorbedId])
+  const sPlanners = new Set((links ?? []).filter((l) => l.batch_id === survivorId).map((l) => l.planner_id as string))
+  const aPlanners = (links ?? []).filter((l) => l.batch_id === absorbedId).map((l) => l.planner_id as string)
+  if (aPlanners.length === 0 || !aPlanners.some((p) => sPlanners.has(p))) {
+    return { ok: false, error: 'These batches don’t share a planner — only batches on the same planner can be merged.' }
+  }
+
+  // 1. Move students into the survivor.
+  const { data: moved, error: mErr } = await supabase.from('students').update({ batch_id: survivorId }).eq('batch_id', absorbedId).select('id')
+  if (mErr) return { ok: false, error: `students: ${mErr.message}` }
+
+  // 2. Clear the absorbed batch's FUTURE footprint so nothing ghosts the calendar.
+  //    (Recurring weekly rows carry no history, so all of them go.)
+  const delSched = await supabase.from('batch_schedules').delete().eq('batch_id', absorbedId)
+  if (delSched.error) return { ok: false, error: `schedule: ${delSched.error.message}` }
+  const delLec = await supabase.from('batch_planners').delete().eq('batch_id', absorbedId).gte('planned_date', today)
+  if (delLec.error) return { ok: false, error: `lectures: ${delLec.error.message}` }
+  const delTest = await supabase.from('test_schedules').delete().eq('batch_id', absorbedId).gte('test_date', today)
+  if (delTest.error) return { ok: false, error: `tests: ${delTest.error.message}` }
+
+  // 3. Archive the absorbed batch (past records stay attached to it).
+  const { error: aErr } = await supabase.from('batches').update({ status: 'Merged' }).eq('id', absorbedId)
+  if (aErr) return { ok: false, error: aErr.message }
+
+  return { ok: true, movedStudents: moved?.length ?? 0 }
+}
+
 /** Merge program `fromId` into `toId`: move batches, merge/absorb subjects,
  *  then delete `fromId`. Same-named subjects are merged via mergeSubject. */
 export async function mergeProgram(

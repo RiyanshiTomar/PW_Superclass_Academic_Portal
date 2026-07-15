@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { toMinutes } from '@/lib/utils'
+import { toMinutes, addDaysToDate } from '@/lib/utils'
 import { notify } from '@/lib/notifications'
 
 // ============================================================
@@ -94,8 +94,11 @@ export type TestSlot = {
 }
 
 /** Returns a human error if the test slot clashes with anything, else null.
- *  Checks the faculty, the room, and the batch's own classes + other tests. */
-export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot): Promise<string | null> {
+ *  Checks the faculty, the room, and the batch's own classes + other tests.
+ *  With `testPriority`, the test is meant to TAKE the batch's class period, so
+ *  same-time classes/planner lectures are ignored (they get shifted forward
+ *  separately) — only another TEST can still block it. */
+export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot, opts?: { testPriority?: boolean }): Promise<string | null> {
   const s = toMinutes(slot.startTime.slice(0, 5))
   const e = s + slot.durationMinutes
   const dow = new Date(slot.date + 'T12:00:00').getDay()
@@ -126,6 +129,16 @@ export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot)
     return null
   }
 
+  // Test-priority: the test replaces the class period, so only ANOTHER TEST
+  // (in this batch, for the invigilator, or in the room) can still block it.
+  if (opts?.testPriority) {
+    const bt = await testClash('batch_id', slot.batchId, 'This batch already has another test at that time.')
+    if (bt) return bt
+    if (slot.facultyId) { const ft = await testClash('faculty_id', slot.facultyId, 'The invigilator is assigned to another test at that time.'); if (ft) return ft }
+    if (slot.classroomId) { const rt = await testClash('classroom_id', slot.classroomId, 'The room is booked for another test at that time.'); if (rt) return rt }
+    return null
+  }
+
   // The batch must be free — no class and no other test at this time.
   const batch =
     (await weeklyClash('batch_id', slot.batchId, 'This batch has a scheduled class at that time.')) ||
@@ -152,6 +165,65 @@ export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot)
   return null
 }
 
+// --- Test priority: shift the clashing planner forward -------------------
+
+/** Shift ONE subject's planner lectures (on/after `fromDate`) forward by one
+ *  class-date each, freeing the slot; each moved lecture re-inherits its new
+ *  day's time & room. Processes latest-first so no two collide mid-move. */
+async function shiftSubjectForward(supabase: SupabaseClient, batchId: string, subjectId: string, fromDate: string): Promise<number> {
+  const { data: sched } = await supabase
+    .from('batch_schedules')
+    .select('day_of_week, start_time, end_time, classroom_id')
+    .eq('batch_id', batchId).eq('subject_id', subjectId)
+  const slotByDay = new Map<number, { start: string; duration: number; classroom: string | null }>()
+  for (const s of (sched ?? []) as { day_of_week: number; start_time: string; end_time: string; classroom_id: string | null }[]) {
+    if (!slotByDay.has(s.day_of_week)) slotByDay.set(s.day_of_week, { start: s.start_time.slice(0, 5), duration: toMinutes(s.end_time.slice(0, 5)) - toMinutes(s.start_time.slice(0, 5)), classroom: s.classroom_id ?? null })
+  }
+  if (slotByDay.size === 0) return 0
+  const days = Array.from(slotByDay.keys())
+
+  const { data: b } = await supabase.from('batches').select('end_date').eq('id', batchId).single<{ end_date: string }>()
+  const endBuf = addDaysToDate(b?.end_date ?? fromDate, 180)
+  const classDates: string[] = []
+  { const d = new Date(fromDate + 'T12:00:00'); const e = new Date(endBuf + 'T12:00:00'); while (d <= e) { if (days.includes(d.getDay())) classDates.push(d.toISOString().split('T')[0]); d.setDate(d.getDate() + 1) } }
+  const nextOf = (date: string) => { const i = classDates.indexOf(date); return i >= 0 && i + 1 < classDates.length ? classDates[i + 1] : null }
+
+  const { data: lecs } = await supabase
+    .from('batch_planners')
+    .select('id, planned_date')
+    .eq('batch_id', batchId).eq('subject_id', subjectId).gte('planned_date', fromDate)
+    .order('planned_date', { ascending: false })
+  let moved = 0
+  for (const l of (lecs ?? []) as { id: string; planned_date: string }[]) {
+    const nd = nextOf(l.planned_date)
+    if (!nd) continue
+    const slot = slotByDay.get(new Date(nd + 'T12:00:00').getDay())
+    await supabase.from('batch_planners').update({ planned_date: nd, start_time: slot?.start ?? null, duration_minutes: slot?.duration ?? 60, classroom_id: slot?.classroom ?? null }).eq('id', l.id)
+    moved++
+  }
+  return moved
+}
+
+/** Give a test priority over the batch's class: shift every planner lecture
+ *  that clashes with the test's time on that date (and its subject's later
+ *  lectures) forward. Returns how many lectures moved. */
+export async function shiftPlannerForTest(supabase: SupabaseClient, batchId: string, date: string, startTime: string, durationMinutes: number): Promise<number> {
+  const s = toMinutes(startTime.slice(0, 5))
+  const e = s + durationMinutes
+  const { data: clashing } = await supabase
+    .from('batch_planners')
+    .select('subject_id, start_time, duration_minutes')
+    .eq('batch_id', batchId).eq('planned_date', date).not('start_time', 'is', null)
+  const subjects = new Set<string>()
+  for (const r of (clashing ?? []) as { subject_id: string | null; start_time: string; duration_minutes: number }[]) {
+    const rs = toMinutes(r.start_time.slice(0, 5))
+    if (r.subject_id && rs < e && rs + r.duration_minutes > s) subjects.add(r.subject_id)
+  }
+  let moved = 0
+  for (const sid of subjects) moved += await shiftSubjectForward(supabase, batchId, sid, date)
+  return moved
+}
+
 // --- Create / update / stages / reschedule --------------------------------
 
 export type TestInput = {
@@ -171,13 +243,19 @@ export type TestInput = {
 export async function createTest(
   supabase: SupabaseClient,
   input: TestInput,
-  chapterIds: string[]
-): Promise<{ ok: boolean; id?: string; error?: string }> {
+  chapterIds: string[],
+  opts?: { testPriority?: boolean }
+): Promise<{ ok: boolean; id?: string; error?: string; shifted?: number }> {
   const clash = await validateTestSlot(supabase, {
     batchId: input.batch_id, facultyId: input.faculty_id, classroomId: input.classroom_id,
     date: input.test_date, startTime: input.start_time, durationMinutes: input.duration_minutes,
-  })
+  }, { testPriority: opts?.testPriority })
   if (clash) return { ok: false, error: clash }
+
+  // Passed (or nothing but a class was in the way) — if the test is taking the
+  // class period, push the clashing planner lectures forward first.
+  let shifted = 0
+  if (opts?.testPriority) shifted = await shiftPlannerForTest(supabase, input.batch_id, input.test_date, input.start_time, input.duration_minutes)
 
   const { data, error } = await supabase.from('test_schedules').insert(input).select('id').single()
   if (error || !data) return { ok: false, error: error?.message ?? 'Failed to create test.' }
@@ -187,21 +265,25 @@ export async function createTest(
     const { error: cErr } = await supabase.from('test_chapters').insert(rows)
     if (cErr) { await supabase.from('test_schedules').delete().eq('id', data.id); return { ok: false, error: cErr.message } }
   }
-  return { ok: true, id: data.id }
+  return { ok: true, id: data.id, shifted }
 }
 
 export async function updateTest(
   supabase: SupabaseClient,
   testId: string,
   input: TestInput,
-  chapterIds: string[]
-): Promise<{ ok: boolean; error?: string }> {
+  chapterIds: string[],
+  opts?: { testPriority?: boolean }
+): Promise<{ ok: boolean; error?: string; shifted?: number }> {
   const clash = await validateTestSlot(supabase, {
     batchId: input.batch_id, facultyId: input.faculty_id, classroomId: input.classroom_id,
     date: input.test_date, startTime: input.start_time, durationMinutes: input.duration_minutes,
     ignoreTestId: testId,
-  })
+  }, { testPriority: opts?.testPriority })
   if (clash) return { ok: false, error: clash }
+
+  let shifted = 0
+  if (opts?.testPriority) shifted = await shiftPlannerForTest(supabase, input.batch_id, input.test_date, input.start_time, input.duration_minutes)
 
   const { error } = await supabase.from('test_schedules').update(input).eq('id', testId)
   if (error) return { ok: false, error: error.message }
@@ -211,7 +293,7 @@ export async function updateTest(
     const { error: cErr } = await supabase.from('test_chapters').insert(chapterIds.map((cid) => ({ test_id: testId, chapter_id: cid })))
     if (cErr) return { ok: false, error: cErr.message }
   }
-  return { ok: true }
+  return { ok: true, shifted }
 }
 
 export async function setTestStage(

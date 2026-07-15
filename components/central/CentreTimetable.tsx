@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { getAppUser, getUserCentreIds } from '@/lib/auth'
 import { toMinutes, formatTime } from '@/lib/utils'
 import { Alert, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
-type Centre = { id: string; name: string }
+type Centre = { id: string; name: string; branch_head_id: string | null }
 type Classroom = { id: string; name: string; room_no: string | null; centre_id: string; is_active: boolean }
 type Kind = 'class' | 'lecture' | 'test'
 type Block = {
@@ -30,7 +31,7 @@ const PALETTE = [
 ]
 const PX_PER_MIN = 1
 
-export default function CentreTimetable() {
+export default function CentreTimetable({ scope = 'central' }: { scope?: 'central' | 'branch' }) {
   const supabase = createClient()
   const [centres, setCentres] = useState<Centre[]>([])
   const [classrooms, setClassrooms] = useState<Classroom[]>([])
@@ -45,10 +46,20 @@ export default function CentreTimetable() {
     (async () => {
       setLoading(true)
       const [cRes, clRes] = await Promise.all([
-        supabase.from('centres').select('id, name').order('name'),
+        supabase.from('centres').select('id, name, branch_head_id').order('name'),
         supabase.from('classrooms').select('id, name, room_no, centre_id, is_active').order('room_no'),
       ])
-      if (cRes.data) setCentres(cRes.data as Centre[])
+      let centreList = (cRes.data ?? []) as Centre[]
+      // Branch head only sees their own centre(s).
+      if (scope === 'branch') {
+        const { data: { user } } = await supabase.auth.getUser()
+        const au = user ? await getAppUser(supabase, user) : null
+        const ids = new Set(getUserCentreIds(au))
+        if (au) centreList.filter((c) => c.branch_head_id === au.id).forEach((c) => ids.add(c.id))
+        centreList = centreList.filter((c) => ids.has(c.id))
+      }
+      setCentres(centreList)
+      if (centreList.length === 1) setCentreId(centreList[0].id)
       if (clRes.data) setClassrooms(clRes.data as Classroom[])
       setLoading(false)
     })()
@@ -107,7 +118,13 @@ export default function CentreTimetable() {
         const st = toMinutes((t.start_time as string).slice(0, 5))
         out.push({ key: `t${i}`, roomId: (t.classroom_id as string) ?? '∅', startMin: st, endMin: st + (t.duration_minutes as number), kind: 'test', batch: one(t.batches as never)?.['name'] ?? 'Batch', subject: (t.name as string) || 'Test', topic: '', faculty: one(t.app_users as never)?.['full_name'] ?? '—', tag: (t.test_type as string) })
       })
-      setBlocks(out)
+      // A planner lecture now rides its subject's weekly class slot, so it shares
+      // the class block's time & room — the topic is already shown on that class
+      // block. Drop the duplicate lecture block; keep only off-schedule ones
+      // (extra classes at a time with no matching class).
+      const classBlocks = out.filter((b) => b.kind === 'class')
+      const deduped = out.filter((b) => b.kind !== 'lecture' || !classBlocks.some((c) => c.roomId === b.roomId && b.startMin < c.endMin && b.endMin > c.startMin))
+      setBlocks(deduped)
       setLoadingDay(false)
     })()
     return () => { cancelled = true }

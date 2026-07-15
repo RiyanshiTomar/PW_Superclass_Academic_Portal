@@ -8,18 +8,10 @@ import { Alert, Card, PageHeader } from '@/components/PortalShell'
 
 type Batch = { id: string; name: string; centre_id: string; batch_manager_id: string | null }
 type Centre = { id: string; name: string; branch_head_id: string | null }
-type MapRow = { portal_batch_id: string; sheet_batch_id: string | null; batch_name: string }
 type Sched = { day_of_week: number; start_time: string; end_time: string }
 type PlanRow = { planned_date: string; start_time: string | null; duration_minutes: number }
-type AttRow = {
-  regno: string
-  student_name: string
-  attendance_date: string
-  first_punch_in: string | null
-  last_punch_out: string | null
-  admission_status: string | null
-  batch_name: string | null
-}
+type RosterStudent = { regno: string; name: string }
+type AttRow = { regno: string; attendance_date: string; first_punch_in: string | null; last_punch_out: string | null }
 type Instance = { regno: string; name: string; date: string; at?: string }
 
 const WINDOWS = [7, 15, 30, 60, 90]
@@ -39,7 +31,6 @@ const todayNoon = () => { const d = new Date(); d.setHours(12, 0, 0, 0); return 
 const iso = (d: Date) => d.toISOString().split('T')[0]
 const fmtDate = (s: string) => new Date(s + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })
 
-// One card per issue category — explicit Tailwind classes (no dynamic class names).
 const CAT_STYLES: Record<string, { tile: string; num: string; label: string; pill: string }> = {
   absent:    { tile: 'border-rose-100 bg-gradient-to-br from-rose-50 to-white',       num: 'text-rose-600',   label: 'text-rose-900/60',   pill: 'bg-rose-600' },
   late:      { tile: 'border-amber-100 bg-gradient-to-br from-amber-50 to-white',      num: 'text-amber-600',  label: 'text-amber-900/60',  pill: 'bg-amber-500' },
@@ -55,20 +46,17 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
   const [appUser, setAppUser] = useState<AppUser | null>(null)
   const [batches, setBatches] = useState<Batch[]>([])
   const [centres, setCentres] = useState<Centre[]>([])
-  const [maps, setMaps] = useState<MapRow[]>([])
-  const [sheetList, setSheetList] = useState<{ sheet_batch_id: string | null; batch_name: string | null; course: string | null; center: string | null; students: number }[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
 
   const [centreId, setCentreId] = useState('')
   const [batchId, setBatchId] = useState('')
   const [windowDays, setWindowDays] = useState(7)
+  const [roster, setRoster] = useState<RosterStudent[]>([])
   const [rows, setRows] = useState<AttRow[]>([])
   const [scheds, setScheds] = useState<Sched[]>([])
   const [planRows, setPlanRows] = useState<PlanRow[]>([])
   const [loadingBatch, setLoadingBatch] = useState(false)
-  const [mapChoice, setMapChoice] = useState('')
-  const [savingMap, setSavingMap] = useState(false)
   const [openDate, setOpenDate] = useState<string | null>(null)
   const [openCat, setOpenCat] = useState<string | null>(null)
   const [showDaily, setShowDaily] = useState(false)
@@ -79,29 +67,22 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
       const { data: { user } } = await supabase.auth.getUser()
       const au = user ? await getAppUser(supabase, user) : null
       setAppUser(au)
-      const [bRes, cRes, mRes, sbRes] = await Promise.all([
-        supabase.from('batches').select('id, name, centre_id, batch_manager_id').order('name'),
+      const [bRes, cRes] = await Promise.all([
+        supabase.from('batches').select('id, name, centre_id, batch_manager_id').neq('status', 'Merged').order('name'),
         supabase.from('centres').select('id, name, branch_head_id').order('name'),
-        supabase.from('batch_attendance_map').select('portal_batch_id, sheet_batch_id, batch_name'),
-        supabase.rpc('attendance_batches'),
       ])
       if (bRes.error) setErr(bRes.error.message)
       if (bRes.data) setBatches(bRes.data as Batch[])
       if (cRes.data) setCentres(cRes.data as Centre[])
-      if (mRes.data) setMaps(mRes.data as MapRow[])
-      if (sbRes.data) setSheetList(sbRes.data as typeof sheetList)
       setLoading(false)
     }
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ---- Portal-scoped access (based on which portal renders this, not just
-  //      the user's role set — a multi-role user sees the right scope per portal).
   const isPrivileged = scope === 'central' || scope === 'admin'
   const isBranch = scope === 'branch'
   const isBM = scope === 'batch-manager'
-  const canMap = isPrivileged
 
   const allowedCentreIds = useMemo(() => {
     if (isPrivileged) return new Set(centres.map((c) => c.id))
@@ -116,72 +97,54 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
     return batches.filter((b) => allowedCentreIds.has(b.centre_id)) // branch head
   }, [batches, isPrivileged, isBM, appUser, allowedCentreIds])
 
-  // For branch head / batch manager: the centre(s) they belong to (no picker).
   const myCentres = useMemo(() => {
     const ids = isBM ? new Set(visibleBatches.map((b) => b.centre_id)) : allowedCentreIds
     return centres.filter((c) => ids.has(c.id))
   }, [centres, isBM, visibleBatches, allowedCentreIds])
 
-  // Privileged: batches at the picked centre. Branch/BM: all their batches (no picker).
   const batchOptions = useMemo(
     () => (isPrivileged ? visibleBatches.filter((b) => b.centre_id === centreId) : visibleBatches),
     [visibleBatches, centreId, isPrivileged]
   )
 
-  const selectedBatch = batches.find((b) => b.id === batchId) ?? null
-  const mapped = maps.find((m) => m.portal_batch_id === batchId) ?? null
-
   const selectCentre = (id: string) => {
     setCentreId(id)
-    setBatchId(''); setRows([]); setScheds([]); setPlanRows([]); setOpenDate(null); setOpenCat(null)
+    setBatchId(''); setRoster([]); setRows([]); setScheds([]); setPlanRows([]); setOpenDate(null); setOpenCat(null)
   }
 
   const selectBatch = async (id: string) => {
     setBatchId(id)
-    setRows([]); setScheds([]); setPlanRows([]); setOpenDate(null); setOpenCat(null)
-    const b = batches.find((x) => x.id === id)
-    if (!b) return
-    const m = maps.find((mm) => mm.portal_batch_id === id)
-    const target = b.name.toLowerCase()
-    const auto = sheetList.find((s) => (s.sheet_batch_id ?? '').toLowerCase() === target || (s.batch_name ?? '').toLowerCase() === target)
-    setMapChoice(m?.batch_name ?? auto?.batch_name ?? '')
-    if (!m) return
-    await loadBatchData(id, m.batch_name)
+    setRoster([]); setRows([]); setScheds([]); setPlanRows([]); setOpenDate(null); setOpenCat(null)
+    if (!id) return
+    await loadBatchData(id)
   }
 
-  const loadBatchData = async (portalBatchId: string, sheetBatchName: string) => {
+  // Roster = the batch's ASSIGNED students; their attendance is matched by
+  // regno from the biometric `attendance` table (the sheet's own batch column
+  // is ignored). Active class days come from the batch's planner.
+  const loadBatchData = async (portalBatchId: string) => {
     setLoadingBatch(true)
     const since = iso(new Date(todayNoon().getTime() - 95 * 86400000))
+    const { data: studs } = await supabase.from('students').select('regno, student_name').eq('batch_id', portalBatchId).order('student_name')
+    const roster = (studs ?? []).map((s) => ({ regno: s.regno as string, name: (s.student_name as string) ?? '' }))
+    setRoster(roster)
+    const regnos = roster.map((r) => r.regno)
     const [attRes, schRes, planRes] = await Promise.all([
-      supabase.from('attendance').select('regno, student_name, attendance_date, first_punch_in, last_punch_out, admission_status, batch_name').eq('batch_name', sheetBatchName).gte('attendance_date', since),
+      regnos.length
+        ? supabase.from('attendance').select('regno, attendance_date, first_punch_in, last_punch_out').in('regno', regnos).gte('attendance_date', since)
+        : Promise.resolve({ data: [] as AttRow[] }),
       supabase.from('batch_schedules').select('day_of_week, start_time, end_time').eq('batch_id', portalBatchId),
       supabase.from('batch_planners').select('planned_date, start_time, duration_minutes').eq('batch_id', portalBatchId).gte('planned_date', since),
     ])
-    if (attRes.data) setRows(attRes.data as AttRow[])
-    if (schRes.data) setScheds(schRes.data as Sched[])
-    if (planRes.data) setPlanRows(planRes.data as PlanRow[])
+    setRows((attRes.data ?? []) as AttRow[])
+    setScheds((schRes.data ?? []) as Sched[])
+    setPlanRows((planRes.data ?? []) as PlanRow[])
     setLoadingBatch(false)
-  }
-
-  const saveMap = async () => {
-    if (!selectedBatch || !mapChoice) return
-    setSavingMap(true)
-    const chosen = sheetList.find((s) => s.batch_name === mapChoice)
-    const { error } = await supabase.from('batch_attendance_map').upsert(
-      { portal_batch_id: selectedBatch.id, batch_name: mapChoice, sheet_batch_id: chosen?.sheet_batch_id ?? null },
-      { onConflict: 'portal_batch_id' }
-    )
-    setSavingMap(false)
-    if (error) { setErr(error.message); return }
-    const newMap = { portal_batch_id: selectedBatch.id, batch_name: mapChoice, sheet_batch_id: chosen?.sheet_batch_id ?? null }
-    setMaps((prev) => [...prev.filter((m) => m.portal_batch_id !== selectedBatch.id), newMap])
-    await loadBatchData(selectedBatch.id, mapChoice)
   }
 
   // ---- Derived analytics ---------------------------------------------------
   const weekdays = useMemo(() => new Set(scheds.map((s) => s.day_of_week)), [scheds])
 
-  // Batch timing per weekday (for late-in / early-out thresholds), from the weekly schedule.
   const dayBounds = useMemo(() => {
     const map: Record<number, { start: number; end: number }> = {}
     for (const s of scheds) {
@@ -193,7 +156,6 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
     return map
   }, [scheds])
 
-  // Per-date timing from the planner lecture(s) on that exact date (preferred).
   const plannerBoundsByDate = useMemo(() => {
     const m = new Map<string, { start: number; end: number }>()
     for (const p of planRows) {
@@ -214,9 +176,6 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
     return dayBounds[dow] ?? null
   }
 
-  // ACTIVE class days come from the planner (both class & test lectures are
-  // materialised here) — holidays simply have no lecture, so they don't count.
-  // Falls back to the weekly recurring schedule if a planner isn't attached yet.
   const usingPlanner = planRows.length > 0
   const activeDatesAll = useMemo(() => {
     const set = new Set<string>()
@@ -237,9 +196,9 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
 
   const students = useMemo(() => {
     const m = new Map<string, string>()
-    for (const r of rows) if (!m.has(r.regno)) m.set(r.regno, r.student_name)
+    for (const s of roster) m.set(s.regno, s.name)
     return m
-  }, [rows])
+  }, [roster])
 
   const byRegDate = useMemo(() => {
     const m = new Map<string, AttRow>()
@@ -302,11 +261,10 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
 
   return (
     <div className="max-w-6xl mx-auto">
-      <PageHeader title="Attendance" description={`Live from the biometric sheet (read-only). Only active class days from the batch's planner are counted — holidays are ignored. ${roleNote}`} />
+      <PageHeader title="Attendance" description={`Live from the biometric sheet (read-only), matched to each batch's assigned students. Only active class days from the batch's planner are counted — holidays are ignored. ${roleNote}`} />
 
       {err && <Alert type="error">{err}</Alert>}
 
-      {/* Branch head / batch manager are tied to their centre — no centre picker. */}
       {!isPrivileged && !loading && myCentres.length > 0 && (
         <div className="mb-4 inline-flex items-center gap-2 rounded-xl border border-violet-100 bg-violet-50 px-4 py-2">
           <span className="text-xs font-semibold uppercase tracking-wider text-violet-500">Your centre{myCentres.length > 1 ? 's' : ''}</span>
@@ -331,7 +289,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
             {batchOptions.map((b) => <option key={b.id} value={b.id}>{b.name}{!isPrivileged && myCentres.length > 1 && b.centre_id ? ` — ${centreName(b.centre_id)}` : ''}</option>)}
           </select>
         </div>
-        {mapped && (
+        {batchId && roster.length > 0 && (
           <div className="flex gap-1">
             {WINDOWS.map((w) => (
               <button key={w} onClick={() => setWindowDays(w)} className={`h-11 px-3 rounded-xl text-sm font-semibold transition-colors ${windowDays === w ? 'bg-violet-600 text-white' : 'bg-white border border-neutral-200 text-neutral-600 hover:border-violet-300'}`}>{w}d</button>
@@ -342,34 +300,12 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
 
       {!batchId ? (
         <Card className="p-10 text-center text-neutral-400">Pick a batch to see its attendance.</Card>
-      ) : !mapped ? (
-        canMap ? (
-          <Card className="p-6">
-            <h3 className="font-bold text-neutral-950 mb-1">Link this batch to attendance data</h3>
-            <p className="text-sm text-neutral-500 mb-4">Choose which batch in the attendance sheet corresponds to <span className="font-semibold">{selectedBatch?.name}</span>. This connects the planner (active class days) with the biometric punches.</p>
-            <div className="flex flex-wrap gap-3 items-center">
-              <select value={mapChoice} onChange={(e) => setMapChoice(e.target.value)} className={`${selectCls} min-w-[360px]`}>
-                <option value="">Select attendance batch</option>
-                {sheetList.filter((s) => s.batch_name).map((s) => (
-                  <option key={s.batch_name} value={s.batch_name!}>
-                    {(s.sheet_batch_id || s.batch_name)}{s.course ? ` · ${s.course}` : ''}{s.center ? ` · ${s.center}` : ''} · {s.students} students
-                  </option>
-                ))}
-              </select>
-              <button onClick={saveMap} disabled={!mapChoice || savingMap} className="h-11 px-5 rounded-xl text-sm font-semibold bg-gradient-to-r from-violet-600 to-indigo-600 disabled:from-neutral-300 disabled:to-neutral-300 text-white shadow-md shadow-violet-500/25">{savingMap ? 'Linking…' : 'Link'}</button>
-            </div>
-            <p className="text-xs text-neutral-400 mt-3">Tip: match by course + centre + student count. The code shown is the attendance system&apos;s batch id.</p>
-            {sheetList.length === 0 && <p className="text-xs text-amber-600 mt-2">No attendance data found yet. Run <code>npm run sync-attendance</code> first.</p>}
-          </Card>
-        ) : (
-          <Alert type="info">This batch isn&apos;t linked to attendance data yet. Ask the Central Team to link it under Central → Attendance.</Alert>
-        )
       ) : loadingBatch ? (
         <Card className="p-10 text-center text-neutral-400">Loading attendance…</Card>
+      ) : roster.length === 0 ? (
+        <Alert type="info">No students assigned to this batch yet — the Branch Head assigns them under Students. Attendance is measured against the batch’s assigned students.</Alert>
       ) : activeDatesAll.length === 0 ? (
-        <Alert type="info">No planner (or weekly schedule) found for this batch, so there are no class days to measure against. Attach a planner in Batch Planner first.</Alert>
-      ) : students.size === 0 ? (
-        <Alert type="info">No attendance rows found for “{mapped.batch_name}”. Re-check the mapping or run the sync.</Alert>
+        <Alert type="info">No planner (or weekly schedule) found for this batch, so there are no class days to measure against. Create the batch’s planner first.</Alert>
       ) : (
         <div className="space-y-6">
           {/* Summary tiles */}
@@ -404,7 +340,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
             <p className="text-xs text-neutral-400 mt-3">{usingPlanner ? 'Class days derived from this batch’s planner.' : 'No planner attached — falling back to the weekly schedule for class days.'}</p>
           </Card>
 
-          {/* Issue categories — the heart of the view */}
+          {/* Issue categories */}
           <div>
             <div className="flex items-center justify-between mb-3">
               <h4 className="text-xs font-bold text-neutral-500 uppercase tracking-wider">Issues · last {windowDays} days</h4>
@@ -415,11 +351,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
                 const st = CAT_STYLES[c.key]
                 const active = openCat === c.key
                 return (
-                  <button
-                    key={c.key}
-                    onClick={() => setOpenCat(active ? null : c.key)}
-                    className={`${tile} text-left transition-all ${st.tile} ${active ? 'ring-2 ring-violet-400' : 'hover:shadow-md'}`}
-                  >
+                  <button key={c.key} onClick={() => setOpenCat(active ? null : c.key)} className={`${tile} text-left transition-all ${st.tile} ${active ? 'ring-2 ring-violet-400' : 'hover:shadow-md'}`}>
                     <div className={`text-3xl font-black ${st.num}`}>{c.items.length}</div>
                     <div className="text-sm font-semibold text-neutral-800 mt-1">{c.label}</div>
                     <div className={`text-[11px] ${st.label}`}>{c.sub}</div>
@@ -454,7 +386,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
                         <tbody className="divide-y divide-neutral-100">
                           {c.items.map((it, i) => (
                             <tr key={`${it.regno}|${it.date}|${i}`} className="hover:bg-neutral-50/60">
-                              <td className="px-5 py-2 font-medium text-neutral-900">{it.name}</td>
+                              <td className="px-5 py-2 font-medium text-neutral-900">{it.name || '—'}</td>
                               <td className="px-3 py-2 font-mono text-xs text-neutral-500">{it.regno}</td>
                               <td className="px-3 py-2 text-neutral-600">{fmtDate(it.date)}</td>
                               {c.timed && <td className="px-3 py-2 text-neutral-500">{it.at ?? '—'}</td>}
@@ -469,7 +401,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
             })()}
           </div>
 
-          {/* Day-by-day breakdown (secondary) */}
+          {/* Day-by-day breakdown */}
           <Card className="overflow-hidden">
             <button onClick={() => setShowDaily((v) => !v)} className="w-full px-5 py-4 border-b border-neutral-100 flex items-center justify-between hover:bg-neutral-50">
               <h4 className="font-semibold text-neutral-950">Day-by-day · {analysis.dates.length} class day(s) in last {windowDays}d</h4>
@@ -520,10 +452,6 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
               )
             )}
           </Card>
-
-          {canMap && (
-            <p className="text-xs text-neutral-400">Linked to attendance batch “{mapped.batch_name}”. <button className="text-violet-600 font-semibold hover:underline" onClick={() => setMaps((prev) => prev.filter((m) => m.portal_batch_id !== batchId))}>Change link</button></p>
-          )}
         </div>
       )}
     </div>

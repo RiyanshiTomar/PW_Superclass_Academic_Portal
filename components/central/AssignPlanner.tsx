@@ -61,7 +61,7 @@ export default function AssignPlanner() {
     setLoading(true)
     const [planRes, batchRes, linkRes] = await Promise.all([
       supabase.from('planners').select('id, name').order('created_at', { ascending: false }),
-      supabase.from('batches').select('id, name, centre_id, start_date, end_date').order('created_at', { ascending: false }),
+      supabase.from('batches').select('id, name, centre_id, start_date, end_date').neq('status', 'Merged').order('created_at', { ascending: false }),
       supabase.from('batch_planner_links').select('id, planner_id, batch_id, stage, planners(name), batches(name)').order('created_at', { ascending: false }),
     ])
     if (planRes.data) setPlanners(planRes.data as Planner[])

@@ -1,8 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 
 // ============================================================
-// Test results: student roster (from attendance), saving objective marks,
-// importing subjective marks, and batch-wise performance summaries.
+// Test results: student roster (the batch's ASSIGNED students), saving
+// objective marks, importing subjective marks, and batch-wise summaries.
 // ============================================================
 
 export type RosterStudent = { regno: string; name: string }

@@ -19,6 +19,8 @@ type Draft = { subject_id: string; faculty_id: string; planned_date: string; day
 
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().trim()
 const csvCell = (v: string) => (/[",\n]/.test(v ?? '') ? `"${(v ?? '').replace(/"/g, '""')}"` : (v ?? ''))
+// ISO (YYYY-MM-DD) → DD-MM-YYYY for the CSV the user fills in Excel.
+const toDMY = (isoDate: string) => { const [y, m, d] = (isoDate || '').split('-'); return y && m && d ? `${d}-${m}-${y}` : isoDate }
 
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 const pad2 = (n: number) => String(n).padStart(2, '0')
@@ -161,7 +163,7 @@ export default function CreatePlanner() {
   const downloadTemplate = () => {
     const header = ['Subject', 'Date', 'Day', 'Faculty Email', 'Chapter', 'Topic']
     const lines = [header.join(',')]
-    for (const r of draft) lines.push([subjName(r.subject_id), r.planned_date, DAYS[r.day], facEmail(r.faculty_id), r.chapter, r.topic_name].map(csvCell).join(','))
+    for (const r of draft) lines.push([subjName(r.subject_id), toDMY(r.planned_date), DAYS[r.day], facEmail(r.faculty_id), r.chapter, r.topic_name].map(csvCell).join(','))
     downloadCsv(lines.join('\n'), `${name.trim() || 'planner'}-template.csv`)
   }
 
@@ -171,7 +173,7 @@ export default function CreatePlanner() {
     for (const r of draft) {
       const err = rowError(r)
       if (!err) continue
-      lines.push([subjName(r.subject_id), r.planned_date, DAYS[r.day], facEmail(r.faculty_id), r.chapter, r.topic_name, err].map(csvCell).join(','))
+      lines.push([subjName(r.subject_id), toDMY(r.planned_date), DAYS[r.day], facEmail(r.faculty_id), r.chapter, r.topic_name, err].map(csvCell).join(','))
     }
     downloadCsv(lines.join('\n'), `${name.trim() || 'planner'}-errors.csv`)
   }

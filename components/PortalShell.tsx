@@ -43,7 +43,7 @@ export default function PortalShell({
 
   return (
     <div className="min-h-screen bg-mesh flex">
-      <aside className="hidden lg:flex w-64 flex-col bg-neutral-950 text-neutral-300 relative overflow-hidden">
+      <aside className="hidden lg:flex w-64 flex-col bg-neutral-950 text-neutral-300 relative overflow-hidden sticky top-0 h-screen shrink-0">
         {/* ambient violet glow inside the dark rail */}
         <div className="pointer-events-none absolute -top-20 -left-10 h-56 w-56 rounded-full bg-violet-500/20 blur-3xl" />
         <div className="pointer-events-none absolute bottom-10 -right-16 h-56 w-56 rounded-full bg-violet-600/10 blur-3xl" />
@@ -56,7 +56,7 @@ export default function PortalShell({
             </span>
           </Link>
         </div>
-        <nav className="relative flex-1 px-3 py-5 space-y-1.5">
+        <nav className="relative flex-1 min-h-0 overflow-y-auto px-3 py-5 space-y-1.5 [scrollbar-width:thin] [scrollbar-color:rgba(255,255,255,0.2)_transparent] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/15">
           {navItems.map((item, i) => {
             const active = pathname === item.href || (item.href !== homeHref && pathname.startsWith(item.href + '/'))
             return (
@@ -77,7 +77,7 @@ export default function PortalShell({
             )
           })}
         </nav>
-        <div className="relative px-4 py-4 border-t border-white/10">
+        <div className="relative shrink-0 px-4 py-4 border-t border-white/10 bg-neutral-950">
           <div className="flex items-center gap-3 mb-3">
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-600 text-white text-xs font-bold shadow-md shadow-violet-500/40">{initials(fullName)}</span>
             <p className="text-sm font-semibold text-white truncate">{fullName || 'User'}</p>

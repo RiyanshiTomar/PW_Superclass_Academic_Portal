@@ -22,8 +22,6 @@ type Draft = { subject_id: string; faculty_id: string; planned_date: string; day
 // — so "Ratio-Proportion" ≈ "Ratio–Proportion" and "Index Numbers" ≈ "Index Number".
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim().replace(/s$/, '')
 const csvCell = (v: string) => (/[",\n]/.test(v ?? '') ? `"${(v ?? '').replace(/"/g, '""')}"` : (v ?? ''))
-// ISO (YYYY-MM-DD) → DD-MM-YYYY for the CSV the user fills in Excel.
-const toDMY = (isoDate: string) => { const [y, m, d] = (isoDate || '').split('-'); return y && m && d ? `${d}-${m}-${y}` : isoDate }
 
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 const pad2 = (n: number) => String(n).padStart(2, '0')
@@ -193,7 +191,7 @@ export default function CreatePlanner() {
   const downloadTemplate = () => {
     const header = ['Subject', 'Date', 'Day', 'Faculty Email', 'Chapter', 'Topic']
     const lines = [header.join(',')]
-    for (const r of draft) lines.push([subjName(r.subject_id), toDMY(r.planned_date), DAYS[r.day], facEmail(r.faculty_id), r.chapter, r.topic_name].map(csvCell).join(','))
+    for (const r of draft) lines.push([subjName(r.subject_id), r.planned_date, DAYS[r.day], facEmail(r.faculty_id), r.chapter, r.topic_name].map(csvCell).join(','))
     downloadCsv(lines.join('\n'), `${name.trim() || 'planner'}-template.csv`)
   }
 
@@ -203,7 +201,7 @@ export default function CreatePlanner() {
     for (const r of draft) {
       const err = rowError(r)
       if (!err) continue
-      lines.push([subjName(r.subject_id), toDMY(r.planned_date), DAYS[r.day], facEmail(r.faculty_id), r.chapter, r.topic_name, err].map(csvCell).join(','))
+      lines.push([subjName(r.subject_id), r.planned_date, DAYS[r.day], facEmail(r.faculty_id), r.chapter, r.topic_name, err].map(csvCell).join(','))
     }
     downloadCsv(lines.join('\n'), `${name.trim() || 'planner'}-errors.csv`)
   }
@@ -215,6 +213,46 @@ export default function CreatePlanner() {
     URL.revokeObjectURL(url)
   }
 
+  // Excel (.xlsx) template — the Date column is a REAL date cell (datatype),
+  // formatted DD-MM-YYYY, so lookups/formulas work regardless of the app's
+  // locale auto-detect. Noon avoids any timezone day-shift in the serial date.
+  const downloadXlsx = async () => {
+    const XLSX = await import('xlsx')
+    const header = ['Subject', 'Date', 'Day', 'Faculty Email', 'Chapter', 'Topic']
+    const aoa: (string | Date)[][] = [header]
+    for (const r of draft) aoa.push([subjName(r.subject_id), new Date(r.planned_date + 'T12:00:00'), DAYS[r.day], facEmail(r.faculty_id), r.chapter, r.topic_name])
+    const ws = XLSX.utils.aoa_to_sheet(aoa, { cellDates: true })
+    for (let i = 1; i < aoa.length; i++) {
+      const cell = ws[XLSX.utils.encode_cell({ r: i, c: 1 })]
+      if (cell) { cell.t = 'd'; cell.z = 'dd-mm-yyyy' }
+    }
+    ws['!cols'] = [{ wch: 22 }, { wch: 12 }, { wch: 6 }, { wch: 24 }, { wch: 28 }, { wch: 28 }]
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Planner')
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' })
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = `${name.trim() || 'planner'}-template.xlsx`; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // Read an uploaded CSV or Excel file into the same {headers, rows} shape as
+  // parseCSVWithHeaders (headers lowercased, empty rows dropped). Excel date
+  // cells are emitted as yyyy-mm-dd strings (raw:false + dateNF) so the existing
+  // normalizeDate path handles them.
+  const readUpload = async (file: File): Promise<{ headers: string[]; rows: string[][] }> => {
+    const isExcel = /\.xlsx?$/i.test(file.name)
+    if (!isExcel) return parseCSVWithHeaders(await file.text())
+    const XLSX = await import('xlsx')
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true })
+    const ws = wb.Sheets[wb.SheetNames[0]]
+    const aoa = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, raw: false, dateNF: 'yyyy-mm-dd', defval: '' })
+    if (aoa.length === 0) return { headers: [], rows: [] }
+    const headers = (aoa[0] || []).map((h) => String(h ?? '').toLowerCase().trim())
+    const rows = aoa.slice(1).map((r) => (r || []).map((c) => String(c ?? ''))).filter((r) => r.some((c) => c.trim().length > 0))
+    return { headers, rows }
+  }
+
   // Upload the filled CSV → match each row to a generated (subject + date) slot
   // and fill its Chapter / Topic / Faculty. Dates are fixed by the schedule.
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -222,10 +260,10 @@ export default function CreatePlanner() {
     if (!file) return
     setBusy(true); setMessage(null)
     try {
-      const { headers, rows } = parseCSVWithHeaders(await file.text())
+      const { headers, rows } = await readUpload(file)
       const col = (...keys: string[]) => headers.findIndex((h) => keys.some((k) => h.includes(k)))
       const iSub = col('subject'), iDate = col('date'), iChap = col('chapter'), iTopic = col('topic'), iFac = col('faculty', 'email', 'teacher')
-      if (iSub < 0 || iDate < 0 || iChap < 0 || iTopic < 0) { setMessage({ type: 'error', text: 'CSV needs Subject, Date, Chapter, Topic columns.' }); return }
+      if (iSub < 0 || iDate < 0 || iChap < 0 || iTopic < 0) { setMessage({ type: 'error', text: 'File needs Subject, Date, Chapter, Topic columns.' }); return }
       const subByName = new Map(programSubjects.map((s) => [norm(s.name), s.id]))
       const facByEmail = new Map(faculty.map((f) => [f.email.toLowerCase(), f.id]))
       const facByName = new Map(faculty.map((f) => [norm(f.full_name), f.id]))
@@ -248,7 +286,7 @@ export default function CreatePlanner() {
       setDraft(next)
       setMessage({ type: unmatched ? 'info' : 'success', text: `${filled} row(s) filled from CSV${unmatched ? ` · ${unmatched} row(s) didn’t match a scheduled class-date (ignored)` : ''}.` })
     } catch (err) {
-      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to parse CSV.' })
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to parse file.' })
     } finally {
       setBusy(false)
       if (fileRef.current) fileRef.current.value = ''
@@ -352,10 +390,11 @@ export default function CreatePlanner() {
               <p className="text-sm text-neutral-500">{draft.length} slots (start→end). Fill <b>Chapter &amp; Topic</b> for real classes (concept-tag checked). Leave a slot empty → <span className="text-sky-600 font-medium">future = buffer</span> ({bufferCount}), <span className="text-neutral-500 font-medium">past = didn’t happen</span>. Save when no red rows.</p>
             </div>
             <div className="flex flex-wrap gap-2">
+              <BtnSecondary onClick={downloadXlsx}>Download Excel</BtnSecondary>
               <BtnSecondary onClick={downloadTemplate}>Download CSV</BtnSecondary>
               <label className={`inline-flex items-center px-4 h-10 rounded-xl text-sm font-semibold cursor-pointer ${busy ? 'bg-neutral-300 text-white' : 'bg-neutral-100 hover:bg-neutral-200 text-neutral-700'}`}>
-                Upload filled CSV
-                <input ref={fileRef} type="file" accept=".csv" className="sr-only" onChange={handleUpload} disabled={busy} />
+                Upload filled (Excel/CSV)
+                <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="sr-only" onChange={handleUpload} disabled={busy} />
               </label>
               {invalidCount > 0 && <BtnSecondary onClick={downloadErrorReport}>Error report ({invalidCount})</BtnSecondary>}
             </div>

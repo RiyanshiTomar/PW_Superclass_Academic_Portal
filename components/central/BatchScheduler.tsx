@@ -29,7 +29,6 @@ type Batch = {
   end_date: string
   batch_manager_id: string
   status: string
-  buffer_days: number
 }
 
 // Each day of a row carries its OWN timing (Mon can differ from Tue for the
@@ -104,7 +103,6 @@ export default function BatchScheduler() {
   const [centreId, setCentreId] = useState('')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
-  const [bufferDays, setBufferDays] = useState('0')
   const [managerId, setManagerId] = useState('')
   // batch_id -> its last planned lecture date (for lateness vs end_date)
   const [lastLectureByBatch, setLastLectureByBatch] = useState<Map<string, string>>(new Map())
@@ -122,6 +120,14 @@ export default function BatchScheduler() {
   const [survivorId, setSurvivorId] = useState('')
   const [absorbedId, setAbsorbedId] = useState('')
   const [merging, setMerging] = useState(false)
+
+  // Batch list search + centre filter (to find a batch quickly).
+  const [gridSearch, setGridSearch] = useState('')
+  const [gridCentre, setGridCentre] = useState('')
+  const shownBatches = useMemo(() => {
+    const q = gridSearch.toLowerCase().trim()
+    return batches.filter((b) => (!gridCentre || b.centre_id === gridCentre) && (!q || b.name.toLowerCase().includes(q)))
+  }, [batches, gridSearch, gridCentre])
 
   const centreFaculty = useMemo(() => {
     if (!centreId) return []
@@ -147,12 +153,15 @@ export default function BatchScheduler() {
     return m
   }, [facultySubjects])
 
-  // Faculty at this centre who actually teach the given subject.
-  // Falls back to all centre faculty when the subject has no mapping yet (so the form is never a dead-end).
+  // Faculty at this centre who actually teach the given subject (from the
+  // faculty→subject mapping). Falls back to all centre faculty when the subject
+  // has no mapping OR none of its mapped teachers are at this centre — so the
+  // form is never a dead-end.
   const facultyForSubject = (subjectId: string) => {
     const allowed = subjectFacultyIds.get(subjectId)
     if (!allowed || allowed.size === 0) return centreFaculty
-    return centreFaculty.filter((f) => allowed.has(f.id))
+    const filtered = centreFaculty.filter((f) => allowed.has(f.id))
+    return filtered.length ? filtered : centreFaculty
   }
 
   const centreManagers = useMemo(() => {
@@ -234,7 +243,7 @@ export default function BatchScheduler() {
       supabase.from('planners').select('id, name').order('created_at', { ascending: false }),
       supabase.from('batch_planner_links').select('id, batch_id, planner_id, faculty_id, stage, planners(name)'),
       supabase.from('faculty_subjects').select('faculty_id, subject_id'),
-      supabase.from('batch_planners').select('batch_id, planned_date'),
+      supabase.from('batch_planners').select('batch_id, planned_date, is_buffer'),
     ])
 
     if (batchesRes.error) setMessage({ type: 'error', text: batchesRes.error.message })
@@ -257,8 +266,10 @@ export default function BatchScheduler() {
     if (linkRes.data) setLinks(linkRes.data as unknown as Link[])
     if (fsRes.data) setFacultySubjects(fsRes.data as FacultySubject[])
     if (bpRes.data) {
+      // Last REAL (non-buffer) lecture per batch — for the lateness chip.
       const m = new Map<string, string>()
-      for (const r of bpRes.data as { batch_id: string; planned_date: string }[]) {
+      for (const r of bpRes.data as { batch_id: string; planned_date: string; is_buffer: boolean }[]) {
+        if (r.is_buffer) continue
         const cur = m.get(r.batch_id)
         if (!cur || r.planned_date > cur) m.set(r.batch_id, r.planned_date)
       }
@@ -301,7 +312,6 @@ export default function BatchScheduler() {
     setCentreId(b.centre_id)
     setStartDate(b.start_date)
     setEndDate(b.end_date)
-    setBufferDays(String(b.buffer_days ?? 0))
     setManagerId(b.batch_manager_id)
     const { data } = await supabase.from('batch_schedules').select('*').eq('batch_id', b.id)
     setScheduleRows(buildRows(b.program_id, (data || []) as FlatSchedule[]))
@@ -311,7 +321,7 @@ export default function BatchScheduler() {
 
   const resetForm = () => {
     setEditingBatch(null)
-    setName(''); setProgramId(''); setCentreId(''); setStartDate(''); setEndDate(''); setBufferDays('0'); setManagerId('')
+    setName(''); setProgramId(''); setCentreId(''); setStartDate(''); setEndDate(''); setManagerId('')
     setScheduleRows([])
     setShowForm(false)
     setMessage(null)
@@ -427,10 +437,10 @@ export default function BatchScheduler() {
 
     let batchId = editingBatch?.id
     if (editingBatch) {
-      const { error } = await supabase.from('batches').update({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, buffer_days: parseInt(bufferDays, 10) || 0, batch_manager_id: managerId }).eq('id', editingBatch.id)
+      const { error } = await supabase.from('batches').update({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId }).eq('id', editingBatch.id)
       if (error) return fail(error.message)
     } else {
-      const { data, error } = await supabase.from('batches').insert({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, buffer_days: parseInt(bufferDays, 10) || 0, batch_manager_id: managerId }).select().single()
+      const { data, error } = await supabase.from('batches').insert({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId }).select().single()
       if (error) return fail(error.message)
       batchId = data.id
     }
@@ -554,11 +564,6 @@ export default function BatchScheduler() {
                 <input required type="date" value={endDate} min={startDate || undefined} onChange={(e) => setEndDate(e.target.value)} className={inputClass} />
               </div>
               <div>
-                <label className="block text-xs font-medium text-neutral-500 mb-1">Buffer (days)</label>
-                <input type="number" min={0} max={120} value={bufferDays} onChange={(e) => setBufferDays(e.target.value)} className={inputClass} placeholder="0" />
-                <p className="text-[11px] text-neutral-400 mt-1">Cushion after end date before a batch counts as “late” (reschedules/tests can push lectures back).</p>
-              </div>
-              <div>
                 <label className="block text-xs font-medium text-neutral-500 mb-1">Batch Manager *</label>
                 <select required value={managerId} onChange={(e) => setManagerId(e.target.value)} className={inputClass} disabled={!centreId}>
                   <option value="">{centreId ? 'Select manager' : 'Select centre first'}</option>
@@ -601,8 +606,8 @@ export default function BatchScheduler() {
                     <tbody className="divide-y divide-neutral-100">
                       {scheduleRows.map((row, rowIndex) => {
                         const filled = row.subject_id && row.faculty_id && row.classroom_id && row.days.some((d) => d.active)
-                        // Show all faculty of the centre (no subject-based filtering for now).
-                        const subjectFaculty = centreFaculty
+                        // Only this subject's faculty (at this centre); falls back to all centre faculty if unmapped.
+                        const subjectFaculty = row.subject_id ? facultyForSubject(row.subject_id) : centreFaculty
                         return (
                         <tr key={rowIndex} className={filled ? '' : 'bg-amber-50/40'}>
                           <td className="px-4 py-3">
@@ -616,7 +621,7 @@ export default function BatchScheduler() {
                           </td>
                           <td className="px-3 py-3">
                             <select value={row.faculty_id} onChange={(e) => updateRow(rowIndex, { faculty_id: e.target.value })} className={inputClass} disabled={subjectFaculty.length === 0}>
-                              <option value="">{subjectFaculty.length === 0 ? 'No faculty at this centre' : 'Select faculty'}</option>
+                              <option value="">{subjectFaculty.length === 0 ? 'No faculty at this centre' : row.subject_id ? 'Select faculty (for this subject)' : 'Pick a subject first'}</option>
                               {subjectFaculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                             </select>
                           </td>
@@ -666,13 +671,30 @@ export default function BatchScheduler() {
           </form>
         </Card>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div>
+          <div className="flex flex-wrap items-end gap-3 mb-4">
+            <div className="flex-1 min-w-[220px]">
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Search batch</label>
+              <input value={gridSearch} onChange={(e) => setGridSearch(e.target.value)} placeholder="Type a batch name…" className="w-full h-11 px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Centre</label>
+              <select value={gridCentre} onChange={(e) => setGridCentre(e.target.value)} className="h-11 min-w-[200px] px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                <option value="">All centres</option>
+                {centres.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            {!loading && <span className="pb-2 text-sm text-neutral-400">{shownBatches.length} batch{shownBatches.length === 1 ? '' : 'es'}</span>}
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {loading ? (
             <div className="col-span-full py-16 text-center text-neutral-400">Loading batches…</div>
           ) : batches.length === 0 ? (
             <div className="col-span-full py-16 text-center border border-dashed border-neutral-200 rounded-2xl text-neutral-500">No batches yet.</div>
+          ) : shownBatches.length === 0 ? (
+            <div className="col-span-full py-16 text-center border border-dashed border-neutral-200 rounded-2xl text-neutral-500">No batches match your search/centre.</div>
           ) : (
-            batches.map((b) => {
+            shownBatches.map((b) => {
               const bl = links.filter((l) => l.batch_id === b.id)
               return (
                 <Card key={b.id} className="p-6 hover:shadow-md transition-shadow flex flex-col">
@@ -687,11 +709,11 @@ export default function BatchScheduler() {
                     {(() => {
                       const last = lastLectureByBatch.get(b.id)
                       if (!last) return null
-                      const delay = daysBetween(b.end_date, last)          // >0 → runs past end date
-                      const over = delay - (b.buffer_days ?? 0)            // >0 → past the buffer too
-                      const cls = delay <= 0 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : over <= 0 ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-red-50 text-red-700 border-red-200'
-                      const label = delay <= 0 ? 'On track' : over <= 0 ? `Buffer: ${delay}/${b.buffer_days ?? 0}d used` : `Late by ${over}d`
-                      return <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${cls}`} title={`Last lecture ${new Date(last).toLocaleDateString()} · planned end ${new Date(b.end_date).toLocaleDateString()}${b.buffer_days ? ` + ${b.buffer_days}d buffer` : ''}`}>{label}</span>
+                      // last = last REAL (non-buffer) lecture. Past end date = buffer consumed → late.
+                      const delay = daysBetween(b.end_date, last)
+                      const cls = delay <= 0 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'
+                      const label = delay <= 0 ? 'On track' : `Late by ${delay}d`
+                      return <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${cls}`} title={`Last real lecture ${new Date(last + 'T12:00:00').toLocaleDateString()} · planned end ${new Date(b.end_date).toLocaleDateString()}`}>{label}</span>
                     })()}
                   </div>
                   <div className="mb-4">
@@ -715,6 +737,7 @@ export default function BatchScheduler() {
               )
             })
           )}
+          </div>
         </div>
       )}
 

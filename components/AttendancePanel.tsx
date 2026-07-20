@@ -134,7 +134,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
         ? supabase.from('attendance').select('regno, attendance_date, first_punch_in, last_punch_out').in('regno', regnos).gte('attendance_date', since)
         : Promise.resolve({ data: [] as AttRow[] }),
       supabase.from('batch_schedules').select('day_of_week, start_time, end_time').eq('batch_id', portalBatchId),
-      supabase.from('batch_planners').select('planned_date, start_time, duration_minutes').eq('batch_id', portalBatchId).gte('planned_date', since),
+      supabase.from('batch_planners').select('planned_date, start_time, duration_minutes').eq('batch_id', portalBatchId).eq('is_buffer', false).gte('planned_date', since),
     ])
     setRows((attRes.data ?? []) as AttRow[])
     setScheds((schRes.data ?? []) as Sched[])

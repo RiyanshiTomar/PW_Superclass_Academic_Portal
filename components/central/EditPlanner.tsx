@@ -24,6 +24,8 @@ function batchName(v: LinkLite['batches']): string {
   return Array.isArray(v) ? v[0]?.name ?? 'Batch' : v.name ?? 'Batch'
 }
 
+const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim().replace(/s$/, '')
+
 export default function EditPlanner() {
   const supabase = createClient()
   const [planners, setPlanners] = useState<Planner[]>([])
@@ -48,6 +50,17 @@ export default function EditPlanner() {
     () => (master ? coverageReport(master, rows.map((r) => ({ subject_id: r.subject_id || null, chapter: r.chapter, topic_name: r.topic_name }))) : null),
     [master, rows]
   )
+  // subjectId → (chapterName → its topic names), all normalised — for validation.
+  const masterMap = useMemo(() => {
+    const m = new Map<string, Map<string, Set<string>>>()
+    for (const s of master?.subjects ?? []) {
+      const cm = new Map<string, Set<string>>()
+      for (const c of s.chapters) cm.set(norm(c.name), new Set(c.topics.map((t) => norm(t))))
+      m.set(s.id, cm)
+    }
+    return m
+  }, [master])
+  const todayISO = new Date().toISOString().split('T')[0]
 
   useEffect(() => {
     async function load() {
@@ -93,24 +106,29 @@ export default function EditPlanner() {
     if (!selectedId) return
     setMessage(null)
 
-    const clean: { subject_id: string | null; faculty_id: string | null; chapter: string; topic_name: string; planned_date: string; start_time: string | null; duration_minutes: number; sequence_no: number }[] = []
+    // Same model as Create: filled → real lecture (concept-tag validated);
+    // empty + future → buffer (reserved); empty + past → skipped (not conducted).
+    const clean: { subject_id: string | null; faculty_id: string | null; chapter: string; topic_name: string; planned_date: string; start_time: string | null; duration_minutes: number; is_buffer: boolean; sequence_no: number }[] = []
+    let seq = 0
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i]
       const rn = i + 1
-      if (!r.chapter.trim() || !r.topic_name.trim()) return setMessage({ type: 'error', text: `Row ${rn}: chapter & topic required.` })
-      if (!r.faculty_id) return setMessage({ type: 'error', text: `Row ${rn}: faculty required.` })
       if (!parsePlannedDate(r.planned_date)) return setMessage({ type: 'error', text: `Row ${rn}: valid date required.` })
-      // Time & room come from the batch's weekly schedule at assign time.
-      clean.push({
-        subject_id: r.subject_id || null,
-        faculty_id: r.faculty_id,
-        chapter: r.chapter.trim(),
-        topic_name: r.topic_name.trim(),
-        planned_date: r.planned_date,
-        start_time: null,
-        duration_minutes: 60,
-        sequence_no: i,
-      })
+      const hasChap = !!r.chapter.trim(), hasTop = !!r.topic_name.trim()
+      if (hasChap !== hasTop) return setMessage({ type: 'error', text: `Row ${rn}: fill BOTH chapter & topic, or leave both empty (buffer/off day).` })
+      if (hasChap && hasTop) {
+        if (!r.faculty_id) return setMessage({ type: 'error', text: `Row ${rn}: faculty required.` })
+        const cm = masterMap.get(r.subject_id)
+        if (cm && cm.size > 0) {
+          const topics = cm.get(norm(r.chapter))
+          if (!topics) return setMessage({ type: 'error', text: `Row ${rn}: chapter "${r.chapter}" is not in this subject’s concept tags.` })
+          if (topics.size > 0 && !topics.has(norm(r.topic_name))) return setMessage({ type: 'error', text: `Row ${rn}: topic "${r.topic_name}" is not under this chapter in concept tags.` })
+        }
+        clean.push({ subject_id: r.subject_id || null, faculty_id: r.faculty_id, chapter: r.chapter.trim(), topic_name: r.topic_name.trim(), planned_date: r.planned_date, start_time: null, duration_minutes: 60, is_buffer: false, sequence_no: seq++ })
+      } else if (r.planned_date >= todayISO) {
+        clean.push({ subject_id: r.subject_id || null, faculty_id: r.faculty_id || null, chapter: '', topic_name: '', planned_date: r.planned_date, start_time: null, duration_minutes: 60, is_buffer: true, sequence_no: seq++ })
+      }
+      // else: empty + past → skip (class didn't happen)
     }
     if (clean.length === 0) return setMessage({ type: 'error', text: 'A planner needs at least one lecture.' })
 
@@ -185,10 +203,11 @@ export default function EditPlanner() {
 
       {selected && (
         <Card className="p-6">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-2">
             <h4 className="font-semibold text-neutral-950">Lectures — {selected.name}</h4>
             <BtnSecondary onClick={addRow}>+ Add Lecture</BtnSecondary>
           </div>
+          <p className="text-xs text-neutral-400 mb-4">Chapter &amp; Topic are validated against the concept tags. Leave a row&rsquo;s Chapter &amp; Topic empty → future = <span className="text-sky-600">buffer</span> (reserved), past = class didn&rsquo;t happen (dropped).</p>
           {rows.length === 0 ? (
             <p className="text-sm text-neutral-400 py-6 text-center">No lectures. Add one to begin.</p>
           ) : (

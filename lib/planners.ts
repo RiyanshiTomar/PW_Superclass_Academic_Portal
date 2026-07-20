@@ -18,6 +18,7 @@ export type PlannerLectureInput = {
   planned_date: string
   start_time: string | null
   duration_minutes: number
+  is_buffer?: boolean
 }
 
 export type BatchLite = { id: string; centre_id: string; start_date: string; end_date: string }
@@ -163,6 +164,7 @@ export async function createPlanner(
     planned_date: l.planned_date,
     start_time: l.start_time,
     duration_minutes: l.duration_minutes,
+    is_buffer: l.is_buffer ?? false,
     sequence_no: i,
   }))
 
@@ -190,7 +192,7 @@ async function materialise(
 ): Promise<RowResult> {
   const { data: lectures } = await supabase
     .from('planner_lectures')
-    .select('id, subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes')
+    .select('id, subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes, is_buffer')
     .eq('planner_id', plannerId)
     .order('sequence_no', { ascending: true })
 
@@ -289,6 +291,7 @@ async function materialise(
       planned_date: date,
       start_time: startTime,
       duration_minutes: duration,
+      is_buffer: (l.is_buffer as boolean) ?? false,
       stage,
       link_id: linkId,
       planner_lecture_id: l.id,
@@ -403,6 +406,38 @@ export async function setLinkStage(
     syncErr = error
   }
   return { error: syncErr?.message ?? null }
+}
+
+/** Release ONE week of a link's lectures to faculty (central publishes the
+ *  schedule week by week). Within the week: past dates auto-Confirm, today
+ *  onward go to the faculty to confirm. Only not-yet-sent (Draft/Rework)
+ *  lectures are touched, so re-sending is safe. */
+export async function sendWeekToFaculty(
+  supabase: SupabaseClient,
+  linkId: string,
+  weekStart: string,
+  weekEnd: string,
+  weekLabel: string
+): Promise<{ error: string | null; upcoming: number }> {
+  const today = new Date().toISOString().split('T')[0]
+  const past = await supabase.from('batch_planners').update({ stage: 'Confirmed' })
+    .eq('link_id', linkId).in('stage', ['Draft', 'Rework'])
+    .gte('planned_date', weekStart).lte('planned_date', weekEnd).lt('planned_date', today)
+  const up = await supabase.from('batch_planners').update({ stage: 'Faculty Assigned' })
+    .eq('link_id', linkId).in('stage', ['Draft', 'Rework'])
+    .gte('planned_date', weekStart).lte('planned_date', weekEnd).gte('planned_date', today)
+  const err = past.error ?? up.error
+  if (err) return { error: err.message, upcoming: 0 }
+
+  // Mark the link in-progress so its overall stage reflects it's with faculty.
+  await supabase.from('batch_planner_links').update({ stage: 'Faculty Assigned', assigned_at: new Date().toISOString() }).eq('id', linkId)
+
+  const { data } = await supabase.from('batch_planners').select('faculty_id')
+    .eq('link_id', linkId).eq('stage', 'Faculty Assigned')
+    .gte('planned_date', weekStart).lte('planned_date', weekEnd)
+  const ids = Array.from(new Set((data ?? []).map((r) => r.faculty_id as string | null).filter((x): x is string => !!x)))
+  if (ids.length) await notifyUsers(supabase, ids, { type: 'planner', title: 'Schedule sent for the week', body: `Confirm your lectures for the week of ${weekLabel}.`, link: '/faculty/planners' })
+  return { error: null, upcoming: (data ?? []).length }
 }
 
 // --- Cascade shift on reschedule / cancellation ---------------------------

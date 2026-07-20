@@ -9,8 +9,8 @@ import EditPlanner from './EditPlanner'
 type Tab = 'create' | 'assign' | 'edit'
 
 const TABS: { key: Tab; label: string; hint: string }[] = [
-  { key: 'create', label: 'Create Planner', hint: 'Upload a CSV → a reusable planner' },
-  { key: 'assign', label: 'Assign Planner', hint: 'Link to batch + faculty, drive stages' },
+  { key: 'create', label: 'Create Planner', hint: 'Pick a batch → fill chapter & topic → save' },
+  { key: 'assign', label: 'Send to Faculty', hint: 'Publish the schedule to faculty, week by week' },
   { key: 'edit', label: 'Edit Planner', hint: 'Change lectures, re-materialise drafts' },
 ]
 

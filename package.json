@@ -11,7 +11,8 @@
     "import-data": "node scripts/import-portal-data.js",
     "seed-passwords": "node scripts/seed-passwords.js",
     "sync-attendance": "node scripts/sync-attendance.js",
-    "sync-students": "node scripts/sync-students.js"
+    "sync-students": "node scripts/sync-students.js",
+    "sync-syllabus": "node scripts/sync-syllabus.js"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.0",

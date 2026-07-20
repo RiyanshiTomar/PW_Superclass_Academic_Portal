@@ -129,7 +129,15 @@ export default function CreatePlanner() {
       fetchMaster(supabase, b.program_id),
     ])
     setMaster(m)
-    const slots = (schedRes.data ?? []) as ScheduleSlot[]
+    let slots = (schedRes.data ?? []) as ScheduleSlot[]
+    if (schedRes.error) {
+      // Most likely the effective_from/to columns don't exist yet (segments
+      // migration not run). Fall back to reading the schedule without them so
+      // the planner still works (treating everything as whole-batch).
+      const base = await supabase.from('batch_schedules').select('subject_id, day_of_week, faculty_id').eq('batch_id', id)
+      if (base.error) { setBusy(false); setMessage({ type: 'error', text: `Could not load the schedule: ${base.error.message}` }); return }
+      slots = (base.data ?? []).map((s) => ({ ...(s as { subject_id: string | null; day_of_week: number; faculty_id: string | null }), effective_from: null, effective_to: null }))
+    }
     const seen = new Set<string>()
     const rows: Draft[] = []
     for (const s of slots) {

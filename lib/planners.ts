@@ -27,7 +27,7 @@ type RowResult = { imported: number; errors: string[] }
 
 // --- Faculty availability (for cascade re-validation) ---------------------
 
-type WeeklyBusy = { day_of_week: number; start: number; end: number }
+type WeeklyBusy = { day_of_week: number; start: number; end: number; from: string | null; to: string | null }
 type DatedBusy = { date: string; start: number; end: number }
 
 /** All of a faculty's committed time (weekly recurring + dated planners),
@@ -40,7 +40,7 @@ async function facultyBusyExcluding(
   const [weeklyRes, datedRes] = await Promise.all([
     supabase
       .from('batch_schedules')
-      .select('day_of_week, start_time, end_time')
+      .select('day_of_week, start_time, end_time, effective_from, effective_to')
       .eq('faculty_id', facultyId),
     supabase
       .from('batch_planners')
@@ -53,6 +53,8 @@ async function facultyBusyExcluding(
     day_of_week: r.day_of_week as number,
     start: toMinutes((r.start_time as string).slice(0, 5)),
     end: toMinutes((r.end_time as string).slice(0, 5)),
+    from: (r.effective_from as string | null) ?? null,
+    to: (r.effective_to as string | null) ?? null,
   }))
 
   const exclude = new Set(excludeIds)
@@ -81,7 +83,7 @@ async function classroomBusyExcluding(
   const [weeklyRes, datedRes] = await Promise.all([
     supabase
       .from('batch_schedules')
-      .select('day_of_week, start_time, end_time')
+      .select('day_of_week, start_time, end_time, effective_from, effective_to')
       .eq('classroom_id', classroomId),
     supabase
       .from('batch_planners')
@@ -94,6 +96,8 @@ async function classroomBusyExcluding(
     day_of_week: r.day_of_week as number,
     start: toMinutes((r.start_time as string).slice(0, 5)),
     end: toMinutes((r.end_time as string).slice(0, 5)),
+    from: (r.effective_from as string | null) ?? null,
+    to: (r.effective_to as string | null) ?? null,
   }))
 
   const exclude = new Set(excludeIds)
@@ -123,9 +127,12 @@ function conflictReason(
   const dow = new Date(date + 'T12:00:00').getDay()
 
   for (const w of busy.weekly) {
-    if (w.day_of_week === dow && start < w.end && end > w.start) {
-      return `overlaps a recurring class on ${date}`
-    }
+    if (w.day_of_week !== dow || start >= w.end || end <= w.start) continue
+    // A recurring slot only occupies dates inside its active segment (NULL =
+    // whole batch → always). A class outside that segment doesn't clash.
+    if (w.from && date < w.from) continue
+    if (w.to && date > w.to) continue
+    return `overlaps a recurring class on ${date}`
   }
   for (const d of busy.dated) {
     if (d.date === date && start < d.end && end > d.start) {
@@ -208,19 +215,22 @@ async function materialise(
   // same weekday). We index those slots by (subject : day_of_week).
   const { data: sched } = await supabase
     .from('batch_schedules')
-    .select('subject_id, classroom_id, day_of_week, start_time, end_time')
+    .select('subject_id, classroom_id, day_of_week, start_time, end_time, effective_from, effective_to')
     .eq('batch_id', batch.id)
-  type WeeklySlot = { start: string; durationMinutes: number; classroom_id: string | null }
-  const slotBySubjectDay = new Map<string, WeeklySlot>()
+  type WeeklySlot = { start: string; durationMinutes: number; classroom_id: string | null; from: string | null; to: string | null }
+  // A (subject : weekday) can have MORE THAN ONE slot now — different date
+  // segments (e.g. Mon 9–10 for 20 Jul–01 Aug, then a different room after). We
+  // keep them all and pick the one whose active range contains the lecture date.
+  const slotsBySubjectDay = new Map<string, WeeklySlot[]>()
   const roomBySubject = new Map<string, string>()
-  for (const s of (sched ?? []) as { subject_id: string | null; classroom_id: string | null; day_of_week: number; start_time: string; end_time: string }[]) {
+  for (const s of (sched ?? []) as { subject_id: string | null; classroom_id: string | null; day_of_week: number; start_time: string; end_time: string; effective_from: string | null; effective_to: string | null }[]) {
     if (!s.subject_id) continue
     if (s.classroom_id && !roomBySubject.has(s.subject_id)) roomBySubject.set(s.subject_id, s.classroom_id)
     const key = `${s.subject_id}:${s.day_of_week}`
-    if (!slotBySubjectDay.has(key)) {
-      const st = s.start_time.slice(0, 5)
-      slotBySubjectDay.set(key, { start: st, durationMinutes: toMinutes(s.end_time.slice(0, 5)) - toMinutes(st), classroom_id: s.classroom_id ?? null })
-    }
+    const st = s.start_time.slice(0, 5)
+    const list = slotsBySubjectDay.get(key) ?? []
+    list.push({ start: st, durationMinutes: toMinutes(s.end_time.slice(0, 5)) - toMinutes(st), classroom_id: s.classroom_id ?? null, from: s.effective_from ?? null, to: s.effective_to ?? null })
+    slotsBySubjectDay.set(key, list)
   }
   const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -242,7 +252,10 @@ async function materialise(
     }
 
     const dow = new Date(date + 'T12:00:00').getDay()
-    const slot = l.subject_id ? slotBySubjectDay.get(`${l.subject_id}:${dow}`) ?? null : null
+    // Pick the segment whose active range contains this date; fall back to the
+    // first slot for that (subject, weekday) so legacy planners still work.
+    const slotList = l.subject_id ? slotsBySubjectDay.get(`${l.subject_id}:${dow}`) ?? [] : []
+    const slot = slotList.find((sl) => (!sl.from || date >= sl.from) && (!sl.to || date <= sl.to)) ?? slotList[0] ?? null
 
     let startTime: string | null
     let duration: number

@@ -12,7 +12,7 @@ type Subject = { id: string; name: string; program_id: string | null }
 type Faculty = { id: string; full_name: string; email: string }
 type Batch = { id: string; name: string; centre_id: string; program_id: string; start_date: string; end_date: string; status: string }
 type PlannerRow = { id: string; name: string; program_id: string | null; created_at: string; planner_lectures: { count: number }[] }
-type ScheduleSlot = { subject_id: string | null; day_of_week: number; faculty_id: string | null }
+type ScheduleSlot = { subject_id: string | null; day_of_week: number; faculty_id: string | null; effective_from: string | null; effective_to: string | null }
 // One planned lecture. Subject/Date/Faculty are pre-filled from the batch's
 // weekly schedule; Central fills Chapter + Topic (faculty editable).
 type Draft = { subject_id: string; faculty_id: string; planned_date: string; day: number; chapter: string; topic_name: string }
@@ -125,7 +125,7 @@ export default function CreatePlanner() {
     setName(`${b.name} — Planner`)
     setBusy(true)
     const [schedRes, m] = await Promise.all([
-      supabase.from('batch_schedules').select('subject_id, day_of_week, faculty_id').eq('batch_id', id),
+      supabase.from('batch_schedules').select('subject_id, day_of_week, faculty_id, effective_from, effective_to').eq('batch_id', id),
       fetchMaster(supabase, b.program_id),
     ])
     setMaster(m)
@@ -134,7 +134,12 @@ export default function CreatePlanner() {
     const rows: Draft[] = []
     for (const s of slots) {
       if (!s.subject_id) continue
-      for (const dt of datesForDay(b.start_date, b.end_date, s.day_of_week)) {
+      // Each slot only generates dates inside its own active range (a segment);
+      // blank = the whole batch. So a subject scheduled only for part of the
+      // batch produces class-dates only for that stretch.
+      const from = s.effective_from || b.start_date
+      const to = s.effective_to || b.end_date
+      for (const dt of datesForDay(from, to, s.day_of_week)) {
         const key = `${s.subject_id}|${dt}`
         if (seen.has(key)) continue // one lecture per subject per day
         seen.add(key)

@@ -7,18 +7,35 @@ function batchName(value: unknown): string {
   return (value as { name?: string })?.name ?? 'another batch'
 }
 
-/** Recurring weekly batch_schedules overlap */
+function batchOf(value: unknown): { name?: string; start_date?: string; end_date?: string } | null {
+  if (Array.isArray(value)) return (value[0] as { name?: string; start_date?: string; end_date?: string }) ?? null
+  return (value as { name?: string; start_date?: string; end_date?: string }) ?? null
+}
+
+/** Two ISO date ranges intersect? NULL bound = open (the whole batch). ISO
+ *  strings compare chronologically, so plain string comparison is safe. */
+function rangesIntersect(aFrom: string | null, aTo: string | null, bFrom: string | null, bTo: string | null): boolean {
+  if (aTo && bFrom && aTo < bFrom) return false
+  if (bTo && aFrom && bTo < aFrom) return false
+  return true
+}
+
+/** Recurring weekly batch_schedules overlap. When newFrom/newTo are given, an
+ *  existing slot only clashes if its active date-range also intersects the new
+ *  slot's — so the same weekday+time in a NON-overlapping date segment is fine. */
 export async function checkWeeklyScheduleOverlap(
   supabase: SupabaseClient,
   facultyId: string,
   dayOfWeek: number,
   startTime: string,
   endTime: string,
-  ignoreBatchId?: string
+  ignoreBatchId?: string,
+  newFrom?: string | null,
+  newTo?: string | null
 ): Promise<string | false> {
   let query = supabase
     .from('batch_schedules')
-    .select('start_time, end_time, batches(name)')
+    .select('start_time, end_time, effective_from, effective_to, batches(name, start_date, end_date)')
     .eq('faculty_id', facultyId)
     .eq('day_of_week', dayOfWeek)
 
@@ -28,33 +45,32 @@ export async function checkWeeklyScheduleOverlap(
   if (!data?.length) return false
 
   for (const row of data) {
-    if (
-      timesOverlap(
-        startTime,
-        endTime,
-        row.start_time.slice(0, 5),
-        row.end_time.slice(0, 5)
-      )
-    ) {
-      return `Recurring class in batch "${batchName(row.batches)}"`
-    }
+    if (!timesOverlap(startTime, endTime, row.start_time.slice(0, 5), row.end_time.slice(0, 5))) continue
+    const b = batchOf(row.batches)
+    const exFrom = (row.effective_from as string | null) ?? b?.start_date ?? null
+    const exTo = (row.effective_to as string | null) ?? b?.end_date ?? null
+    if ((newFrom || newTo) && !rangesIntersect(newFrom ?? null, newTo ?? null, exFrom, exTo)) continue
+    return `Recurring class in batch "${batchName(row.batches)}"`
   }
   return false
 }
 
 /** Recurring weekly batch_schedules overlap for a ROOM — one classroom can
- *  only host one class at a time (checked across every batch at the centre). */
+ *  only host one class at a time (checked across every batch at the centre).
+ *  Date-range aware, like the faculty check above. */
 export async function checkClassroomScheduleOverlap(
   supabase: SupabaseClient,
   classroomId: string,
   dayOfWeek: number,
   startTime: string,
   endTime: string,
-  ignoreBatchId?: string
+  ignoreBatchId?: string,
+  newFrom?: string | null,
+  newTo?: string | null
 ): Promise<string | false> {
   let query = supabase
     .from('batch_schedules')
-    .select('start_time, end_time, batches(name)')
+    .select('start_time, end_time, effective_from, effective_to, batches(name, start_date, end_date)')
     .eq('classroom_id', classroomId)
     .eq('day_of_week', dayOfWeek)
 
@@ -64,16 +80,12 @@ export async function checkClassroomScheduleOverlap(
   if (!data?.length) return false
 
   for (const row of data) {
-    if (
-      timesOverlap(
-        startTime,
-        endTime,
-        row.start_time.slice(0, 5),
-        row.end_time.slice(0, 5)
-      )
-    ) {
-      return `Room already hosts batch "${batchName(row.batches)}"`
-    }
+    if (!timesOverlap(startTime, endTime, row.start_time.slice(0, 5), row.end_time.slice(0, 5))) continue
+    const b = batchOf(row.batches)
+    const exFrom = (row.effective_from as string | null) ?? b?.start_date ?? null
+    const exTo = (row.effective_to as string | null) ?? b?.end_date ?? null
+    if ((newFrom || newTo) && !rangesIntersect(newFrom ?? null, newTo ?? null, exFrom, exTo)) continue
+    return `Room already hosts batch "${batchName(row.batches)}"`
   }
   return false
 }
@@ -130,7 +142,10 @@ export async function checkFacultyAssignmentOverlap(
     facultyId,
     dayOfWeek,
     startTime.slice(0, 5),
-    endTime
+    endTime,
+    undefined,
+    plannedDate,
+    plannedDate
   )
   if (weekly) return `Overlap with ${weekly}`
 

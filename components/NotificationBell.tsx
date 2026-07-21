@@ -61,7 +61,11 @@ export default function NotificationBell({ align = 'down' }: { align?: 'up' | 'd
         )}
       </button>
       {open && (
-        <div className={`absolute ${align === 'up' ? 'bottom-full mb-2' : 'top-full mt-2'} right-0 w-80 max-h-[24rem] overflow-y-auto bg-white text-neutral-900 rounded-xl shadow-2xl border border-neutral-200 z-50`}>
+        // Fixed-position so it can't be clipped by the sidebar's overflow, and
+        // opens INTO the main content (not off the left edge). Desktop sidebar
+        // (align 'up') → bottom-left, just past the 16rem rail; mobile top bar
+        // (align 'down') → top-right.
+        <div className={`fixed ${align === 'up' ? 'bottom-4 left-[17rem]' : 'top-16 right-3'} w-[22rem] max-w-[calc(100vw-1.5rem)] max-h-[70vh] overflow-y-auto bg-white text-neutral-900 rounded-xl shadow-2xl border border-neutral-200 z-[60]`}>
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-neutral-100 sticky top-0 bg-white">
             <span className="font-semibold text-sm">Notifications</span>
             {unread > 0 && <button onClick={allRead} className="text-xs text-violet-600 hover:underline">Mark all read</button>}

@@ -3,8 +3,8 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
-import { cascadeReschedule, cascadeCancel, addExtraLecture } from '@/lib/planners'
-import { rescheduleTest } from '@/lib/tests'
+import { cascadeCancel, addExtraLecture } from '@/lib/planners'
+import { rescheduleTest, shiftSubjectForward } from '@/lib/tests'
 import { notify } from '@/lib/notifications'
 import { toMinutes } from '@/lib/utils'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
@@ -113,7 +113,18 @@ export default function RescheduleRequestsPage() {
       } else if (isCancellation(req)) {
         result = await cascadeCancel(supabase, req.planner_id)
       } else {
-        result = await cascadeReschedule(supabase, req.planner_id, req.requested_date!, req.requested_start_time ?? null)
+        // Reschedule = SHIFT the planner forward. This subject's lecture on the
+        // original date, and every later one, each slides to the subject's NEXT
+        // scheduled class-date (re-inheriting that slot's time & room). Because
+        // it rides the subject's own valid slots, it can NEVER overlap — the old
+        // "move to an arbitrary date" approach is what caused overlap failures.
+        const { data: lec } = await supabase.from('batch_planners').select('batch_id, subject_id, planned_date').eq('id', req.planner_id).single<{ batch_id: string; subject_id: string | null; planned_date: string }>()
+        if (!lec?.batch_id || !lec?.subject_id) {
+          result = { ok: false, error: 'Could not find the lecture to reschedule.' }
+        } else {
+          const moved = await shiftSubjectForward(supabase, lec.batch_id, lec.subject_id, lec.planned_date)
+          result = moved > 0 ? { ok: true } : { ok: false, error: 'Could not shift — this subject has no scheduled class-days. Add its weekly slot first.' }
+        }
       }
       if (!result.ok) {
         setReviewingId(null)

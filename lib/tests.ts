@@ -170,7 +170,7 @@ export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot,
 /** Shift ONE subject's planner lectures (on/after `fromDate`) forward by one
  *  class-date each, freeing the slot; each moved lecture re-inherits its new
  *  day's time & room. Processes latest-first so no two collide mid-move. */
-async function shiftSubjectForward(supabase: SupabaseClient, batchId: string, subjectId: string, fromDate: string): Promise<number> {
+export async function shiftSubjectForward(supabase: SupabaseClient, batchId: string, subjectId: string, fromDate: string): Promise<number> {
   const { data: sched } = await supabase
     .from('batch_schedules')
     .select('day_of_week, start_time, end_time, classroom_id')

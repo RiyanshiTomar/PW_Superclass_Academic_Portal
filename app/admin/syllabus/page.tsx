@@ -9,6 +9,16 @@ type Program = { id: string; name: string }
 type Subject = { id: string; name: string }
 type Chapter = { id: string; subject_id: string; name: string; sequence_no: number }
 type Topic = { id: string; chapter_id: string; name: string; sequence_no: number }
+// Where a subject/chapter is referenced, so we can warn before editing/deleting.
+type Usage = { planners: string[]; lectures: number; live: number }
+type Pending =
+  | { kind: 'rename-subject'; subject: Subject; usage: Usage; value: string }
+  | { kind: 'delete-subject'; subject: Subject; usage: Usage }
+  | { kind: 'rename-chapter'; chapter: Chapter; usage: Usage; value: string }
+  | { kind: 'delete-chapter'; chapter: Chapter; usage: Usage }
+
+function one<T>(v: T | T[] | null | undefined): T | null { return !v ? null : Array.isArray(v) ? v[0] ?? null : v }
+const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim().replace(/s$/, '')
 
 export default function SyllabusPage() {
   const supabase = createClient()
@@ -32,6 +42,10 @@ export default function SyllabusPage() {
   const [mergeSubj, setMergeSubj] = useState<Subject | null>(null)
   const [mergeSubjTarget, setMergeSubjTarget] = useState('')
   const [mergingSubj, setMergingSubj] = useState(false)
+  // Edit/delete with usage warning
+  const [pending, setPending] = useState<Pending | null>(null)
+  const [pendingBusy, setPendingBusy] = useState(false)
+  const [checkingId, setCheckingId] = useState<string | null>(null)
 
   // Concept-tags library (distinct subjects + chapters across ALL programs)
   const [libOpen, setLibOpen] = useState(false)
@@ -82,18 +96,58 @@ export default function SyllabusPage() {
     if (error) return setMsg({ type: 'error', text: error.message.includes('duplicate') ? 'Subject already exists.' : error.message })
     setNewSubject(''); await loadProgram(programId)
   }
-  const renameSubject = async (s: Subject) => {
-    const name = prompt('Rename subject', s.name)?.trim()
-    if (!name || name === s.name) return
-    const { error } = await supabase.from('subjects').update({ name }).eq('id', s.id)
-    if (error) return setMsg({ type: 'error', text: error.message })
-    await loadProgram(programId)
+  // --- Usage lookups: which planners reference a subject / chapter -----------
+  const fetchSubjectUsage = async (subjectId: string): Promise<Usage> => {
+    const [lecRes, bpRes] = await Promise.all([
+      supabase.from('planner_lectures').select('planner_id, planners(name)').eq('subject_id', subjectId),
+      supabase.from('batch_planners').select('id', { count: 'exact', head: true }).eq('subject_id', subjectId),
+    ])
+    const names = new Set<string>()
+    for (const r of (lecRes.data ?? []) as { planners: { name: string } | { name: string }[] | null }[]) { const p = one(r.planners); if (p?.name) names.add(p.name) }
+    return { planners: Array.from(names).sort(), lectures: (lecRes.data ?? []).length, live: bpRes.count ?? 0 }
   }
-  const deleteSubject = async (s: Subject) => {
-    if (!confirm(`Delete subject "${s.name}" with all its chapters & topics?`)) return
-    const { error } = await supabase.from('subjects').delete().eq('id', s.id)
-    if (error) return setMsg({ type: 'error', text: 'Cannot delete — subject may be used by a batch/planner.' })
-    await loadProgram(programId)
+  const fetchChapterUsage = async (subjectId: string, chapterName: string): Promise<Usage> => {
+    const target = norm(chapterName)
+    const [lecRes, bpRes] = await Promise.all([
+      supabase.from('planner_lectures').select('planner_id, chapter, planners(name)').eq('subject_id', subjectId),
+      supabase.from('batch_planners').select('id, chapter').eq('subject_id', subjectId),
+    ])
+    const rows = (lecRes.data ?? []).filter((r) => norm((r as { chapter: string }).chapter) === target)
+    const names = new Set<string>()
+    for (const r of rows as { planners: { name: string } | { name: string }[] | null }[]) { const p = one(r.planners); if (p?.name) names.add(p.name) }
+    const live = ((bpRes.data ?? []) as { chapter: string }[]).filter((r) => norm(r.chapter) === target).length
+    return { planners: Array.from(names).sort(), lectures: rows.length, live }
+  }
+
+  const askRenameSubject = async (s: Subject) => { setCheckingId(s.id); const usage = await fetchSubjectUsage(s.id); setCheckingId(null); setPending({ kind: 'rename-subject', subject: s, usage, value: s.name }) }
+  const askDeleteSubject = async (s: Subject) => { setCheckingId(s.id); const usage = await fetchSubjectUsage(s.id); setCheckingId(null); setPending({ kind: 'delete-subject', subject: s, usage }) }
+  const askRenameChapter = async (c: Chapter) => { setCheckingId(c.id); const usage = await fetchChapterUsage(c.subject_id, c.name); setCheckingId(null); setPending({ kind: 'rename-chapter', chapter: c, usage, value: c.name }) }
+  const askDeleteChapter = async (c: Chapter) => { setCheckingId(c.id); const usage = await fetchChapterUsage(c.subject_id, c.name); setCheckingId(null); setPending({ kind: 'delete-chapter', chapter: c, usage }) }
+
+  const confirmPending = async () => {
+    if (!pending) return
+    setPendingBusy(true); setMsg(null)
+    try {
+      if (pending.kind === 'rename-subject') {
+        const name = pending.value.trim(); if (!name || name === pending.subject.name) { setPending(null); return }
+        const { error } = await supabase.from('subjects').update({ name }).eq('id', pending.subject.id)
+        if (error) throw error
+      } else if (pending.kind === 'delete-subject') {
+        const { error } = await supabase.from('subjects').delete().eq('id', pending.subject.id)
+        if (error) throw new Error('Cannot delete — this subject is still linked to a batch/planner/test. Remove those first (or merge the subject).')
+      } else if (pending.kind === 'rename-chapter') {
+        const name = pending.value.trim(); if (!name || name === pending.chapter.name) { setPending(null); return }
+        const { error } = await supabase.from('chapters').update({ name }).eq('id', pending.chapter.id)
+        if (error) throw error
+      } else if (pending.kind === 'delete-chapter') {
+        const { error } = await supabase.from('chapters').delete().eq('id', pending.chapter.id)
+        if (error) throw error
+      }
+      setPending(null)
+      await loadProgram(programId)
+    } catch (e) {
+      setMsg({ type: 'error', text: e instanceof Error ? e.message : 'Action failed.' })
+    } finally { setPendingBusy(false) }
   }
 
   // Build the library = every distinct subject name across all programs, with
@@ -158,18 +212,6 @@ export default function SyllabusPage() {
     const { error } = await supabase.from('chapters').insert({ subject_id: subjectId, name, sequence_no: seq })
     if (error) return setMsg({ type: 'error', text: error.message.includes('duplicate') ? 'Chapter already exists in this subject.' : error.message })
     setNewChapterVal(''); setNewChapterFor(null); await loadProgram(programId)
-  }
-  const renameChapter = async (c: Chapter) => {
-    const name = prompt('Rename chapter', c.name)?.trim()
-    if (!name || name === c.name) return
-    const { error } = await supabase.from('chapters').update({ name }).eq('id', c.id)
-    if (error) return setMsg({ type: 'error', text: error.message })
-    await loadProgram(programId)
-  }
-  const deleteChapter = async (c: Chapter) => {
-    if (!confirm(`Delete chapter "${c.name}" and its topics?`)) return
-    await supabase.from('chapters').delete().eq('id', c.id)
-    await loadProgram(programId)
   }
 
   // ---- Topic CRUD ----------------------------------------------------------
@@ -349,9 +391,9 @@ export default function SyllabusPage() {
                     <span className="text-xs text-gray-400">{chaps.length} chapters</span>
                   </button>
                   <div className="space-x-3 text-xs">
-                    <button onClick={() => renameSubject(s)} className="text-blue-600 hover:underline">Rename</button>
+                    <button onClick={() => askRenameSubject(s)} disabled={checkingId === s.id} className="text-blue-600 hover:underline disabled:opacity-40">{checkingId === s.id ? 'Checking…' : 'Rename'}</button>
                     <button onClick={() => { setMergeSubj(s); setMergeSubjTarget(''); setMsg(null) }} className="text-violet-600 hover:underline">Merge</button>
-                    <button onClick={() => deleteSubject(s)} className="text-red-600 hover:underline">Delete</button>
+                    <button onClick={() => askDeleteSubject(s)} disabled={checkingId === s.id} className="text-red-600 hover:underline disabled:opacity-40">Delete</button>
                   </div>
                 </div>
 
@@ -369,8 +411,8 @@ export default function SyllabusPage() {
                               <span className="text-[11px] text-gray-400">{tps.length} topics</span>
                             </button>
                             <div className="space-x-2 text-xs">
-                              <button onClick={() => renameChapter(c)} className="text-blue-600 hover:underline">Rename</button>
-                              <button onClick={() => deleteChapter(c)} className="text-red-600 hover:underline">Delete</button>
+                              <button onClick={() => askRenameChapter(c)} disabled={checkingId === c.id} className="text-blue-600 hover:underline disabled:opacity-40">{checkingId === c.id ? 'Checking…' : 'Rename'}</button>
+                              <button onClick={() => askDeleteChapter(c)} disabled={checkingId === c.id} className="text-red-600 hover:underline disabled:opacity-40">Delete</button>
                             </div>
                           </div>
                           {openC && (
@@ -424,6 +466,50 @@ export default function SyllabusPage() {
         <code className="bg-white px-2 py-1 rounded border border-blue-200">Course, Subject, Chapter, Topic</code>
         <p className="mt-1"><span className="font-semibold">Course</span> is optional — if present, each row goes to that program (created if it doesn’t exist), so one file can load every course at once. Without it, everything imports under the program picked above. <span className="font-semibold">Topic</span> is optional too (chapter-only rows work). Existing rows are skipped — safe to re-import.</p>
       </div>
+
+      {pending && (() => {
+        const isRename = pending.kind === 'rename-subject' || pending.kind === 'rename-chapter'
+        const isChapter = 'chapter' in pending
+        const name = 'chapter' in pending ? pending.chapter.name : pending.subject.name
+        const u = pending.usage
+        const mapped = u.planners.length > 0 || u.lectures > 0 || u.live > 0
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={() => !pendingBusy && setPending(null)}>
+            <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl border border-gray-200 p-6" onClick={(e) => e.stopPropagation()}>
+              <h3 className="font-semibold text-gray-900 mb-1">{isRename ? 'Rename' : 'Delete'} {isChapter ? 'chapter' : 'subject'}</h3>
+              <p className="text-sm text-gray-500 mb-4">{isChapter ? 'Chapter' : 'Subject'}: <span className="font-semibold text-gray-800">{name}</span></p>
+
+              {mapped ? (
+                <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+                  <p className="font-semibold mb-1">⚠ This is mapped in existing planners</p>
+                  <p className="mb-1.5">{u.planners.length} planner(s) · {u.lectures} planned + {u.live} scheduled lecture(s) use this {isChapter ? 'chapter' : 'subject'}.</p>
+                  {u.planners.length > 0 && <p className="text-amber-700"><span className="font-medium">Planners:</span> {u.planners.slice(0, 8).join(', ')}{u.planners.length > 8 ? ` +${u.planners.length - 8} more` : ''}</p>}
+                  <p className="mt-1.5">
+                    {isChapter
+                      ? (isRename
+                        ? 'Chapter names are stored as text in planners — after renaming here, open Edit Planner and update the chapter in these planners too, otherwise their concept-tag validation will fail.'
+                        : 'These planners reference this chapter by name — after deleting it, fix them in Edit Planner (else the chapter is no longer in the concept tags).')
+                      : (isRename
+                        ? 'Renaming is safe (planners link a subject by ID, not name) — just confirm it’s intended.'
+                        : 'Delete will be blocked while it’s still linked. First repoint/remove it in these planners, or use Merge to move everything into another subject.')}
+                  </p>
+                </div>
+              ) : (
+                <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-500">Not used in any planner yet — safe to {isRename ? 'rename' : 'delete'}.</div>
+              )}
+
+              {isRename && (
+                <input autoFocus value={pending.value} onChange={(e) => setPending((p) => (p && 'value' in p ? { ...p, value: e.target.value } : p))} className="w-full h-10 px-3 border border-gray-300 rounded-lg text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              )}
+
+              <div className="flex gap-2">
+                <button onClick={confirmPending} disabled={pendingBusy} className={`h-10 px-4 text-white rounded-lg text-sm font-medium disabled:opacity-50 ${isRename ? 'bg-blue-600 hover:bg-blue-700' : 'bg-red-600 hover:bg-red-700'}`}>{pendingBusy ? 'Working…' : isRename ? 'Save change' : mapped ? 'Delete anyway' : 'Delete'}</button>
+                <button onClick={() => setPending(null)} disabled={pendingBusy} className="h-10 px-4 border border-gray-300 rounded-lg text-sm font-medium text-gray-700">Cancel</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {mergeSubj && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={() => setMergeSubj(null)}>

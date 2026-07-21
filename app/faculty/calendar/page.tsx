@@ -185,7 +185,9 @@ export default function FacultyCalendarPage() {
               const dayLectures = byDate.get(date) ?? []
               const isToday = date === todayStr
               const dayNum = Number(date.slice(8, 10))
-              const shown = dayLectures.slice(0, 2)
+              // Show up to 6 so a busy day (4–5 classes) shows them all and the
+              // cell simply grows taller; 7+ collapse into "+N more".
+              const shown = dayLectures.slice(0, 6)
               const extra = dayLectures.length - shown.length
               return (
                 <div

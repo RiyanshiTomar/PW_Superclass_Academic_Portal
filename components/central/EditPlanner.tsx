@@ -1,56 +1,91 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { rematerialiseLink } from '@/lib/planners'
-import { fetchMaster, coverageReport, type Master } from '@/lib/syllabus'
-import { parsePlannedDate } from '@/lib/validation'
+import { fetchMaster, type Master } from '@/lib/syllabus'
+import { addDaysToDate } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card } from '@/components/PortalShell'
 
 type Planner = { id: string; name: string; program_id: string | null }
 type Subject = { id: string; name: string; program_id: string | null }
 type Faculty = { id: string; full_name: string; email: string }
 type LinkLite = { id: string; stage: string; batches: { name: string } | { name: string }[] | null }
+type Status = 'planned' | 'confirmed' | 'conducted'
 type EditRow = {
+  key: string
   subject_id: string
   faculty_id: string
-  chapter: string
-  topic_name: string
+  chapter: string       // locked (concept tag)
+  topic_name: string    // editable
   planned_date: string
+  duration_minutes: number
+  status: Status
 }
+// Buffer / empty template rows are preserved untouched (not shown in this board).
+type Keep = { subject_id: string | null; faculty_id: string | null; chapter: string; topic_name: string; planned_date: string; start_time: string | null; duration_minutes: number; is_buffer: boolean; status: string }
 
 function batchName(v: LinkLite['batches']): string {
   if (!v) return 'Batch'
   return Array.isArray(v) ? v[0]?.name ?? 'Batch' : v.name ?? 'Batch'
 }
-
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim().replace(/s$/, '')
+const fmtDate = (d: string) => (d ? new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }) : '—')
+const daysBetweenISO = (a: string, b: string) => Math.round((new Date(b + 'T12:00:00').getTime() - new Date(a + 'T12:00:00').getTime()) / 86400000)
+
+// EDIT-PLANNER ONLY: re-base each subject's upcoming (non-conducted) rows so
+// they start at TODAY, preserving the gaps between them. Conducted rows keep
+// their real (final) date. Central then marks what's already done with its
+// conducted date and confirms the rest from today onward.
+function rebaseFromToday(all: EditRow[], today: string): EditRow[] {
+  const result = [...all]
+  const subjectIds = Array.from(new Set(all.map((r) => r.subject_id)))
+  for (const sid of subjectIds) {
+    const upcoming = all.filter((r) => r.subject_id === sid && r.status !== 'conducted').sort((a, b) => a.planned_date.localeCompare(b.planned_date))
+    if (upcoming.length === 0) continue
+    const dateByKey = new Map<string, string>()
+    let cur = today
+    dateByKey.set(upcoming[0].key, cur)
+    for (let i = 1; i < upcoming.length; i++) {
+      const gap = Math.max(0, upcoming[i].planned_date && upcoming[i - 1].planned_date ? daysBetweenISO(upcoming[i - 1].planned_date, upcoming[i].planned_date) : 1)
+      cur = addDaysToDate(cur, gap)
+      dateByKey.set(upcoming[i].key, cur)
+    }
+    for (let j = 0; j < result.length; j++) if (dateByKey.has(result[j].key)) result[j] = { ...result[j], planned_date: dateByKey.get(result[j].key)! }
+  }
+  return result
+}
 
 export default function EditPlanner() {
   const supabase = createClient()
+  const keySeq = useRef(0)
+  const nextKey = () => `r${keySeq.current++}`
+
   const [planners, setPlanners] = useState<Planner[]>([])
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [faculty, setFaculty] = useState<Faculty[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [rows, setRows] = useState<EditRow[]>([])
+  const [keptBuffers, setKeptBuffers] = useState<Keep[]>([])
   const [links, setLinks] = useState<LinkLite[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [master, setMaster] = useState<Master | null>(null)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
 
+  const [activeSubject, setActiveSubject] = useState('')
+  const [search, setSearch] = useState('')
+  const [reorderMode, setReorderMode] = useState<'rows' | 'chapters'>('rows')
+  const dragKeyRef = useRef<string | null>(null)
+  const dragChapterRef = useRef<string | null>(null)
+  // "Already conducted" date dialog
+  const [conductKey, setConductKey] = useState<string | null>(null)
+  const [conductDate, setConductDate] = useState('')
+
   const selected = planners.find((p) => p.id === selectedId) ?? null
-  const subjectPool = useMemo(
-    () => subjects.filter((s) => !selected?.program_id || s.program_id === selected.program_id),
-    [subjects, selected]
-  )
-  const chapterOptions = useMemo(() => (master ? Array.from(new Set(master.subjects.flatMap((s) => s.chapters.map((c) => c.name)))) : []), [master])
+  const todayISO = new Date().toISOString().split('T')[0]
+
   const topicOptions = useMemo(() => (master ? Array.from(new Set(master.subjects.flatMap((s) => s.chapters.flatMap((c) => c.topics)))) : []), [master])
-  const coverage = useMemo(
-    () => (master ? coverageReport(master, rows.map((r) => ({ subject_id: r.subject_id || null, chapter: r.chapter, topic_name: r.topic_name }))) : null),
-    [master, rows]
-  )
-  // subjectId → (chapterName → its topic names), all normalised — for validation.
   const masterMap = useMemo(() => {
     const m = new Map<string, Map<string, Set<string>>>()
     for (const s of master?.subjects ?? []) {
@@ -60,7 +95,9 @@ export default function EditPlanner() {
     }
     return m
   }, [master])
-  const todayISO = new Date().toISOString().split('T')[0]
+
+  const subjName = (id: string) => subjects.find((s) => s.id === id)?.name ?? '—'
+  const facName = (id: string) => faculty.find((f) => f.id === id)?.full_name ?? ''
 
   useEffect(() => {
     async function load() {
@@ -79,66 +116,204 @@ export default function EditPlanner() {
   }, [])
 
   const selectPlanner = async (id: string) => {
-    setSelectedId(id)
-    setMessage(null)
-    if (!id) { setRows([]); setLinks([]); setMaster(null); return }
+    setSelectedId(id); setMessage(null); setSearch('')
+    if (!id) { setRows([]); setKeptBuffers([]); setLinks([]); setMaster(null); setActiveSubject(''); return }
     const prog = planners.find((p) => p.id === id)?.program_id ?? null
     fetchMaster(supabase, prog ?? '').then(setMaster)
-    const [lecRes, linkRes] = await Promise.all([
-      supabase.from('planner_lectures').select('subject_id, faculty_id, chapter, topic_name, planned_date').eq('planner_id', id).order('sequence_no', { ascending: true }),
+    let [lecRes, linkRes] = await Promise.all([
+      supabase.from('planner_lectures').select('subject_id, faculty_id, chapter, topic_name, planned_date, duration_minutes, is_buffer, status').eq('planner_id', id).order('planned_date', { ascending: true }),
       supabase.from('batch_planner_links').select('id, stage, batches(name)').eq('planner_id', id),
     ])
-    setRows((lecRes.data ?? []).map((l) => ({
-      subject_id: (l.subject_id as string) ?? '',
-      faculty_id: (l.faculty_id as string) ?? '',
-      chapter: (l.chapter as string) ?? '',
-      topic_name: (l.topic_name as string) ?? '',
-      planned_date: (l.planned_date as string) ?? '',
-    })))
+    // If the status column isn't there yet (migration not run), read without it.
+    if (lecRes.error) {
+      lecRes = (await supabase.from('planner_lectures').select('subject_id, faculty_id, chapter, topic_name, planned_date, duration_minutes, is_buffer').eq('planner_id', id).order('planned_date', { ascending: true })) as typeof lecRes
+    }
+    const real: EditRow[] = []
+    const buffers: Keep[] = []
+    for (const l of (lecRes.data ?? []) as Record<string, unknown>[]) {
+      const chapter = (l.chapter as string) ?? ''
+      const topic = (l.topic_name as string) ?? ''
+      if (chapter.trim() && topic.trim()) {
+        real.push({
+          key: nextKey(),
+          subject_id: (l.subject_id as string) ?? '',
+          faculty_id: (l.faculty_id as string) ?? '',
+          chapter, topic_name: topic,
+          planned_date: (l.planned_date as string) ?? '',
+          duration_minutes: (l.duration_minutes as number) ?? 60,
+          status: (['planned', 'confirmed', 'conducted'].includes(l.status as string) ? l.status : 'planned') as Status,
+        })
+      } else {
+        // preserve buffer / empty rows exactly as they are
+        buffers.push({ subject_id: (l.subject_id as string) ?? null, faculty_id: (l.faculty_id as string) ?? null, chapter, topic_name: topic, planned_date: (l.planned_date as string) ?? '', start_time: null, duration_minutes: (l.duration_minutes as number) ?? 60, is_buffer: (l.is_buffer as boolean) ?? true, status: (l.status as string) ?? 'planned' })
+      }
+    }
+    // Edit-Planner rule: upcoming classes start from TODAY (conducted keep their date).
+    setRows(rebaseFromToday(real, todayISO))
+    setKeptBuffers(buffers)
     setLinks((linkRes.data ?? []) as unknown as LinkLite[])
+    const firstSubj = real[0]?.subject_id ?? ''
+    setActiveSubject(firstSubj)
   }
 
-  const updateRow = (i: number, patch: Partial<EditRow>) => setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
-  const addRow = () => setRows((prev) => [...prev, { subject_id: '', faculty_id: '', chapter: '', topic_name: '', planned_date: '' }])
-  const removeRow = (i: number) => setRows((prev) => prev.filter((_, idx) => idx !== i))
+  // Subjects present in the planner (tabs).
+  const subjectTabs = useMemo(() => {
+    const ids = Array.from(new Set(rows.map((r) => r.subject_id)))
+    return ids.map((id) => ({ id, name: subjName(id) })).sort((a, b) => a.name.localeCompare(b.name))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, subjects])
+
+  useEffect(() => {
+    if (subjectTabs.length && !subjectTabs.some((t) => t.id === activeSubject)) setActiveSubject(subjectTabs[0].id)
+  }, [subjectTabs, activeSubject])
+
+  // After-today summary for the active subject.
+  const summary = useMemo(() => {
+    const left = rows.filter((r) => r.subject_id === activeSubject && r.status !== 'conducted' && r.planned_date >= todayISO)
+    const mins = left.reduce((a, r) => a + (r.duration_minutes || 60), 0)
+    const done = rows.filter((r) => r.subject_id === activeSubject && r.status === 'conducted').length
+    return { lecturesLeft: left.length, hoursLeft: mins / 60, conducted: done }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, activeSubject])
+
+  // Rows for the active subject, filtered by search (teacher / topic / chapter),
+  // grouped by chapter; chapters ordered by their earliest date, rows by date.
+  const chapterGroups = useMemo(() => {
+    const q = search.toLowerCase().trim()
+    const list = rows.filter((r) => r.subject_id === activeSubject && (!q || facName(r.faculty_id).toLowerCase().includes(q) || r.topic_name.toLowerCase().includes(q) || r.chapter.toLowerCase().includes(q)))
+    const byChap = new Map<string, EditRow[]>()
+    for (const r of list) { if (!byChap.has(r.chapter)) byChap.set(r.chapter, []); byChap.get(r.chapter)!.push(r) }
+    const groups = Array.from(byChap.entries()).map(([chapter, rs]) => ({ chapter, rows: [...rs].sort((a, b) => a.planned_date.localeCompare(b.planned_date)) }))
+    groups.sort((a, b) => (a.rows[0]?.planned_date ?? '').localeCompare(b.rows[0]?.planned_date ?? ''))
+    return groups
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, activeSubject, search, faculty])
+
+  // Re-assign the subject's upcoming (non-conducted) dates in ascending order to
+  // the rows in their current array order — so date always follows position.
+  const relayer = (all: EditRow[], subjectId: string): EditRow[] => {
+    const upcoming = all.filter((r) => r.subject_id === subjectId && r.status !== 'conducted')
+    const slots = upcoming.map((r) => r.planned_date).filter(Boolean).sort()
+    // extend the ladder if we somehow have more rows than dates (e.g. after Add)
+    while (slots.length < upcoming.length) {
+      const last = slots[slots.length - 1] || todayISO
+      const gap = slots.length >= 2 ? Math.max(1, Math.round((new Date(slots[slots.length - 1] + 'T12:00:00').getTime() - new Date(slots[slots.length - 2] + 'T12:00:00').getTime()) / 86400000)) : 1
+      slots.push(addDaysToDate(last, gap))
+    }
+    let i = 0
+    const dateByKey = new Map<string, string>()
+    for (const r of upcoming) { dateByKey.set(r.key, slots[i] ?? todayISO); i++ }
+    return all.map((r) => (dateByKey.has(r.key) ? { ...r, planned_date: dateByKey.get(r.key)! } : r))
+  }
+
+  const updateRow = (key: string, patch: Partial<EditRow>) => setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)))
+
+  const addRowToChapter = (subjectId: string, chapter: string) => {
+    setRows((prev) => {
+      const sample = prev.find((r) => r.subject_id === subjectId && r.chapter === chapter)
+      const upDates = prev.filter((r) => r.subject_id === subjectId && r.status !== 'conducted').map((r) => r.planned_date).filter(Boolean).sort()
+      const last = upDates[upDates.length - 1] || todayISO
+      const gap = upDates.length >= 2 ? Math.max(1, Math.round((new Date(upDates[upDates.length - 1] + 'T12:00:00').getTime() - new Date(upDates[upDates.length - 2] + 'T12:00:00').getTime()) / 86400000)) : 7
+      const newRow: EditRow = { key: nextKey(), subject_id: subjectId, faculty_id: sample?.faculty_id ?? '', chapter, topic_name: '', planned_date: addDaysToDate(last, gap), duration_minutes: sample?.duration_minutes ?? 60, status: 'planned' }
+      // insert after the chapter's last row
+      let idx = -1
+      prev.forEach((r, i) => { if (r.subject_id === subjectId && r.chapter === chapter) idx = i })
+      const next = [...prev]
+      next.splice(idx + 1, 0, newRow)
+      return relayer(next, subjectId)
+    })
+  }
+
+  const removeRow = (key: string) => setRows((prev) => {
+    const row = prev.find((r) => r.key === key)
+    const next = prev.filter((r) => r.key !== key)
+    return row ? relayer(next, row.subject_id) : next
+  })
+
+  const setStatus = (key: string, status: Status) => {
+    if (status === 'conducted') {
+      const r = rows.find((x) => x.key === key)
+      setConductKey(key); setConductDate(r?.planned_date && r.planned_date <= todayISO ? r.planned_date : todayISO)
+      return
+    }
+    setRows((prev) => {
+      const row = prev.find((r) => r.key === key)
+      const next = prev.map((r) => (r.key === key ? { ...r, status } : r))
+      return row ? relayer(next, row.subject_id) : next
+    })
+  }
+
+  const applyConducted = () => {
+    if (!conductKey || !conductDate) return
+    setRows((prev) => {
+      const row = prev.find((r) => r.key === conductKey)
+      const next = prev.map((r) => (r.key === conductKey ? { ...r, status: 'conducted' as Status, planned_date: conductDate } : r))
+      return row ? relayer(next, row.subject_id) : next
+    })
+    setConductKey(null); setConductDate('')
+  }
+
+  // --- Drag reorder ---
+  const onRowDrop = (targetKey: string) => {
+    const dragKey = dragKeyRef.current
+    dragKeyRef.current = null
+    if (!dragKey || dragKey === targetKey) return
+    setRows((prev) => {
+      const drag = prev.find((r) => r.key === dragKey)
+      const target = prev.find((r) => r.key === targetKey)
+      if (!drag || !target || drag.subject_id !== target.subject_id || drag.chapter !== target.chapter || drag.status === 'conducted' || target.status === 'conducted') return prev
+      const without = prev.filter((r) => r.key !== dragKey)
+      const ti = without.findIndex((r) => r.key === targetKey)
+      without.splice(ti, 0, drag)
+      return relayer(without, drag.subject_id)
+    })
+  }
+
+  const onChapterDrop = (targetChapter: string) => {
+    const dragChap = dragChapterRef.current
+    dragChapterRef.current = null
+    if (!dragChap || dragChap === targetChapter) return
+    setRows((prev) => {
+      const moving = prev.filter((r) => r.subject_id === activeSubject && r.chapter === dragChap)
+      if (moving.length === 0) return prev
+      const rest = prev.filter((r) => !(r.subject_id === activeSubject && r.chapter === dragChap))
+      // insert moving block before the first row of the target chapter
+      const ti = rest.findIndex((r) => r.subject_id === activeSubject && r.chapter === targetChapter)
+      if (ti < 0) return prev
+      rest.splice(ti, 0, ...moving)
+      return relayer(rest, activeSubject)
+    })
+  }
 
   const handleSave = async () => {
     if (!selectedId) return
     setMessage(null)
-
-    // Same model as Create: filled → real lecture (concept-tag validated);
-    // empty + future → buffer (reserved); empty + past → skipped (not conducted).
-    const clean: { subject_id: string | null; faculty_id: string | null; chapter: string; topic_name: string; planned_date: string; start_time: string | null; duration_minutes: number; is_buffer: boolean; sequence_no: number }[] = []
-    let seq = 0
+    // Every field mandatory on the real rows; topic validated against concept tags.
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i]
-      const rn = i + 1
-      if (!parsePlannedDate(r.planned_date)) return setMessage({ type: 'error', text: `Row ${rn}: valid date required.` })
-      const hasChap = !!r.chapter.trim(), hasTop = !!r.topic_name.trim()
-      if (hasChap !== hasTop) return setMessage({ type: 'error', text: `Row ${rn}: fill BOTH chapter & topic, or leave both empty (buffer/off day).` })
-      if (hasChap && hasTop) {
-        if (!r.faculty_id) return setMessage({ type: 'error', text: `Row ${rn}: faculty required.` })
-        const cm = masterMap.get(r.subject_id)
-        if (cm && cm.size > 0) {
-          const topics = cm.get(norm(r.chapter))
-          if (!topics) return setMessage({ type: 'error', text: `Row ${rn}: chapter "${r.chapter}" is not in this subject’s concept tags.` })
-          if (topics.size > 0 && !topics.has(norm(r.topic_name))) return setMessage({ type: 'error', text: `Row ${rn}: topic "${r.topic_name}" is not under this chapter in concept tags.` })
-        }
-        clean.push({ subject_id: r.subject_id || null, faculty_id: r.faculty_id, chapter: r.chapter.trim(), topic_name: r.topic_name.trim(), planned_date: r.planned_date, start_time: null, duration_minutes: 60, is_buffer: false, sequence_no: seq++ })
-      } else if (r.planned_date >= todayISO) {
-        clean.push({ subject_id: r.subject_id || null, faculty_id: r.faculty_id || null, chapter: '', topic_name: '', planned_date: r.planned_date, start_time: null, duration_minutes: 60, is_buffer: true, sequence_no: seq++ })
+      const where = `"${subjName(r.subject_id)}" · ${r.chapter || 'chapter?'} (row ${i + 1})`
+      if (!r.subject_id) return setMessage({ type: 'error', text: `${where}: subject missing.` })
+      if (!r.faculty_id) return setMessage({ type: 'error', text: `${where}: assign a faculty.` })
+      if (!r.chapter.trim()) return setMessage({ type: 'error', text: `${where}: chapter missing.` })
+      if (!r.topic_name.trim()) return setMessage({ type: 'error', text: `${where}: topic is required.` })
+      if (!r.planned_date) return setMessage({ type: 'error', text: `${where}: date required.` })
+      const cm = masterMap.get(r.subject_id)
+      if (cm && cm.size > 0) {
+        const topics = cm.get(norm(r.chapter))
+        if (topics && topics.size > 0 && !topics.has(norm(r.topic_name))) return setMessage({ type: 'error', text: `${where}: topic "${r.topic_name}" isn't under this chapter in the concept tags.` })
       }
-      // else: empty + past → skip (class didn't happen)
     }
-    if (clean.length === 0) return setMessage({ type: 'error', text: 'A planner needs at least one lecture.' })
+    if (rows.length === 0 && keptBuffers.length === 0) return setMessage({ type: 'error', text: 'A planner needs at least one lecture.' })
+
+    // Order everything by date, then persist with fresh sequence numbers.
+    const realClean: Keep[] = rows.map((r) => ({ subject_id: r.subject_id || null, faculty_id: r.faculty_id, chapter: r.chapter.trim(), topic_name: r.topic_name.trim(), planned_date: r.planned_date, start_time: null, duration_minutes: r.duration_minutes || 60, is_buffer: false, status: r.status }))
+    const all = [...realClean, ...keptBuffers].sort((a, b) => a.planned_date.localeCompare(b.planned_date))
 
     setSaving(true)
-    // Replace all planner_lectures for this planner.
     await supabase.from('planner_lectures').delete().eq('planner_id', selectedId)
-    const { error } = await supabase.from('planner_lectures').insert(clean.map((c) => ({ ...c, planner_id: selectedId })))
+    const { error } = await supabase.from('planner_lectures').insert(all.map((c, i) => ({ ...c, planner_id: selectedId, sequence_no: i })))
     if (error) { setSaving(false); setMessage({ type: 'error', text: error.message }); return }
 
-    // Re-materialise links still editable (Draft / Rework). Leave sent/confirmed links alone.
     const editable = links.filter((l) => l.stage === 'Draft' || l.stage === 'Rework')
     const skipped = links.filter((l) => l.stage === 'Faculty Assigned' || l.stage === 'Confirmed')
     const remErrors: string[] = []
@@ -148,108 +323,136 @@ export default function EditPlanner() {
     }
     setSaving(false)
 
-    let msg = `Planner saved (${clean.length} lecture(s)).`
-    if (editable.length) msg += ` Re-materialised ${editable.length} draft link(s).`
-    if (skipped.length) msg += ` ${skipped.length} link(s) already sent/confirmed were left unchanged.`
+    let msg = `Planner saved (${realClean.length} lecture(s)).`
+    if (editable.length) msg += ` Re-built ${editable.length} draft link(s).`
+    if (skipped.length) msg += ` ${skipped.length} sent/confirmed link(s) left unchanged (recall to re-edit).`
     if (remErrors.length) msg += ` Warnings: ${remErrors.slice(0, 2).join('; ')}`
     setMessage({ type: remErrors.length ? 'info' : 'success', text: msg })
     await selectPlanner(selectedId)
   }
 
-  const inputClass = 'w-full h-9 px-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500'
+  const statusPill = (s: Status) =>
+    s === 'conducted' ? 'bg-neutral-200 text-neutral-700 border-neutral-300'
+      : s === 'confirmed' ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+      : 'bg-white text-neutral-500 border-neutral-200'
+  const rowTint = (s: Status) => (s === 'confirmed' ? 'bg-emerald-50/60 border-emerald-200' : s === 'conducted' ? 'bg-neutral-100/70 border-neutral-200' : 'bg-white border-neutral-200')
 
   return (
-    <div className="space-y-6">
-      <datalist id="ep-chapters">{chapterOptions.map((c) => <option key={c} value={c} />)}</datalist>
+    <div className="space-y-5">
       <datalist id="ep-topics">{topicOptions.map((t) => <option key={t} value={t} />)}</datalist>
-
       {message && <Alert type={message.type === 'info' ? 'info' : message.type}>{message.text}</Alert>}
 
-      {selected && coverage && coverage.hasMaster && (
-        <Card className="p-5">
-          <div className="flex items-center justify-between mb-2">
-            <h4 className="font-semibold text-neutral-950">Syllabus coverage</h4>
-            <span className={`text-sm font-bold ${coverage.chaptersCovered === coverage.chaptersTotal ? 'text-emerald-600' : 'text-amber-600'}`}>{coverage.chaptersCovered}/{coverage.chaptersTotal} chapters fully covered</span>
-          </div>
-          {coverage.unknown.length > 0 && (
-            <div className="mb-2 text-xs bg-rose-50 border border-rose-200 rounded-lg p-2 text-rose-700"><span className="font-semibold">Not in syllabus (check spelling):</span> {coverage.unknown.slice(0, 12).join(', ')}</div>
-          )}
-          <div className="flex flex-wrap gap-2">
-            {coverage.subjects.map((s) => (
-              <span key={s.subjectId} className={`text-xs px-2 py-1 rounded-lg border ${s.chaptersCovered === s.chaptersTotal ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}
-                title={s.missing.length ? `Missing: ${s.missing.map((m) => m.chapter).join(', ')}` : 'Fully covered'}>
-                {s.name}: {s.chaptersCovered}/{s.chaptersTotal}
-              </span>
-            ))}
-          </div>
-          {coverage.chaptersCovered < coverage.chaptersTotal && (
-            <p className="text-xs text-neutral-400 mt-2">Hover a subject to see missing chapters. Use the chapter/topic suggestions so names match the master.</p>
-          )}
-        </Card>
-      )}
-
-      <Card className="p-6">
+      <Card className="p-5">
         <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Select Planner to Edit</label>
         <select value={selectedId} onChange={(e) => selectPlanner(e.target.value)} className="w-full sm:w-96 h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" disabled={loading}>
           <option value="">{loading ? 'Loading…' : 'Choose a planner'}</option>
           {planners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
-        {selected && links.length > 0 && (
-          <p className="text-xs text-neutral-500 mt-3">
-            Linked to {links.length} batch(es). Editing re-builds only <span className="font-semibold">Draft/Rework</span> links; already-sent or confirmed links stay put.
-          </p>
-        )}
+        <p className="text-xs text-neutral-400 mt-3">Chapters are locked (concept tags); edit the <b>topic</b>, mark each class <b>Confirmed</b> or <b>Already conducted</b> (with its final date), and drag to reorder. Dates always stay in order. Editing re-builds only Draft/Rework links — sent/confirmed classes change via a reschedule request.</p>
       </Card>
 
-      {selected && (
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-2">
-            <h4 className="font-semibold text-neutral-950">Lectures — {selected.name}</h4>
-            <BtnSecondary onClick={addRow}>+ Add Lecture</BtnSecondary>
+      {selected && subjectTabs.length > 0 && (
+        <>
+          {/* Subject tabs */}
+          <div className="flex flex-wrap gap-2">
+            {subjectTabs.map((t) => (
+              <button key={t.id} onClick={() => setActiveSubject(t.id)} className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors ${activeSubject === t.id ? 'bg-violet-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}>{t.name}</button>
+            ))}
           </div>
-          <p className="text-xs text-neutral-400 mb-4">Chapter &amp; Topic are validated against the concept tags. Leave a row&rsquo;s Chapter &amp; Topic empty → future = <span className="text-sky-600">buffer</span> (reserved), past = class didn&rsquo;t happen (dropped).</p>
-          {rows.length === 0 ? (
-            <p className="text-sm text-neutral-400 py-6 text-center">No lectures. Add one to begin.</p>
-          ) : (
-            <div className="overflow-x-auto border border-neutral-200 rounded-xl mb-4">
-              <table className="w-full text-sm min-w-[960px]">
-                <thead>
-                  <tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider">
-                    <th className="text-left px-3 py-2 font-semibold min-w-[140px]">Subject</th>
-                    <th className="text-left px-3 py-2 font-semibold min-w-[170px]">Faculty</th>
-                    <th className="text-left px-3 py-2 font-semibold">Chapter</th>
-                    <th className="text-left px-3 py-2 font-semibold min-w-[150px]">Topic</th>
-                    <th className="text-left px-3 py-2 font-semibold">Date</th>
-                    <th className="w-10" />
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-neutral-100">
-                  {rows.map((r, i) => (
-                    <tr key={i}>
-                      <td className="px-3 py-2">
-                        <select value={r.subject_id} onChange={(e) => updateRow(i, { subject_id: e.target.value })} className={inputClass}>
-                          <option value="">—</option>
-                          {subjectPool.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                        </select>
-                      </td>
-                      <td className="px-3 py-2">
-                        <select value={r.faculty_id} onChange={(e) => updateRow(i, { faculty_id: e.target.value })} className={inputClass}>
-                          <option value="">Select</option>
-                          {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
-                        </select>
-                      </td>
-                      <td className="px-3 py-2"><input list="ep-chapters" value={r.chapter} onChange={(e) => updateRow(i, { chapter: e.target.value })} className={inputClass} placeholder="Ch 1" /></td>
-                      <td className="px-3 py-2"><input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(i, { topic_name: e.target.value })} className={inputClass} placeholder="Topic" /></td>
-                      <td className="px-3 py-2"><input type="date" value={r.planned_date} onChange={(e) => updateRow(i, { planned_date: e.target.value })} className={inputClass} /></td>
-                      <td className="px-2 py-2"><button onClick={() => removeRow(i)} className="text-red-500 hover:text-red-700 text-xs font-medium">✕</button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+
+          {/* Summary for the active subject */}
+          <Card className="p-4">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+              <div><div className="text-xs text-neutral-400 uppercase tracking-wider">After today</div><div className="text-lg font-bold text-neutral-950">{summary.lecturesLeft} lecture{summary.lecturesLeft === 1 ? '' : 's'} left</div></div>
+              <div><div className="text-xs text-neutral-400 uppercase tracking-wider">Hours left</div><div className="text-lg font-bold text-violet-700">{summary.hoursLeft.toFixed(summary.hoursLeft % 1 === 0 ? 0 : 1)} hrs</div></div>
+              <div><div className="text-xs text-neutral-400 uppercase tracking-wider">Conducted</div><div className="text-lg font-bold text-neutral-500">{summary.conducted}</div></div>
+              <div className="ml-auto text-xs text-neutral-400">for <b className="text-neutral-600">{subjName(activeSubject)}</b></div>
             </div>
-          )}
+          </Card>
+
+          {/* Toolbar: search + reorder mode */}
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex-1 min-w-[220px]">
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Search (teacher / topic / chapter)</label>
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="e.g. a teacher's name…" className="w-full h-10 px-3 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Drag to reorder</label>
+              <div className="inline-flex rounded-lg border border-neutral-200 overflow-hidden">
+                <button onClick={() => setReorderMode('rows')} className={`px-3 h-10 text-sm font-semibold ${reorderMode === 'rows' ? 'bg-violet-600 text-white' : 'bg-white text-neutral-600'}`}>Rows</button>
+                <button onClick={() => setReorderMode('chapters')} className={`px-3 h-10 text-sm font-semibold ${reorderMode === 'chapters' ? 'bg-violet-600 text-white' : 'bg-white text-neutral-600'}`}>Chapters</button>
+              </div>
+            </div>
+          </div>
+
+          {/* Chapter groups */}
+          <div className="space-y-4">
+            {chapterGroups.length === 0 ? (
+              <Card className="p-8 text-center text-sm text-neutral-400">No classes match.</Card>
+            ) : chapterGroups.map((g) => (
+              <div
+                key={g.chapter}
+                draggable={reorderMode === 'chapters'}
+                onDragStart={() => { if (reorderMode === 'chapters') dragChapterRef.current = g.chapter }}
+                onDragOver={(e) => { if (reorderMode === 'chapters') e.preventDefault() }}
+                onDrop={() => reorderMode === 'chapters' && onChapterDrop(g.chapter)}
+                className={`border border-neutral-200 rounded-xl overflow-hidden ${reorderMode === 'chapters' ? 'cursor-grab' : ''}`}
+              >
+                <div className="flex items-center justify-between gap-2 px-4 py-2.5 bg-neutral-50 border-b border-neutral-200">
+                  <div className="flex items-center gap-2">
+                    {reorderMode === 'chapters' && <span className="text-neutral-300 text-lg leading-none">⠿</span>}
+                    <span className="font-bold text-neutral-950">{g.chapter}</span>
+                    <span className="text-xs text-neutral-400">{g.rows.length} topic{g.rows.length === 1 ? '' : 's'} · locked</span>
+                  </div>
+                  <button onClick={() => addRowToChapter(activeSubject, g.chapter)} className="text-xs font-semibold text-violet-600 hover:text-violet-700 whitespace-nowrap">+ add row</button>
+                </div>
+                <div className="divide-y divide-neutral-100">
+                  {g.rows.map((r) => (
+                    <div
+                      key={r.key}
+                      draggable={reorderMode === 'rows' && r.status !== 'conducted'}
+                      onDragStart={() => { if (reorderMode === 'rows') dragKeyRef.current = r.key }}
+                      onDragOver={(e) => { if (reorderMode === 'rows') e.preventDefault() }}
+                      onDrop={() => reorderMode === 'rows' && onRowDrop(r.key)}
+                      className={`flex flex-wrap md:flex-nowrap items-center gap-2 px-3 py-2.5 border-l-4 ${rowTint(r.status)} ${reorderMode === 'rows' && r.status !== 'conducted' ? 'cursor-grab' : ''}`}
+                    >
+                      {reorderMode === 'rows' && <span className="text-neutral-300 text-lg leading-none w-4 shrink-0">{r.status !== 'conducted' ? '⠿' : ''}</span>}
+                      <div className="w-[130px] shrink-0 text-xs font-semibold text-neutral-600">{fmtDate(r.planned_date)}{r.planned_date < todayISO && r.status !== 'conducted' && <span className="ml-1 text-rose-500" title="date is in the past">•</span>}</div>
+                      <input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(r.key, { topic_name: e.target.value })} placeholder="Topic taught" className="flex-1 min-w-[160px] h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                      <select value={r.faculty_id} onChange={(e) => updateRow(r.key, { faculty_id: e.target.value })} className="w-[160px] shrink-0 h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                        <option value="">Faculty…</option>
+                        {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
+                      </select>
+                      <select value={r.status} onChange={(e) => setStatus(r.key, e.target.value as Status)} className={`w-[150px] shrink-0 h-9 px-2 rounded-lg text-xs font-semibold border ${statusPill(r.status)}`}>
+                        <option value="planned">Planned</option>
+                        <option value="confirmed">Confirmed ✓</option>
+                        <option value="conducted">Already conducted</option>
+                      </select>
+                      <button onClick={() => removeRow(r.key)} title="Remove" className="shrink-0 text-neutral-300 hover:text-red-600 text-lg leading-none">×</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+
           <BtnPrimary onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save Planner'}</BtnPrimary>
-        </Card>
+        </>
+      )}
+
+      {/* Already-conducted date dialog */}
+      {conductKey && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-950/50 backdrop-blur-sm" onClick={() => setConductKey(null)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl border border-neutral-200" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-neutral-950 mb-1">Mark already conducted</h3>
+            <p className="text-sm text-neutral-500 mb-4">On which date was this topic actually taught? It will be logged as conducted and sorted into the timeline by this date.</p>
+            <input type="date" value={conductDate} max={todayISO} onChange={(e) => setConductDate(e.target.value)} className="w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 mb-4" />
+            <div className="flex gap-3">
+              <BtnPrimary className="flex-1" onClick={applyConducted} disabled={!conductDate}>Mark conducted</BtnPrimary>
+              <BtnSecondary className="flex-1" onClick={() => setConductKey(null)}>Cancel</BtnSecondary>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

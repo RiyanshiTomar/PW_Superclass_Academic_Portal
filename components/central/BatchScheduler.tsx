@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { checkWeeklyScheduleOverlap, checkClassroomScheduleOverlap } from '@/lib/scheduling'
 import { assignPlanner } from '@/lib/planners'
+import { computeBatchPacing, type BatchPacing } from '@/lib/pacing'
 import { mergeBatch } from '@/lib/merge'
 import { validateBatchDates, validateTimeRange } from '@/lib/validation'
 import { DAYS, timesOverlap, daysBetween, toMinutes, addDaysToDate } from '@/lib/utils'
@@ -127,6 +128,8 @@ export default function BatchScheduler() {
   const [managerId, setManagerId] = useState('')
   // batch_id -> its last planned lecture date (for lateness vs end_date)
   const [lastLectureByBatch, setLastLectureByBatch] = useState<Map<string, string>>(new Map())
+  // batch_id -> live pacing (per-subject done/planned vs end date) for suggestions
+  const [pacingByBatch, setPacingByBatch] = useState<Record<string, BatchPacing>>({})
   const [scheduleRows, setScheduleRows] = useState<ScheduleRow[]>([])
   const [userCentres, setUserCentres] = useState<UserCentre[]>([])
   const [facultySubjects, setFacultySubjects] = useState<FacultySubject[]>([])
@@ -333,6 +336,19 @@ export default function BatchScheduler() {
       }
       setLastLectureByBatch(m)
     }
+
+    // Live pacing for batches that have a planner linked (so the scheduler can
+    // suggest "add classes for the lagging subject" as the end date nears).
+    const today = new Date().toISOString().split('T')[0]
+    const linkedBatchIds = Array.from(new Set(((linkRes.data ?? []) as { batch_id: string }[]).map((l) => l.batch_id)))
+    if (linkedBatchIds.length) {
+      const paces = await Promise.all(linkedBatchIds.map((id) => computeBatchPacing(supabase, id, today).catch(() => null)))
+      const pm: Record<string, BatchPacing> = {}
+      linkedBatchIds.forEach((id, i) => { if (paces[i]) pm[id] = paces[i]! })
+      setPacingByBatch(pm)
+    } else {
+      setPacingByBatch({})
+    }
     setLoading(false)
   }
 
@@ -517,11 +533,16 @@ export default function BatchScheduler() {
 
     let batchId = editingBatch?.id
     if (editingBatch) {
-      const { error } = await supabase.from('batches').update({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId }).eq('id', editingBatch.id)
+      // .select() so we can tell if the row actually existed — a stale UI entry
+      // (batch deleted/merged elsewhere) would update 0 rows and then blow up on
+      // the schedule insert with a foreign-key error.
+      const { data, error } = await supabase.from('batches').update({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId }).eq('id', editingBatch.id).select('id')
       if (error) return fail(error.message)
+      if (!data || data.length === 0) { await loadData(); return fail('This batch no longer exists (it may have been deleted or merged). The list has been refreshed — please create it again or pick another batch.') }
     } else {
-      const { data, error } = await supabase.from('batches').insert({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId }).select().single()
+      const { data, error } = await supabase.from('batches').insert({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId }).select('id').single()
       if (error) return fail(error.message)
+      if (!data?.id) return fail('Could not create the batch (no id returned). Check your access/permissions and try again.')
       batchId = data.id
     }
 
@@ -530,7 +551,13 @@ export default function BatchScheduler() {
       if (flat.length > 0) {
         const rows = flat.map((s) => ({ batch_id: batchId, day_of_week: s.day_of_week, start_time: s.start_time, end_time: s.end_time, faculty_id: s.faculty_id, subject_id: s.subject_id, classroom_id: s.classroom_id, effective_from: s.effective_from, effective_to: s.effective_to }))
         const { error } = await supabase.from('batch_schedules').insert(rows)
-        if (error) return fail(error.message)
+        if (error) {
+          const msg = /foreign key|batch_id_fkey/i.test(error.message)
+            ? 'The batch record went missing while saving the schedule (it may have been deleted elsewhere). The list will refresh — please try again.'
+            : error.message
+          await loadData()
+          return fail(msg)
+        }
       }
     }
 
@@ -798,6 +825,15 @@ export default function BatchScheduler() {
             </div>
             {!loading && <span className="pb-2 text-sm text-neutral-400">{shownBatches.length} batch{shownBatches.length === 1 ? '' : 'es'}</span>}
           </div>
+          {!loading && (() => {
+            const attention = shownBatches.map((b) => ({ b, p: pacingByBatch[b.id] })).filter((x) => x.p && x.p.subjects.some((s) => s.status === 'behind'))
+            if (attention.length === 0) return null
+            return (
+              <Alert type="error">
+                <b>{attention.length} batch{attention.length === 1 ? '' : 'es'} need attention</b> — a subject will finish after the end date. {attention.slice(0, 4).map((x) => `${x.b.name} (${x.p!.subjects.filter((s) => s.status === 'behind').map((s) => s.name).join('/')})`).join(' · ')}{attention.length > 4 ? ' …' : ''}. Open the batch and add classes for the lagging subject(s).
+              </Alert>
+            )
+          })()}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {loading ? (
             <div className="col-span-full py-16 text-center text-neutral-400">Loading batches…</div>
@@ -828,6 +864,28 @@ export default function BatchScheduler() {
                       return <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${cls}`} title={`Last real lecture ${new Date(last + 'T12:00:00').toLocaleDateString()} · planned end ${new Date(b.end_date).toLocaleDateString()}`}>{label}</span>
                     })()}
                   </div>
+                  {pacingByBatch[b.id] && (() => {
+                    const p = pacingByBatch[b.id]
+                    const behind = p.subjects.filter((s) => s.status === 'behind')
+                    const ahead = p.subjects.filter((s) => s.status === 'ahead')
+                    return (
+                      <div className="mb-4 rounded-lg border border-neutral-200 bg-neutral-50/60 p-2.5">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 mb-1.5">Pacing · {p.daysLeft}d left</p>
+                        <div className="flex flex-wrap gap-1">
+                          {p.subjects.map((s) => (
+                            <span key={s.subjectId} className={`text-[10px] px-1.5 py-0.5 rounded-full border ${s.status === 'behind' ? 'bg-red-50 text-red-700 border-red-200' : s.status === 'ahead' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : s.status === 'done' ? 'bg-neutral-100 text-neutral-500 border-neutral-200' : 'bg-sky-50 text-sky-700 border-sky-200'}`} title={`${s.doneLectures}/${s.totalLectures} done · finishes ${s.finishDate ?? '—'}${s.marginDays != null ? ` (${s.marginDays < 0 ? Math.abs(s.marginDays) + 'd over' : s.marginDays + 'd spare'})` : ''}`}>{s.name} {s.doneLectures}/{s.totalLectures}</span>
+                          ))}
+                        </div>
+                        {behind.length > 0 ? (
+                          <p className="mt-1.5 text-[11px] text-red-700">⚠ Add classes for {behind.map((s) => `${s.name} (${Math.abs(s.marginDays ?? 0)}d over)`).join(', ')}{ahead.length ? ` · slack in ${ahead.map((s) => s.name).join(', ')}` : ''}.</p>
+                        ) : ahead.length > 0 ? (
+                          <p className="mt-1.5 text-[11px] text-emerald-700">Ahead: {ahead.map((s) => s.name).join(', ')} — slack available; you can ease off or bring a lagging subject&apos;s topics sooner.</p>
+                        ) : (
+                          <p className="mt-1.5 text-[11px] text-neutral-400">On track for the end date.</p>
+                        )}
+                      </div>
+                    )
+                  })()}
                   <div className="mb-4">
                     <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 mb-1">Linked Planners</p>
                     {bl.length === 0 ? (

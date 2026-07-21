@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { setLinkStage, cascadeReschedule, sendWeekToFaculty, addExtraLecture } from '@/lib/planners'
+import { setLinkStage, cascadeReschedule, addExtraLecture } from '@/lib/planners'
 import { computeBatchPacing, type BatchPacing } from '@/lib/pacing'
 import { notifyUsers } from '@/lib/notifications'
 import { stageBadgeClass, formatTime, addDaysToDate } from '@/lib/utils'
@@ -77,8 +77,6 @@ export default function AssignPlanner() {
   const [shiftId, setShiftId] = useState<string | null>(null)
   const [shiftDate, setShiftDate] = useState('')
   const [shiftBusy, setShiftBusy] = useState(false)
-  // Per-week "Send to Faculty" (central publishes the schedule week by week).
-  const [weekBusy, setWeekBusy] = useState<string | null>(null)
   // Per-week flexibility: add an extra class / remove one for a specific week.
   const [addWeek, setAddWeek] = useState<string | null>(null) // weekStart whose add-form is open
   const [addForm, setAddForm] = useState<{ subjectAnchorId: string; date: string; time: string; topic: string; chapter: string }>({ subjectAnchorId: '', date: '', time: '', topic: '', chapter: '' })
@@ -155,17 +153,6 @@ export default function AssignPlanner() {
     setMessage({ type: 'success', text: `Shifted. ${res.shifted} later lecture(s) of this faculty moved along; overlaps re-checked.` })
     setShiftId(null); setShiftDate('')
     await reloadLectures(linkId)
-  }
-
-  // Publish one week to faculty.
-  const sendWeek = async (linkId: string, weekStart: string, label: string) => {
-    setWeekBusy(weekStart); setMessage(null)
-    const res = await sendWeekToFaculty(supabase, linkId, weekStart, addDaysToDate(weekStart, 6), label)
-    setWeekBusy(null)
-    if (res.error) { setMessage({ type: 'error', text: res.error }); return }
-    setMessage({ type: 'success', text: `Week of ${label} sent to faculty — ${res.upcoming} lecture(s) to confirm.` })
-    await reloadLectures(linkId)
-    await loadData()
   }
 
   // Distinct subjects in a link (each with an anchor lecture to clone from when
@@ -265,7 +252,7 @@ export default function AssignPlanner() {
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       {(link.stage === 'Draft' || link.stage === 'Rework') && (
-                        <button onClick={() => changeStage(link, 'Faculty Assigned')} disabled={busyId === link.id} className="px-3 py-1.5 bg-neutral-950 hover:bg-neutral-800 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg" title="Sends every week at once. Or View → send week by week.">Send all weeks</button>
+                        <button onClick={() => changeStage(link, 'Faculty Assigned')} disabled={busyId === link.id} className="px-3 py-1.5 bg-neutral-950 hover:bg-neutral-800 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg" title="Sends the whole planner to faculty to confirm class by class.">Send to Faculty</button>
                       )}
                       {link.stage === 'Faculty Assigned' && (
                         <button onClick={() => changeStage(link, 'Rework')} disabled={busyId === link.id} className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Recall / Rework</button>
@@ -283,7 +270,7 @@ export default function AssignPlanner() {
                         <p className="text-xs text-neutral-400">No materialised lectures.</p>
                       ) : (
                         <div className="space-y-3">
-                          <p className="text-xs text-neutral-400">Send the schedule to faculty <b>week by week</b>. A week that needs no change just goes as-is; to change one, use Shift first, then send.</p>
+                          <p className="text-xs text-neutral-400">Use <b>Send to Faculty</b> (top) to send the whole planner — faculty then confirm each class (and can correct the topic to what they actually taught). Add or shift a class here if needed before sending.</p>
                           {pacingByLink[link.id] && (() => {
                             const p = pacingByLink[link.id]!
                             const behind = p.subjects.filter((s) => s.status === 'behind')
@@ -313,7 +300,6 @@ export default function AssignPlanner() {
                                   <div className="flex items-center gap-2 text-xs">
                                     <span className="text-neutral-400">{confirmed} confirmed · {pending} pending · {notSent} not sent</span>
                                     <button onClick={() => (addWeek === wk.weekStart ? setAddWeek(null) : openAdd(wk.weekStart, lectures))} className="px-2.5 py-1 bg-white border border-neutral-200 hover:bg-neutral-100 text-neutral-700 text-xs font-semibold rounded-lg">+ Add class</button>
-                                    {notSent > 0 && <button onClick={() => sendWeek(link.id, wk.weekStart, wk.label)} disabled={weekBusy === wk.weekStart} className="px-2.5 py-1 bg-neutral-950 hover:bg-neutral-800 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">{weekBusy === wk.weekStart ? 'Sending…' : 'Send to Faculty'}</button>}
                                   </div>
                                 </div>
                                 {addWeek === wk.weekStart && (

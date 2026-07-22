@@ -7,7 +7,7 @@ import { mergeSubject } from '@/lib/merge'
 
 type Program = { id: string; name: string }
 type Subject = { id: string; name: string }
-type Chapter = { id: string; subject_id: string; name: string; sequence_no: number }
+type Chapter = { id: string; subject_id: string; name: string; sequence_no: number; total_hours: number | null; teaching_hours: number | null }
 type Topic = { id: string; chapter_id: string; name: string; sequence_no: number }
 // Where a subject/chapter is referenced, so we can warn before editing/deleting.
 type Usage = { planners: string[]; lectures: number; live: number }
@@ -72,8 +72,10 @@ export default function SyllabusPage() {
     setSubjects(subjects)
     const subIds = subjects.map((s) => s.id)
     if (subIds.length === 0) { setChapters([]); setTopics([]); setLoading(false); return }
-    const { data: chaps } = await supabase.from('chapters').select('id, subject_id, name, sequence_no').in('subject_id', subIds).order('sequence_no')
-    const chapters = (chaps ?? []) as Chapter[]
+    let chapRes = await supabase.from('chapters').select('id, subject_id, name, sequence_no, total_hours, teaching_hours').in('subject_id', subIds).order('sequence_no')
+    // Fall back if the hours columns aren't there yet (migration not run).
+    if (chapRes.error) chapRes = (await supabase.from('chapters').select('id, subject_id, name, sequence_no').in('subject_id', subIds).order('sequence_no')) as typeof chapRes
+    const chapters = (chapRes.data ?? []).map((c) => ({ ...(c as Chapter), total_hours: (c as Chapter).total_hours ?? null, teaching_hours: (c as Chapter).teaching_hours ?? null })) as Chapter[]
     setChapters(chapters)
     const chapIds = chapters.map((c) => c.id)
     if (chapIds.length === 0) { setTopics([]); setLoading(false); return }
@@ -212,6 +214,16 @@ export default function SyllabusPage() {
     const { error } = await supabase.from('chapters').insert({ subject_id: subjectId, name, sequence_no: seq })
     if (error) return setMsg({ type: 'error', text: error.message.includes('duplicate') ? 'Chapter already exists in this subject.' : error.message })
     setNewChapterVal(''); setNewChapterFor(null); await loadProgram(programId)
+  }
+
+  // Per-chapter hours (admin-entered). Edit locally, persist on blur.
+  const setChapterHours = (id: string, field: 'total_hours' | 'teaching_hours', raw: string) => {
+    const val = raw.trim() === '' ? null : Math.max(0, Number(raw))
+    setChapters((prev) => prev.map((c) => (c.id === id ? { ...c, [field]: Number.isNaN(val as number) ? c[field] : val } : c)))
+  }
+  const saveChapterHours = async (c: Chapter) => {
+    const { error } = await supabase.from('chapters').update({ total_hours: c.total_hours, teaching_hours: c.teaching_hours }).eq('id', c.id)
+    if (error) setMsg({ type: 'error', text: `Could not save hours: ${error.message}` })
   }
 
   // ---- Topic CRUD ----------------------------------------------------------
@@ -410,9 +422,23 @@ export default function SyllabusPage() {
                               <span className="text-sm font-medium text-gray-800">{c.name}</span>
                               <span className="text-[11px] text-gray-400">{tps.length} topics</span>
                             </button>
-                            <div className="space-x-2 text-xs">
-                              <button onClick={() => askRenameChapter(c)} disabled={checkingId === c.id} className="text-blue-600 hover:underline disabled:opacity-40">{checkingId === c.id ? 'Checking…' : 'Rename'}</button>
-                              <button onClick={() => askDeleteChapter(c)} disabled={checkingId === c.id} className="text-red-600 hover:underline disabled:opacity-40">Delete</button>
+                            <div className="flex items-center gap-3">
+                              <div className="flex items-center gap-2">
+                                <label className="flex items-center gap-1 text-[11px] text-gray-500" title="Total hours this chapter is worth">
+                                  <span className="uppercase tracking-wide font-semibold">Total</span>
+                                  <input type="number" min={0} step="0.5" value={c.total_hours ?? ''} onChange={(e) => setChapterHours(c.id, 'total_hours', e.target.value)} onBlur={() => saveChapterHours(c)} placeholder="—" className="w-16 h-7 px-1.5 border border-gray-200 rounded-md text-xs text-center focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                                  <span className="text-gray-400">h</span>
+                                </label>
+                                <label className="flex items-center gap-1 text-[11px] text-gray-500" title="Hours actually spent teaching">
+                                  <span className="uppercase tracking-wide font-semibold">Teaching</span>
+                                  <input type="number" min={0} step="0.5" value={c.teaching_hours ?? ''} onChange={(e) => setChapterHours(c.id, 'teaching_hours', e.target.value)} onBlur={() => saveChapterHours(c)} placeholder="—" className="w-16 h-7 px-1.5 border border-gray-200 rounded-md text-xs text-center focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                                  <span className="text-gray-400">h</span>
+                                </label>
+                              </div>
+                              <div className="space-x-2 text-xs whitespace-nowrap">
+                                <button onClick={() => askRenameChapter(c)} disabled={checkingId === c.id} className="text-blue-600 hover:underline disabled:opacity-40">{checkingId === c.id ? 'Checking…' : 'Rename'}</button>
+                                <button onClick={() => askDeleteChapter(c)} disabled={checkingId === c.id} className="text-red-600 hover:underline disabled:opacity-40">Delete</button>
+                              </div>
                             </div>
                           </div>
                           {openC && (

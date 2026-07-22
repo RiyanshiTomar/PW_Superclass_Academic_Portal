@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { setLinkStage, cascadeReschedule, addExtraLecture } from '@/lib/planners'
 import { computeBatchPacing, type BatchPacing } from '@/lib/pacing'
 import { notifyUsers } from '@/lib/notifications'
-import { stageBadgeClass, formatTime, addDaysToDate } from '@/lib/utils'
+import { stageBadgeClass, formatTime } from '@/lib/utils'
 import { Alert, Card } from '@/components/PortalShell'
 
 type Planner = { id: string; name: string }
@@ -39,25 +39,6 @@ function one<T>(v: T | T[] | null): T | null {
   return Array.isArray(v) ? v[0] ?? null : v
 }
 
-function weekStartMonday(isoD: string): string {
-  const d = new Date(isoD + 'T12:00:00')
-  d.setDate(d.getDate() + (d.getDay() === 0 ? -6 : 1 - d.getDay()))
-  return d.toISOString().split('T')[0]
-}
-function weekLabel(mon: string): string {
-  const s = new Date(mon + 'T12:00:00')
-  const e = new Date(addDaysToDate(mon, 6) + 'T12:00:00')
-  const f = (x: Date) => x.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
-  return `${f(s)} – ${f(e)}`
-}
-function groupByWeek(lectures: Lecture[]): { weekStart: string; label: string; lectures: Lecture[] }[] {
-  const m = new Map<string, Lecture[]>()
-  for (const l of lectures) { const wk = weekStartMonday(l.planned_date); if (!m.has(wk)) m.set(wk, []); m.get(wk)!.push(l) }
-  return Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([weekStart, lecs]) => ({
-    weekStart, label: weekLabel(weekStart),
-    lectures: lecs.sort((a, b) => a.planned_date.localeCompare(b.planned_date) || (a.start_time ?? '').localeCompare(b.start_time ?? '')),
-  }))
-}
 
 export default function AssignPlanner() {
   const supabase = createClient()
@@ -167,11 +148,11 @@ export default function AssignPlanner() {
     return Array.from(m.values())
   }
 
-  const openAdd = (weekStart: string, lecs: Lecture[]) => {
+  const openAdd = (key: string, lecs: Lecture[], defaultDate?: string) => {
     const subs = subjectsForLink(lecs)
     const first = subs[0]
-    setAddWeek(weekStart)
-    setAddForm({ subjectAnchorId: first?.anchorId ?? '', date: weekStart, time: first?.time ?? '09:00', topic: '', chapter: '' })
+    setAddWeek(key)
+    setAddForm({ subjectAnchorId: first?.anchorId ?? '', date: defaultDate ?? key, time: first?.time ?? '09:00', topic: '', chapter: '' })
   }
 
   // Add ONE extra class to a week (flexibility over the recurring schedule).
@@ -289,20 +270,21 @@ export default function AssignPlanner() {
                               </div>
                             )
                           })()}
-                          {groupByWeek(lectures).map((wk) => {
-                            const notSent = wk.lectures.filter((l) => l.stage === 'Draft' || l.stage === 'Rework').length
-                            const pending = wk.lectures.filter((l) => l.stage === 'Faculty Assigned').length
-                            const confirmed = wk.lectures.filter((l) => l.stage === 'Confirmed').length
+                          {(() => {
+                            const sorted = [...lectures].sort((a, b) => a.planned_date.localeCompare(b.planned_date))
+                            const notSent = sorted.filter((l) => l.stage === 'Draft' || l.stage === 'Rework').length
+                            const pending = sorted.filter((l) => l.stage === 'Faculty Assigned').length
+                            const confirmed = sorted.filter((l) => l.stage === 'Confirmed').length
                             return (
-                              <div key={wk.weekStart} className="border border-neutral-200 rounded-lg overflow-hidden">
+                              <div className="border border-neutral-200 rounded-lg overflow-hidden">
                                 <div className="px-3 py-2 bg-neutral-50 flex flex-wrap items-center justify-between gap-2">
-                                  <span className="text-sm font-semibold text-neutral-800">Week of {wk.label}</span>
+                                  <span className="text-sm font-semibold text-neutral-800">All classes <span className="font-normal text-neutral-400">({sorted.length})</span></span>
                                   <div className="flex items-center gap-2 text-xs">
                                     <span className="text-neutral-400">{confirmed} confirmed · {pending} pending · {notSent} not sent</span>
-                                    <button onClick={() => (addWeek === wk.weekStart ? setAddWeek(null) : openAdd(wk.weekStart, lectures))} className="px-2.5 py-1 bg-white border border-neutral-200 hover:bg-neutral-100 text-neutral-700 text-xs font-semibold rounded-lg">+ Add class</button>
+                                    <button onClick={() => (addWeek === '__all__' ? setAddWeek(null) : openAdd('__all__', lectures, sorted[0]?.planned_date))} className="px-2.5 py-1 bg-white border border-neutral-200 hover:bg-neutral-100 text-neutral-700 text-xs font-semibold rounded-lg">+ Add class</button>
                                   </div>
                                 </div>
-                                {addWeek === wk.weekStart && (
+                                {addWeek === '__all__' && (
                                   <div className="px-3 py-3 bg-violet-50 border-b border-violet-100 flex flex-wrap items-end gap-2">
                                     <div>
                                       <label className="block text-[10px] font-semibold text-neutral-500 uppercase mb-0.5">Subject</label>
@@ -318,11 +300,11 @@ export default function AssignPlanner() {
                                     <button onClick={() => setAddWeek(null)} className="h-8 px-2 text-neutral-500 text-xs">Cancel</button>
                                   </div>
                                 )}
-                                <div className="overflow-x-auto">
+                                <div className="overflow-x-auto max-h-[60vh]">
                                   <table className="w-full text-left text-sm">
-                                    <thead><tr className="text-neutral-500 text-xs uppercase tracking-wider"><th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Topic</th><th className="px-3 py-2">Subject</th><th className="px-3 py-2">Faculty</th><th className="px-3 py-2">Room</th><th className="px-3 py-2">Status</th><th className="px-3 py-2 text-right">Shift</th></tr></thead>
+                                    <thead className="sticky top-0 bg-white"><tr className="text-neutral-500 text-xs uppercase tracking-wider border-b border-neutral-100"><th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Topic</th><th className="px-3 py-2">Subject</th><th className="px-3 py-2">Faculty</th><th className="px-3 py-2">Room</th><th className="px-3 py-2">Status</th><th className="px-3 py-2 text-right">Shift</th></tr></thead>
                                     <tbody className="divide-y divide-neutral-100">
-                                      {wk.lectures.map((l) => (
+                                      {sorted.map((l) => (
                                         <tr key={l.id}>
                                           <td className="px-3 py-2 whitespace-nowrap">{new Date(l.planned_date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</td>
                                           <td className="px-3 py-2 text-neutral-500 whitespace-nowrap">{formatTime(l.start_time)} · {l.duration_minutes}m</td>
@@ -352,7 +334,7 @@ export default function AssignPlanner() {
                                 </div>
                               </div>
                             )
-                          })}
+                          })()}
                         </div>
                       )}
                     </div>

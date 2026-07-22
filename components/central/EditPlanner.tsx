@@ -30,7 +30,7 @@ function batchName(v: LinkLite['batches']): string {
   return Array.isArray(v) ? v[0]?.name ?? 'Batch' : v.name ?? 'Batch'
 }
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim().replace(/s$/, '')
-const fmtDate = (d: string) => (d ? new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }) : '—')
+const fmtDate = (d: string) => (d ? new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : '—')
 const daysBetweenISO = (a: string, b: string) => Math.round((new Date(b + 'T12:00:00').getTime() - new Date(a + 'T12:00:00').getTime()) / 86400000)
 
 // EDIT-PLANNER ONLY: re-base each subject's upcoming (non-conducted) rows so
@@ -64,6 +64,11 @@ export default function EditPlanner() {
   const [planners, setPlanners] = useState<Planner[]>([])
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [faculty, setFaculty] = useState<Faculty[]>([])
+  const [centres, setCentres] = useState<{ id: string; name: string }[]>([])
+  const [batchList, setBatchList] = useState<{ id: string; name: string; centre_id: string }[]>([])
+  const [plannerLinks, setPlannerLinks] = useState<{ planner_id: string; batch_id: string }[]>([])
+  const [filterCentre, setFilterCentre] = useState('')
+  const [filterBatch, setFilterBatch] = useState('')
   const [selectedId, setSelectedId] = useState('')
   const [rows, setRows] = useState<EditRow[]>([])
   const [keptBuffers, setKeptBuffers] = useState<Keep[]>([])
@@ -99,17 +104,38 @@ export default function EditPlanner() {
   const subjName = (id: string) => subjects.find((s) => s.id === id)?.name ?? '—'
   const facName = (id: string) => faculty.find((f) => f.id === id)?.full_name ?? ''
 
+  // Centre → batch → planner filtering (only that batch's planner in the picker).
+  const batchesForCentre = useMemo(() => (filterCentre ? batchList.filter((b) => b.centre_id === filterCentre) : batchList), [batchList, filterCentre])
+  const centreOfBatch = useMemo(() => new Map(batchList.map((b) => [b.id, b.centre_id])), [batchList])
+  const batchesByPlanner = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const l of plannerLinks) { if (!m.has(l.planner_id)) m.set(l.planner_id, new Set()); m.get(l.planner_id)!.add(l.batch_id) }
+    return m
+  }, [plannerLinks])
+  const plannersShown = useMemo(() => planners.filter((p) => {
+    const bs = batchesByPlanner.get(p.id) ?? new Set<string>()
+    if (filterBatch) return bs.has(filterBatch)
+    if (filterCentre) return Array.from(bs).some((bid) => centreOfBatch.get(bid) === filterCentre)
+    return true
+  }), [planners, batchesByPlanner, filterBatch, filterCentre, centreOfBatch])
+
   useEffect(() => {
     async function load() {
       setLoading(true)
-      const [planRes, subjRes, facRes] = await Promise.all([
+      const [planRes, subjRes, facRes, centRes, batchRes, linkRes] = await Promise.all([
         supabase.from('planners').select('id, name, program_id').order('created_at', { ascending: false }),
         supabase.from('subjects').select('id, name, program_id').order('name'),
         supabase.rpc('list_active_faculty', { p_centre_id: null }),
+        supabase.from('centres').select('id, name').order('name'),
+        supabase.from('batches').select('id, name, centre_id').neq('status', 'Merged').order('name'),
+        supabase.from('batch_planner_links').select('planner_id, batch_id'),
       ])
       if (planRes.data) setPlanners(planRes.data as Planner[])
       if (subjRes.data) setSubjects(subjRes.data as Subject[])
       if (facRes.data) setFaculty(Array.from(new Map((facRes.data as Faculty[]).map((f) => [f.id, f])).values()) as Faculty[])
+      if (centRes.data) setCentres(centRes.data as { id: string; name: string }[])
+      if (batchRes.data) setBatchList(batchRes.data as { id: string; name: string; centre_id: string }[])
+      if (linkRes.data) setPlannerLinks(linkRes.data as { planner_id: string; batch_id: string }[])
       setLoading(false)
     }
     load()
@@ -343,12 +369,30 @@ export default function EditPlanner() {
       {message && <Alert type={message.type === 'info' ? 'info' : message.type}>{message.text}</Alert>}
 
       <Card className="p-5">
-        <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Select Planner to Edit</label>
-        <select value={selectedId} onChange={(e) => selectPlanner(e.target.value)} className="w-full sm:w-96 h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" disabled={loading}>
-          <option value="">{loading ? 'Loading…' : 'Choose a planner'}</option>
-          {planners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-        <p className="text-xs text-neutral-400 mt-3">Chapters are locked (concept tags); edit the <b>topic</b>, mark each class <b>Confirmed</b> or <b>Already conducted</b> (with its final date), and drag to reorder. Dates always stay in order. Editing re-builds only Draft/Rework links — sent/confirmed classes change via a reschedule request.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Centre</label>
+            <select value={filterCentre} onChange={(e) => { setFilterCentre(e.target.value); setFilterBatch(''); if (selectedId) selectPlanner('') }} className="w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" disabled={loading}>
+              <option value="">All centres</option>
+              {centres.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Batch</label>
+            <select value={filterBatch} onChange={(e) => { setFilterBatch(e.target.value); if (selectedId) selectPlanner('') }} className="w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" disabled={loading}>
+              <option value="">{filterCentre ? 'All batches at this centre' : 'All batches'}</option>
+              {batchesForCentre.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Planner to edit</label>
+            <select value={selectedId} onChange={(e) => selectPlanner(e.target.value)} className="w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" disabled={loading}>
+              <option value="">{loading ? 'Loading…' : plannersShown.length ? 'Choose a planner' : 'No planner for this filter'}</option>
+              {plannersShown.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
+        </div>
+        <p className="text-xs text-neutral-400 mt-3">Filter by centre &amp; batch to find that batch&rsquo;s planner. Chapters are locked (concept tags); edit the <b>topic</b>, mark each class <b>Confirmed</b> or <b>Already conducted</b> (with its final date), and drag to reorder. Dates always stay in order. Editing re-builds only Draft/Rework links — sent/confirmed classes change via a reschedule request.</p>
       </Card>
 
       {selected && subjectTabs.length > 0 && (

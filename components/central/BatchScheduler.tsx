@@ -900,7 +900,7 @@ export default function BatchScheduler() {
                   </div>
                   <div className="flex gap-2 mt-auto">
                     <BtnSecondary className="flex-1" onClick={() => handleEdit(b)}>Edit</BtnSecondary>
-                    <button onClick={() => openAttach(b)} className="flex-1 px-3 py-2 bg-violet-50 hover:bg-violet-100 text-violet-700 border border-violet-200 rounded-lg text-sm font-medium">Attach Planner</button>
+                    <button onClick={() => openAttach(b)} disabled={bl.length > 0} title={bl.length > 0 ? 'A planner is already attached to this batch' : 'Attach a planner'} className={`flex-1 px-3 py-2 border rounded-lg text-sm font-medium ${bl.length > 0 ? 'bg-neutral-100 text-neutral-400 border-neutral-200 cursor-not-allowed' : 'bg-violet-50 hover:bg-violet-100 text-violet-700 border-violet-200'}`}>{bl.length > 0 ? 'Planner attached' : 'Attach Planner'}</button>
                     <button onClick={() => handleDelete(b)} className="px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-lg text-sm font-medium">Delete</button>
                   </div>
                 </Card>

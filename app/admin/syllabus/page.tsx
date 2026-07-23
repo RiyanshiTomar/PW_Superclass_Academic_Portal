@@ -16,6 +16,8 @@ type Pending =
   | { kind: 'delete-subject'; subject: Subject; usage: Usage }
   | { kind: 'rename-chapter'; chapter: Chapter; usage: Usage; value: string }
   | { kind: 'delete-chapter'; chapter: Chapter; usage: Usage }
+// A library source = ONE subject from ONE program (chapters not merged across programs).
+type LibItem = { sid: string; name: string; program: string; chapters: { name: string; total_hours: number | null; teaching_hours: number | null }[] }
 
 function one<T>(v: T | T[] | null | undefined): T | null { return !v ? null : Array.isArray(v) ? v[0] ?? null : v }
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim().replace(/s$/, '')
@@ -49,7 +51,7 @@ export default function SyllabusPage() {
 
   // Concept-tags library (distinct subjects + chapters across ALL programs)
   const [libOpen, setLibOpen] = useState(false)
-  const [library, setLibrary] = useState<{ name: string; chapters: string[] }[]>([])
+  const [library, setLibrary] = useState<LibItem[]>([])
   const [libSel, setLibSel] = useState<Set<string>>(new Set())
   const [libSearch, setLibSearch] = useState('')
   const [libLoading, setLibLoading] = useState(false)
@@ -157,40 +159,55 @@ export default function SyllabusPage() {
   const openLibrary = async () => {
     if (!programId) { setMsg({ type: 'error', text: 'Pick a program first.' }); return }
     setLibOpen(true); setLibSel(new Set()); setLibSearch(''); setLibLoading(true)
-    const { data: subs } = await supabase.from('subjects').select('id, name')
-    const subIds = (subs ?? []).map((s) => s.id)
-    const { data: chaps } = subIds.length ? await supabase.from('chapters').select('subject_id, name, sequence_no').in('subject_id', subIds).order('sequence_no') : { data: [] as { subject_id: string; name: string }[] }
-    const chBySub = new Map<string, string[]>()
-    for (const c of (chaps ?? []) as { subject_id: string; name: string }[]) {
+    const [progRes, subRes] = await Promise.all([
+      supabase.from('programs').select('id, name'),
+      supabase.from('subjects').select('id, name, program_id'),
+    ])
+    const progName = new Map((progRes.data ?? []).map((p) => [p.id as string, p.name as string]))
+    const subs = (subRes.data ?? []) as { id: string; name: string; program_id: string }[]
+    const subIds = subs.map((s) => s.id)
+    let chapRes = subIds.length
+      ? await supabase.from('chapters').select('subject_id, name, sequence_no, total_hours, teaching_hours').in('subject_id', subIds).order('sequence_no')
+      : { data: [], error: null } as { data: unknown[]; error: unknown }
+    if (subIds.length && (chapRes as { error: unknown }).error) {
+      chapRes = await supabase.from('chapters').select('subject_id, name, sequence_no').in('subject_id', subIds).order('sequence_no')
+    }
+    const chBySub = new Map<string, LibItem['chapters']>()
+    for (const c of (chapRes.data ?? []) as { subject_id: string; name: string; total_hours?: number | null; teaching_hours?: number | null }[]) {
       if (!chBySub.has(c.subject_id)) chBySub.set(c.subject_id, [])
-      chBySub.get(c.subject_id)!.push(c.name)
+      chBySub.get(c.subject_id)!.push({ name: c.name, total_hours: c.total_hours ?? null, teaching_hours: c.teaching_hours ?? null })
     }
-    const byName = new Map<string, { name: string; chapters: string[]; seen: Set<string> }>()
-    for (const s of (subs ?? []) as { id: string; name: string }[]) {
-      const key = s.name.toLowerCase().trim()
-      if (!byName.has(key)) byName.set(key, { name: s.name, chapters: [], seen: new Set() })
-      const e = byName.get(key)!
-      for (const cn of chBySub.get(s.id) ?? []) { const ck = cn.toLowerCase().trim(); if (!e.seen.has(ck)) { e.seen.add(ck); e.chapters.push(cn) } }
-    }
-    setLibrary(Array.from(byName.values()).map((e) => ({ name: e.name, chapters: e.chapters })).sort((a, b) => a.name.localeCompare(b.name)))
+    // One item per (source program × subject) — NOT merged across programs. Only
+    // subjects from OTHER programs (this program's own are already here).
+    const items: LibItem[] = subs
+      .filter((s) => s.program_id !== programId)
+      .map((s) => ({ sid: s.id, name: s.name, program: progName.get(s.program_id) ?? '—', chapters: chBySub.get(s.id) ?? [] }))
+      .filter((it) => it.chapters.length > 0)
+      .sort((a, b) => a.name.localeCompare(b.name) || a.program.localeCompare(b.program))
+    setLibrary(items)
     setLibLoading(false)
   }
 
   const addFromLibrary = async () => {
     if (!programId || libSel.size === 0) return
     setLibBusy(true); setMsg(null)
-    const chosen = library.filter((l) => libSel.has(l.name))
-    await supabase.from('subjects').upsert(chosen.map((l) => ({ program_id: programId, name: l.name })), { onConflict: 'program_id,name', ignoreDuplicates: true })
+    const chosen = library.filter((l) => libSel.has(l.sid))
+    const uniqNames = Array.from(new Set(chosen.map((l) => l.name)))
+    await supabase.from('subjects').upsert(uniqNames.map((name) => ({ program_id: programId, name })), { onConflict: 'program_id,name', ignoreDuplicates: true })
     const { data: subs } = await supabase.from('subjects').select('id, name').eq('program_id', programId)
     const subId = new Map((subs ?? []).map((s) => [s.name, s.id]))
-    const chapRows: { subject_id: string; name: string; sequence_no: number }[] = []
+    const chapRows: { subject_id: string; name: string; sequence_no: number; total_hours: number | null; teaching_hours: number | null }[] = []
     for (const l of chosen) {
       const sid = subId.get(l.name); if (!sid) continue
-      l.chapters.forEach((cn, i) => chapRows.push({ subject_id: sid, name: cn, sequence_no: i }))
+      l.chapters.forEach((c, i) => chapRows.push({ subject_id: sid, name: c.name, sequence_no: i, total_hours: c.total_hours ?? null, teaching_hours: c.teaching_hours ?? null }))
     }
-    if (chapRows.length) await supabase.from('chapters').upsert(chapRows, { onConflict: 'subject_id,name', ignoreDuplicates: true })
+    if (chapRows.length) {
+      const { error } = await supabase.from('chapters').upsert(chapRows, { onConflict: 'subject_id,name', ignoreDuplicates: true })
+      // Fallback if the hours columns aren't there yet (migration not run).
+      if (error) await supabase.from('chapters').upsert(chapRows.map((r) => ({ subject_id: r.subject_id, name: r.name, sequence_no: r.sequence_no })), { onConflict: 'subject_id,name', ignoreDuplicates: true })
+    }
     setLibBusy(false); setLibOpen(false)
-    setMsg({ type: 'success', text: `Added ${chosen.length} subject(s) with ${chapRows.length} chapter(s) to this program.` })
+    setMsg({ type: 'success', text: `Added ${uniqNames.length} subject(s) with ${chapRows.length} chapter(s) to this program.` })
     await loadProgram(programId)
   }
 
@@ -561,12 +578,12 @@ export default function SyllabusPage() {
             <div className="flex items-center justify-between p-5 border-b border-gray-100">
               <div>
                 <h3 className="font-semibold text-gray-900">Add subjects from library</h3>
-                <p className="text-xs text-gray-500">Pick subjects — their chapters come along automatically. Copies into this program (existing ones are skipped).</p>
+                <p className="text-xs text-gray-500">Each option is a subject from ONE program — its exact chapters come along (not merged across programs). Pick the right source (e.g. Accounts · CA Foundation). Copies into this program; existing chapters are skipped.</p>
               </div>
               <button onClick={() => setLibOpen(false)} className="h-8 w-8 grid place-items-center rounded-lg hover:bg-gray-100 text-gray-400">✕</button>
             </div>
             <div className="p-4 border-b border-gray-100">
-              <input value={libSearch} onChange={(e) => setLibSearch(e.target.value)} placeholder="Search subjects…" className="w-full h-9 px-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              <input value={libSearch} onChange={(e) => setLibSearch(e.target.value)} placeholder="Search subject or program…" className="w-full h-9 px-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
             </div>
             <div className="p-4 overflow-y-auto flex-1">
               {libLoading ? (
@@ -575,14 +592,14 @@ export default function SyllabusPage() {
                 <p className="text-sm text-gray-400 text-center py-6">Library is empty — import a syllabus first.</p>
               ) : (
                 <div className="space-y-1.5">
-                  {library.filter((l) => l.name.toLowerCase().includes(libSearch.toLowerCase())).map((l) => {
-                    const sel = libSel.has(l.name)
+                  {library.filter((l) => { const q = libSearch.toLowerCase(); return l.name.toLowerCase().includes(q) || l.program.toLowerCase().includes(q) }).map((l) => {
+                    const sel = libSel.has(l.sid)
                     return (
-                      <label key={l.name} className={`flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer ${sel ? 'bg-violet-50 border-violet-300' : 'bg-gray-50 border-gray-200 hover:border-violet-200'}`}>
-                        <input type="checkbox" checked={sel} onChange={() => setLibSel((prev) => { const n = new Set(prev); n.has(l.name) ? n.delete(l.name) : n.add(l.name); return n })} className="mt-1" />
+                      <label key={l.sid} className={`flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer ${sel ? 'bg-violet-50 border-violet-300' : 'bg-gray-50 border-gray-200 hover:border-violet-200'}`}>
+                        <input type="checkbox" checked={sel} onChange={() => setLibSel((prev) => { const n = new Set(prev); n.has(l.sid) ? n.delete(l.sid) : n.add(l.sid); return n })} className="mt-1" />
                         <div className="min-w-0">
-                          <div className="text-sm font-medium text-gray-900">{l.name} <span className="text-xs text-gray-400">· {l.chapters.length} chapters</span></div>
-                          {l.chapters.length > 0 && <div className="text-[11px] text-gray-500 truncate">{l.chapters.join(', ')}</div>}
+                          <div className="text-sm font-medium text-gray-900">{l.name} <span className="text-[11px] font-semibold text-violet-600">· {l.program}</span> <span className="text-xs text-gray-400">· {l.chapters.length} chapters</span></div>
+                          {l.chapters.length > 0 && <div className="text-[11px] text-gray-500 truncate">{l.chapters.map((c) => c.name).join(', ')}</div>}
                         </div>
                       </label>
                     )

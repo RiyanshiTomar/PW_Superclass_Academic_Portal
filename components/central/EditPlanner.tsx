@@ -31,30 +31,8 @@ function batchName(v: LinkLite['batches']): string {
 }
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim().replace(/s$/, '')
 const fmtDate = (d: string) => (d ? new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : '—')
-const daysBetweenISO = (a: string, b: string) => Math.round((new Date(b + 'T12:00:00').getTime() - new Date(a + 'T12:00:00').getTime()) / 86400000)
-
-// EDIT-PLANNER ONLY: re-base each subject's upcoming (non-conducted) rows so
-// they start at TODAY, preserving the gaps between them. Conducted rows keep
-// their real (final) date. Central then marks what's already done with its
-// conducted date and confirms the rest from today onward.
-function rebaseFromToday(all: EditRow[], today: string): EditRow[] {
-  const result = [...all]
-  const subjectIds = Array.from(new Set(all.map((r) => r.subject_id)))
-  for (const sid of subjectIds) {
-    const upcoming = all.filter((r) => r.subject_id === sid && r.status !== 'conducted').sort((a, b) => a.planned_date.localeCompare(b.planned_date))
-    if (upcoming.length === 0) continue
-    const dateByKey = new Map<string, string>()
-    let cur = today
-    dateByKey.set(upcoming[0].key, cur)
-    for (let i = 1; i < upcoming.length; i++) {
-      const gap = Math.max(0, upcoming[i].planned_date && upcoming[i - 1].planned_date ? daysBetweenISO(upcoming[i - 1].planned_date, upcoming[i].planned_date) : 1)
-      cur = addDaysToDate(cur, gap)
-      dateByKey.set(upcoming[i].key, cur)
-    }
-    for (let j = 0; j < result.length; j++) if (dateByKey.has(result[j].key)) result[j] = { ...result[j], planned_date: dateByKey.get(result[j].key)! }
-  }
-  return result
-}
+// Edit Planner shows the COMPLETE planner with its real dates (past + future);
+// central marks each class Confirmed / Already-conducted (with its final date).
 
 export default function EditPlanner() {
   const supabase = createClient()
@@ -174,8 +152,9 @@ export default function EditPlanner() {
         buffers.push({ subject_id: (l.subject_id as string) ?? null, faculty_id: (l.faculty_id as string) ?? null, chapter, topic_name: topic, planned_date: (l.planned_date as string) ?? '', start_time: null, duration_minutes: (l.duration_minutes as number) ?? 60, is_buffer: (l.is_buffer as boolean) ?? true, status: (l.status as string) ?? 'planned' })
       }
     }
-    // Edit-Planner rule: upcoming classes start from TODAY (conducted keep their date).
-    setRows(rebaseFromToday(real, todayISO))
+    // Show the COMPLETE planner with its real dates (past + future). Central
+    // marks each class Confirmed or Already-conducted (with its final date).
+    setRows(real)
     setKeptBuffers(buffers)
     setLinks((linkRes.data ?? []) as unknown as LinkLite[])
     const firstSubj = real[0]?.subject_id ?? ''

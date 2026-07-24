@@ -675,3 +675,53 @@ export async function cascadeCancel(
 
   return { ok: true, shifted: subsequent.length }
 }
+
+/** Prepone an ENTIRE chapter for a subject: move that chapter's upcoming
+ *  lectures to the front of the subject's upcoming class-dates; the other
+ *  upcoming chapters slide after it. Only whole chapters move (never a single
+ *  topic). Dates are the subject's own existing class-dates, just re-ordered —
+ *  each moved lecture re-inherits its new date's weekly time & room. No overlap
+ *  (rides the schedule), no invented dates, no rows lost. */
+export async function preponeChapter(
+  supabase: SupabaseClient,
+  batchId: string,
+  subjectId: string,
+  chapter: string,
+  fromDate: string
+): Promise<{ ok: boolean; moved: number; error?: string }> {
+  const norm = (s: string) => (s ?? '').toLowerCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim().replace(/s$/, '')
+
+  const { data: sched } = await supabase
+    .from('batch_schedules')
+    .select('day_of_week, start_time, end_time, classroom_id')
+    .eq('batch_id', batchId).eq('subject_id', subjectId)
+  const slotByDay = new Map<number, { start: string; duration: number; classroom: string | null }>()
+  for (const s of (sched ?? []) as { day_of_week: number; start_time: string; end_time: string; classroom_id: string | null }[]) {
+    if (!slotByDay.has(s.day_of_week)) slotByDay.set(s.day_of_week, { start: s.start_time.slice(0, 5), duration: toMinutes(s.end_time.slice(0, 5)) - toMinutes(s.start_time.slice(0, 5)), classroom: s.classroom_id ?? null })
+  }
+
+  const { data: lecs } = await supabase
+    .from('batch_planners')
+    .select('id, chapter, planned_date')
+    .eq('batch_id', batchId).eq('subject_id', subjectId).gte('planned_date', fromDate)
+    .order('planned_date', { ascending: true })
+  const rows = (lecs ?? []) as { id: string; chapter: string; planned_date: string }[]
+  if (rows.length === 0) return { ok: false, moved: 0, error: 'No upcoming lectures for this subject to reorder.' }
+
+  const dates = rows.map((r) => r.planned_date) // ascending = the slots to redistribute
+  const chosen = rows.filter((r) => norm(r.chapter) === norm(chapter))
+  if (chosen.length === 0) return { ok: false, moved: 0, error: 'That chapter has no upcoming lectures to prepone.' }
+  const others = rows.filter((r) => norm(r.chapter) !== norm(chapter))
+  const newOrder = [...chosen, ...others] // chapter block first, rest slide after
+
+  for (let i = 0; i < newOrder.length; i++) {
+    const nd = dates[i]
+    if (newOrder[i].planned_date === nd) continue // already in place
+    const slot = slotByDay.get(new Date(nd + 'T12:00:00').getDay())
+    const { error } = await supabase.from('batch_planners')
+      .update({ planned_date: nd, start_time: slot?.start ?? null, duration_minutes: slot?.duration ?? 60, classroom_id: slot?.classroom ?? null })
+      .eq('id', newOrder[i].id)
+    if (error) return { ok: false, moved: 0, error: error.message }
+  }
+  return { ok: true, moved: chosen.length }
+}

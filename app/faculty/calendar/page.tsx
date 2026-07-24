@@ -42,7 +42,7 @@ export default function FacultyCalendarPage() {
 
   // Request modal
   const [selected, setSelected] = useState<Lecture | null>(null)
-  const [mode, setMode] = useState<'reschedule' | 'cancel' | 'extra'>('reschedule')
+  const [mode, setMode] = useState<'reschedule' | 'cancel' | 'extra' | 'prepone'>('reschedule')
   const [newDate, setNewDate] = useState('')
   const [newTime, setNewTime] = useState('')
   const [newDuration, setNewDuration] = useState('60')
@@ -127,18 +127,20 @@ export default function FacultyCalendarPage() {
       requestedEnd = minutesToTimeString(toMinutes(newTime) + dur)
     }
 
-    const requestType = mode === 'cancel' ? 'cancel' : mode === 'extra' ? 'extra' : 'planner'
+    const requestType = mode === 'cancel' ? 'cancel' : mode === 'extra' ? 'extra' : mode === 'prepone' ? 'prepone' : 'planner'
+    const noDate = mode === 'cancel' || mode === 'prepone'
     const { error } = await supabase.from('reschedule_requests').insert({
       planner_id: selected.id,
       requested_by: appUser.id,
       request_type: requestType,
       original_date: selected.planned_date,
       original_start_time: selected.start_time,
-      requested_date: mode === 'cancel' ? null : newDate,
-      requested_start_time: mode === 'cancel' ? null : newTime || null,
+      requested_date: noDate ? null : newDate,
+      requested_start_time: noDate ? null : newTime || null,
       requested_end_time: requestedEnd,
       extra_topic: mode === 'extra' ? (extraTopic.trim() || null) : null,
-      extra_chapter: mode === 'extra' ? (extraChapter.trim() || null) : null,
+      // For prepone we store the chapter being brought forward.
+      extra_chapter: mode === 'extra' ? (extraChapter.trim() || null) : mode === 'prepone' ? (selected.chapter || null) : null,
       reason: reason.trim(),
       status: 'pending',
     })
@@ -146,13 +148,14 @@ export default function FacultyCalendarPage() {
     if (error) { setMessage({ type: 'error', text: 'Failed: ' + error.message }); return }
     await notifyRoles(supabase, ['central_team'], {
       type: 'reschedule',
-      title: mode === 'cancel' ? 'Cancellation request' : mode === 'extra' ? 'Extra-class request' : 'Reschedule request',
-      body: `${appUser.full_name} — ${selected.topic_name || 'a lecture'}.`,
+      title: mode === 'cancel' ? 'Cancellation request' : mode === 'extra' ? 'Extra-class request' : mode === 'prepone' ? 'Prepone-chapter request' : 'Reschedule request',
+      body: `${appUser.full_name} — ${mode === 'prepone' ? `chapter “${selected.chapter}”` : selected.topic_name || 'a lecture'}.`,
       link: '/central/reschedule-requests',
     })
     setSelected(null)
     const sentMsg = mode === 'cancel' ? 'Cancellation request sent to Central Team.'
       : mode === 'extra' ? 'Extra-class request sent to Central Team.'
+      : mode === 'prepone' ? 'Prepone-chapter request sent to Central Team.'
       : 'Reschedule request sent to Central Team.'
     setMessage({ type: 'success', text: sentMsg })
     await loadData()
@@ -283,10 +286,11 @@ export default function FacultyCalendarPage() {
               {selected.start_time && ` at ${selected.start_time.slice(0, 5)}`}
             </p>
 
-            <div className="flex gap-2 mb-4">
-              <button onClick={() => setMode('reschedule')} className={`flex-1 h-9 rounded-lg text-sm font-semibold ${mode === 'reschedule' ? 'bg-violet-500 text-white' : 'bg-neutral-100 text-neutral-600'}`}>Reschedule</button>
-              <button onClick={() => setMode('extra')} className={`flex-1 h-9 rounded-lg text-sm font-semibold ${mode === 'extra' ? 'bg-emerald-600 text-white' : 'bg-neutral-100 text-neutral-600'}`}>Extra Class</button>
-              <button onClick={() => setMode('cancel')} className={`flex-1 h-9 rounded-lg text-sm font-semibold ${mode === 'cancel' ? 'bg-red-600 text-white' : 'bg-neutral-100 text-neutral-600'}`}>Cancel Class</button>
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              <button onClick={() => setMode('reschedule')} className={`h-9 rounded-lg text-sm font-semibold ${mode === 'reschedule' ? 'bg-violet-500 text-white' : 'bg-neutral-100 text-neutral-600'}`}>Reschedule</button>
+              <button onClick={() => setMode('prepone')} className={`h-9 rounded-lg text-sm font-semibold ${mode === 'prepone' ? 'bg-sky-600 text-white' : 'bg-neutral-100 text-neutral-600'}`}>Prepone Chapter</button>
+              <button onClick={() => setMode('extra')} className={`h-9 rounded-lg text-sm font-semibold ${mode === 'extra' ? 'bg-emerald-600 text-white' : 'bg-neutral-100 text-neutral-600'}`}>Extra Class</button>
+              <button onClick={() => setMode('cancel')} className={`h-9 rounded-lg text-sm font-semibold ${mode === 'cancel' ? 'bg-red-600 text-white' : 'bg-neutral-100 text-neutral-600'}`}>Cancel Class</button>
             </div>
 
             {mode === 'reschedule' && (
@@ -299,6 +303,13 @@ export default function FacultyCalendarPage() {
                   <label className="block text-xs font-medium text-neutral-500 mb-1">New Time</label>
                   <input type="time" value={newTime} onChange={(e) => setNewTime(e.target.value)} className={inputClass} />
                 </div>
+              </div>
+            )}
+
+            {mode === 'prepone' && (
+              <div className="mb-3 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm">
+                <p className="text-neutral-700">Prepone the <b>whole chapter</b> <span className="font-semibold text-sky-700">“{selected.chapter}”</span> ({one(selected.subjects)?.name}).</p>
+                <p className="text-xs text-neutral-500 mt-1">Individual topics can&apos;t be preponed — the entire chapter&apos;s remaining classes move up to the next available dates, and the other upcoming chapters slide after it.</p>
               </div>
             )}
 
@@ -329,7 +340,7 @@ export default function FacultyCalendarPage() {
 
             <div className="mb-4">
               <label className="block text-xs font-medium text-neutral-500 mb-1">Reason</label>
-              <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" placeholder={mode === 'cancel' ? 'Why cancel this class?' : mode === 'extra' ? 'Why do you need an extra class on this topic?' : 'Why reschedule?'} />
+              <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" placeholder={mode === 'cancel' ? 'Why cancel this class?' : mode === 'extra' ? 'Why do you need an extra class on this topic?' : mode === 'prepone' ? 'Why prepone this chapter?' : 'Why reschedule?'} />
             </div>
 
             <p className="text-xs text-neutral-400 mb-4">
@@ -337,7 +348,9 @@ export default function FacultyCalendarPage() {
                 ? 'On approval, this class is removed and later lectures of the planner slide up to fill the gap.'
                 : mode === 'extra'
                 ? 'On approval, one extra class is added on this same topic (same batch, subject & room). Nothing else shifts.'
-                : 'On approval, this class moves and later lectures of the planner shift by the same amount.'}
+                : mode === 'prepone'
+                ? 'On approval, this whole chapter moves to the front of the subject’s upcoming classes; the other upcoming chapters slide after it (dates stay in order, no overlap).'
+                : 'On approval, this class moves forward and this subject’s later lectures shift to the next class-dates.'}
             </p>
 
             <div className="flex gap-3">

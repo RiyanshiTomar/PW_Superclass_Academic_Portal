@@ -161,3 +161,35 @@ export async function checkFacultyAssignmentOverlap(
 
   return false
 }
+
+/** Faculty at a centre who are FREE for a given slot (weekday+time on a date) —
+ *  so central can offer a substitute when a class is being cancelled. Excludes
+ *  the original faculty; subject-teachers are returned first. */
+export async function freeFacultyForSlot(
+  supabase: SupabaseClient,
+  args: { centreId: string; subjectId: string | null; date: string; startTime: string; durationMinutes: number; excludeFacultyId?: string | null }
+): Promise<{ id: string; full_name: string; teachesSubject: boolean }[]> {
+  const dayOfWeek = new Date(args.date + 'T12:00:00').getDay()
+  const start = args.startTime.slice(0, 5)
+  const endTime = minutesToTimeString(toMinutes(start) + args.durationMinutes)
+
+  const { data: centreFac } = await supabase.rpc('list_active_faculty', { p_centre_id: args.centreId })
+  const cands = (((centreFac as { id: string; full_name: string }[]) ?? [])).filter((f) => f.id !== args.excludeFacultyId)
+
+  let teaches = new Set<string>()
+  if (args.subjectId) {
+    const { data: fs } = await supabase.from('faculty_subjects').select('faculty_id').eq('subject_id', args.subjectId)
+    teaches = new Set((fs ?? []).map((r) => r.faculty_id as string))
+  }
+
+  const checked = await Promise.all(cands.map(async (f) => {
+    const weekly = await checkWeeklyScheduleOverlap(supabase, f.id, dayOfWeek, start, endTime, undefined, args.date, args.date)
+    if (weekly) return null
+    const dated = await checkPlannerTimeOverlap(supabase, f.id, args.date, args.startTime, args.durationMinutes)
+    if (dated) return null
+    return { id: f.id, full_name: f.full_name, teachesSubject: teaches.has(f.id) }
+  }))
+  return checked
+    .filter((x): x is { id: string; full_name: string; teachesSubject: boolean } => !!x)
+    .sort((a, b) => (b.teachesSubject ? 1 : 0) - (a.teachesSubject ? 1 : 0) || a.full_name.localeCompare(b.full_name))
+}

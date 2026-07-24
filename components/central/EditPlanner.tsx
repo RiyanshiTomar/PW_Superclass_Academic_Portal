@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { rematerialiseLink } from '@/lib/planners'
 import { fetchMaster, type Master } from '@/lib/syllabus'
-import { addDaysToDate } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card } from '@/components/PortalShell'
 
 type Planner = { id: string; name: string; program_id: string | null }
@@ -196,15 +195,15 @@ export default function EditPlanner() {
 
   // Re-assign the subject's upcoming (non-conducted) dates in ascending order to
   // the rows in their current array order — so date always follows position.
+  // Re-assign the subject's upcoming (non-conducted) dates in ascending order to
+  // the rows in their current array order — so date follows drag position. SAFE:
+  // only PERMUTES the existing dates (never invents new far-future dates, which
+  // used to scramble the plan). If a row has no slot (after Add), it reuses the
+  // last existing date (a harmless duplicate) rather than drifting by a month.
   const relayer = (all: EditRow[], subjectId: string): EditRow[] => {
     const upcoming = all.filter((r) => r.subject_id === subjectId && r.status !== 'conducted')
     const slots = upcoming.map((r) => r.planned_date).filter(Boolean).sort()
-    // extend the ladder if we somehow have more rows than dates (e.g. after Add)
-    while (slots.length < upcoming.length) {
-      const last = slots[slots.length - 1] || todayISO
-      const gap = slots.length >= 2 ? Math.max(1, Math.round((new Date(slots[slots.length - 1] + 'T12:00:00').getTime() - new Date(slots[slots.length - 2] + 'T12:00:00').getTime()) / 86400000)) : 1
-      slots.push(addDaysToDate(last, gap))
-    }
+    while (slots.length < upcoming.length) slots.push(slots[slots.length - 1] || todayISO)
     let i = 0
     const dateByKey = new Map<string, string>()
     for (const r of upcoming) { dateByKey.set(r.key, slots[i] ?? todayISO); i++ }
@@ -216,24 +215,22 @@ export default function EditPlanner() {
   const addRowToChapter = (subjectId: string, chapter: string) => {
     setRows((prev) => {
       const sample = prev.find((r) => r.subject_id === subjectId && r.chapter === chapter)
+      // New row takes the chapter's last date (or the subject's last) — a harmless
+      // duplicate that sorts adjacent. NO month-gap invention (that scrambled plans).
+      const chapDates = prev.filter((r) => r.subject_id === subjectId && r.chapter === chapter).map((r) => r.planned_date).filter(Boolean).sort()
       const upDates = prev.filter((r) => r.subject_id === subjectId && r.status !== 'conducted').map((r) => r.planned_date).filter(Boolean).sort()
-      const last = upDates[upDates.length - 1] || todayISO
-      const gap = upDates.length >= 2 ? Math.max(1, Math.round((new Date(upDates[upDates.length - 1] + 'T12:00:00').getTime() - new Date(upDates[upDates.length - 2] + 'T12:00:00').getTime()) / 86400000)) : 7
-      const newRow: EditRow = { key: nextKey(), subject_id: subjectId, faculty_id: sample?.faculty_id ?? '', chapter, topic_name: '', planned_date: addDaysToDate(last, gap), duration_minutes: sample?.duration_minutes ?? 60, status: 'planned' }
-      // insert after the chapter's last row
+      const newDate = chapDates[chapDates.length - 1] || upDates[upDates.length - 1] || todayISO
+      const newRow: EditRow = { key: nextKey(), subject_id: subjectId, faculty_id: sample?.faculty_id ?? '', chapter, topic_name: '', planned_date: newDate, duration_minutes: sample?.duration_minutes ?? 60, status: 'planned' }
+      // insert after the chapter's last row (no re-shuffle of other dates)
       let idx = -1
       prev.forEach((r, i) => { if (r.subject_id === subjectId && r.chapter === chapter) idx = i })
       const next = [...prev]
       next.splice(idx + 1, 0, newRow)
-      return relayer(next, subjectId)
+      return next
     })
   }
 
-  const removeRow = (key: string) => setRows((prev) => {
-    const row = prev.find((r) => r.key === key)
-    const next = prev.filter((r) => r.key !== key)
-    return row ? relayer(next, row.subject_id) : next
-  })
+  const removeRow = (key: string) => setRows((prev) => prev.filter((r) => r.key !== key))
 
   const setStatus = (key: string, status: Status) => {
     if (status === 'conducted') {
@@ -241,20 +238,14 @@ export default function EditPlanner() {
       setConductKey(key); setConductDate(r?.planned_date && r.planned_date <= todayISO ? r.planned_date : todayISO)
       return
     }
-    setRows((prev) => {
-      const row = prev.find((r) => r.key === key)
-      const next = prev.map((r) => (r.key === key ? { ...r, status } : r))
-      return row ? relayer(next, row.subject_id) : next
-    })
+    // Just set the status — do NOT re-shuffle dates (that used to scramble the plan).
+    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, status } : r)))
   }
 
   const applyConducted = () => {
     if (!conductKey || !conductDate) return
-    setRows((prev) => {
-      const row = prev.find((r) => r.key === conductKey)
-      const next = prev.map((r) => (r.key === conductKey ? { ...r, status: 'conducted' as Status, planned_date: conductDate } : r))
-      return row ? relayer(next, row.subject_id) : next
-    })
+    // Only this row changes (status + its final date). Nothing else moves.
+    setRows((prev) => prev.map((r) => (r.key === conductKey ? { ...r, status: 'conducted' as Status, planned_date: conductDate } : r)))
     setConductKey(null); setConductDate('')
   }
 
@@ -267,10 +258,16 @@ export default function EditPlanner() {
       const drag = prev.find((r) => r.key === dragKey)
       const target = prev.find((r) => r.key === targetKey)
       if (!drag || !target || drag.subject_id !== target.subject_id || drag.chapter !== target.chapter || drag.status === 'conducted' || target.status === 'conducted') return prev
-      const without = prev.filter((r) => r.key !== dragKey)
-      const ti = without.findIndex((r) => r.key === targetKey)
-      without.splice(ti, 0, drag)
-      return relayer(without, drag.subject_id)
+      // Reorder ONLY within this chapter's non-conducted rows, and permute their
+      // OWN dates onto the new order (never touches other chapters/subjects, never
+      // invents dates). This is the safe replacement for the old subject-wide relayer.
+      const chapRows = prev.filter((r) => r.subject_id === drag.subject_id && r.chapter === drag.chapter && r.status !== 'conducted').sort((a, b) => a.planned_date.localeCompare(b.planned_date))
+      const order = chapRows.map((r) => r.key).filter((k) => k !== dragKey)
+      const ti = order.indexOf(targetKey)
+      order.splice(ti < 0 ? order.length : ti, 0, dragKey)
+      const dates = chapRows.map((r) => r.planned_date).sort()
+      const dateByKey = new Map(order.map((k, i) => [k, dates[i] ?? dates[dates.length - 1]]))
+      return prev.map((r) => (dateByKey.has(r.key) ? { ...r, planned_date: dateByKey.get(r.key)! } : r))
     })
   }
 

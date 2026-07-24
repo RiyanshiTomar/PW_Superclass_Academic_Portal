@@ -134,8 +134,17 @@ async function main() {
     data.forEach((s) => subMap.set(`${s.program_id}|${norm(s.name)}`, s.id))
   }
 
-  // Chapters (each row's Chapter/Topic = a chapter under the subject)
-  const { data: existingChap } = await supabase.from('chapters').select('id, name, subject_id, sequence_no')
+  // Chapters (each row's Chapter/Topic = a chapter under the subject).
+  // Paginate — a plain select caps at 1000 rows, so with a big syllabus the map
+  // would be incomplete and we'd re-insert existing chapters (duplicate-key crash).
+  const existingChap = []
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from('chapters').select('id, name, subject_id, sequence_no').range(from, from + 999)
+    if (error) throw new Error('read chapters: ' + error.message)
+    if (!data || data.length === 0) break
+    existingChap.push(...data)
+    if (data.length < 1000) break
+  }
   const chapMap = new Map((existingChap || []).map((c) => [`${c.subject_id}|${norm(c.name)}`, c.id]))
   const maxSeq = new Map()
   for (const c of existingChap || []) maxSeq.set(c.subject_id, Math.max(maxSeq.get(c.subject_id) || 0, c.sequence_no || 0))
@@ -154,7 +163,8 @@ async function main() {
   }
   if (newChaps.length) {
     for (let i = 0; i < newChaps.length; i += 500) {
-      const { error } = await supabase.from('chapters').insert(newChaps.slice(i, i + 500))
+      // upsert + ignoreDuplicates → safe even if a chapter already exists (never crashes).
+      const { error } = await supabase.from('chapters').upsert(newChaps.slice(i, i + 500), { onConflict: 'subject_id,name', ignoreDuplicates: true })
       if (error) throw new Error('chapters: ' + error.message)
     }
   }

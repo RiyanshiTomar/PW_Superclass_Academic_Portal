@@ -1,7 +1,8 @@
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import PortalShell from '@/components/PortalShell'
-import { getAppUser } from '@/lib/auth'
+import RouteScope from '@/components/RouteScope'
+import { getAppUser, hasRole } from '@/lib/auth'
 
 const NAV = [
   { label: 'Dashboard', href: '/admin' },
@@ -17,6 +18,9 @@ const NAV = [
   { label: 'Audit Log', href: '/admin/audit-log' },
 ]
 
+// A syllabus-only editor sees just the Syllabus page.
+const SYLLABUS_NAV = [{ label: 'Syllabus', href: '/admin/syllabus' }]
+
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -24,14 +28,22 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   if (!user) redirect('/login')
 
   const appUser = await getAppUser(supabase, user)
+  const isAdmin = hasRole(appUser, 'admin')
+  const isSyllabusEditor = hasRole(appUser, 'syllabus_editor')
+
+  // Only full admins or scoped syllabus editors belong in the Admin portal.
+  if (!isAdmin && !isSyllabusEditor) redirect('/')
+
+  const syllabusOnly = isSyllabusEditor && !isAdmin
 
   return (
     <PortalShell
-      role="admin"
+      role={syllabusOnly ? 'syllabus_editor' : 'admin'}
       fullName={appUser?.full_name ?? user.email ?? ''}
-      homeHref="/admin"
-      navItems={NAV}
+      homeHref={syllabusOnly ? '/admin/syllabus' : '/admin'}
+      navItems={syllabusOnly ? SYLLABUS_NAV : NAV}
     >
+      {syllabusOnly && <RouteScope allow="/admin/syllabus" redirectTo="/admin/syllabus" />}
       {children}
     </PortalShell>
   )

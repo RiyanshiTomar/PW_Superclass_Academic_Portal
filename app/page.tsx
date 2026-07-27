@@ -39,6 +39,7 @@ export default async function Home() {
     faculty: '/faculty',
     branch_head: '/branch',
     batch_manager: '/batch-manager',
+    syllabus_editor: '/admin/syllabus',
   }
 
   redirect(roleRedirects[activeRoles[0]] || '/login')

@@ -5,12 +5,13 @@ import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { stageBadgeClass, formatTime } from '@/lib/utils'
 import { notifyRoles } from '@/lib/notifications'
+import { getTestCompletion, type TestCompletion } from '@/lib/tests'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
 type TestRow = {
   id: string; name: string; test_date: string; start_time: string; duration_minutes: number
-  test_type: string; part_type: string; stage: string; subject_id: string | null
-  batches: { name: string } | { name: string }[] | null
+  test_type: string; part_type: string; stage: string; subject_id: string | null; batch_id: string
+  batches: { name: string; program_id: string | null } | { name: string; program_id: string | null }[] | null
   subjects: { name: string } | { name: string }[] | null
   classrooms: { name: string; room_no: string | null } | { name: string; room_no: string | null }[] | null
 }
@@ -20,6 +21,7 @@ export default function FacultyTestsPage() {
   const supabase = createClient()
   const [appUserId, setAppUserId] = useState<string | null>(null)
   const [tests, setTests] = useState<TestRow[]>([])
+  const [completions, setCompletions] = useState<Record<string, TestCompletion>>({})
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
@@ -39,12 +41,31 @@ export default function FacultyTestsPage() {
     setAppUserId(au.id)
     const { data } = await supabase
       .from('test_schedules')
-      .select('id, name, test_date, start_time, duration_minutes, test_type, part_type, stage, subject_id, batches(name), subjects(name), classrooms(name, room_no)')
+      .select('id, name, test_date, start_time, duration_minutes, test_type, part_type, stage, subject_id, batch_id, batches(name, program_id), subjects(name), classrooms(name, room_no)')
       .eq('faculty_id', au.id)
       .in('stage', ['Faculty Assigned', 'Confirmed', 'Rework'])
       .order('test_date', { ascending: true })
-    setTests((data ?? []) as unknown as TestRow[])
+    const rows = (data ?? []) as unknown as TestRow[]
+    setTests(rows)
     setLoading(false)
+
+    // ≥60% syllabus gate — warn on upcoming tests only.
+    const today = new Date().toISOString().split('T')[0]
+    const upcoming = rows.filter((t) => t.test_date >= today)
+    if (upcoming.length) {
+      const ids = upcoming.map((t) => t.id)
+      const { data: tc } = await supabase.from('test_chapters').select('test_id, chapter_id').in('test_id', ids)
+      const chMap: Record<string, string[]> = {}
+      for (const r of (tc ?? []) as { test_id: string; chapter_id: string }[]) (chMap[r.test_id] ??= []).push(r.chapter_id)
+      const out: Record<string, TestCompletion> = {}
+      for (const t of upcoming) {
+        out[t.id] = await getTestCompletion(supabase, {
+          batchId: t.batch_id, byDate: t.test_date, partType: t.part_type, subjectId: t.subject_id,
+          chapterIds: chMap[t.id] ?? [], programId: one(t.batches)?.program_id ?? null,
+        })
+      }
+      setCompletions(out)
+    }
   }
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [])
@@ -103,6 +124,11 @@ export default function FacultyTestsPage() {
         </Card>
       ) : (
         <div className="space-y-3">
+          {tests.some((t) => completions[t.id]?.warn) && (
+            <Alert type="error">
+              Some upcoming tests have less than 60% of their syllabus taught by the test date (⚠ badge below). Flag this to the Central Team if the date needs to move.
+            </Alert>
+          )}
           {tests.map((t) => (
             <Card key={t.id} className="p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -112,6 +138,11 @@ export default function FacultyTestsPage() {
                     <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 ${stageBadgeClass(t.stage)}`}>{t.stage}</span>
                     <span className="text-[10px] font-bold uppercase tracking-wider bg-neutral-100 text-neutral-600 px-2 py-0.5 rounded-full">{t.test_type}</span>
                     <span className="text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full">{t.part_type === 'Full' ? 'Full syllabus' : 'Part'}</span>
+                    {completions[t.id]?.hasData && (
+                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${completions[t.id].warn ? 'bg-red-100 text-red-700 ring-1 ring-red-200' : 'bg-emerald-50 text-emerald-700'}`}>
+                        {completions[t.id].warn ? `⚠ Syllabus ${completions[t.id].pct}%` : `Syllabus ${completions[t.id].pct}%`}
+                      </span>
+                    )}
                   </div>
                   <p className="text-sm text-neutral-700 mt-1">
                     {one(t.batches)?.name ?? 'Batch'} · {new Date(t.test_date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })} · {formatTime(t.start_time)} · {t.duration_minutes}m

@@ -3,9 +3,69 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
-import { createTest, updateTest, setTestStage, getEligibleChapters, type EligibleChapter, type TestInput } from '@/lib/tests'
-import { stageBadgeClass, formatTime } from '@/lib/utils'
+import {
+  createTest, updateTest, setTestStage, getEligibleChapters, getTestCompletion, getBatchFreeWindows, validateTestSlot,
+  type EligibleChapter, type TestInput, type TestCompletion, type FreeWindow,
+} from '@/lib/tests'
+import { stageBadgeClass, formatTime, toMinutes } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
+
+// --- CSV parsing (quote-aware) --------------------------------------------
+function parseCsvRows(text: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = [], cell = '', inQ = false
+  const s = text.replace(/\r\n?/g, '\n')
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (inQ) {
+      if (ch === '"') { if (s[i + 1] === '"') { cell += '"'; i++ } else inQ = false }
+      else cell += ch
+    } else if (ch === '"') inQ = true
+    else if (ch === ',') { row.push(cell); cell = '' }
+    else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = '' }
+    else cell += ch
+  }
+  if (cell.length || row.length) { row.push(cell); rows.push(row) }
+  return rows.filter((r) => r.some((c) => c.trim() !== ''))
+}
+
+// Normalise many date spellings to YYYY-MM-DD (ISO, DD/MM/YYYY, DD-MM-YYYY).
+function normalizeDate(raw: string): string | null {
+  const v = raw.trim()
+  if (!v) return null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v
+  const m = v.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/)
+  if (m) { const [, d, mo, y] = m; return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}` }
+  return null
+}
+function normalizeTime(raw: string): string | null {
+  const v = raw.trim()
+  const m = v.match(/^(\d{1,2}):(\d{2})/)
+  if (!m) return null
+  return `${m[1].padStart(2, '0')}:${m[2]}`
+}
+const norm = (s: string) => s.toLowerCase().trim()
+
+type BulkRow = {
+  line: number
+  raw: string[]
+  batchId: string | null
+  batchLabel: string
+  subjectId: string | null
+  scope: 'Full' | 'Part'
+  name: string
+  date: string | null
+  time: string | null
+  duration: number
+  testType: string
+  chapterIds: string[]
+  facultyId: string | null
+  classroomId: string | null
+  errors: string[]
+  status: 'error' | 'free' | 'shift'  // shift = class/lecture clash (planner shifts); error also covers test-vs-test clash
+  clashNote: string | null
+  completion: TestCompletion | null
+}
 
 type Scope = 'central' | 'admin' | 'branch' | 'batch-manager'
 type Batch = { id: string; name: string; centre_id: string; program_id: string; batch_manager_id: string | null }
@@ -56,6 +116,18 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const [saving, setSaving] = useState(false)
   // Set when a save fails on a class/lecture clash → offer "test priority" shift.
   const [canShift, setCanShift] = useState(false)
+  // Free windows suggested on the day when the picked slot clashes.
+  const [freeWindows, setFreeWindows] = useState<FreeWindow[]>([])
+  // Per-test aggregate syllabus completion (the ≥60% gate) — future tests only.
+  const [completions, setCompletions] = useState<Record<string, TestCompletion>>({})
+  // chapter ids per test (for the completion calc)
+  const [chaptersByTest, setChaptersByTest] = useState<Record<string, string[]>>({})
+
+  // Bulk CSV upload
+  const [showBulk, setShowBulk] = useState(false)
+  const [bulkRows, setBulkRows] = useState<BulkRow[]>([])
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkMsg, setBulkMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
 
   const isPrivileged = scope === 'central' || scope === 'admin'
 
@@ -83,9 +155,13 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       setTests(tRes.data as TestRow[])
       const ids = (tRes.data as TestRow[]).map((t) => t.id)
       if (ids.length) {
-        const { data: tc } = await supabase.from('test_chapters').select('test_id, chapters(name)').in('test_id', ids)
-        setTestChapters((tc ?? []) as unknown as TestChapterRow[])
-      } else setTestChapters([])
+        const { data: tc } = await supabase.from('test_chapters').select('test_id, chapter_id, chapters(name)').in('test_id', ids)
+        const rows = (tc ?? []) as unknown as (TestChapterRow & { chapter_id: string })[]
+        setTestChapters(rows as TestChapterRow[])
+        const map: Record<string, string[]> = {}
+        for (const r of rows) { (map[r.test_id] ??= []).push(r.chapter_id) }
+        setChaptersByTest(map)
+      } else { setTestChapters([]); setChaptersByTest({}) }
     }
     setLoading(false)
   }
@@ -142,6 +218,34 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [partType, batchId, subjectId, testDate])
 
+  // Compute the ≥60% syllabus gate for every upcoming test so we can warn on
+  // the card. Only future tests matter (past ones already happened).
+  useEffect(() => {
+    if (visibleTests.length === 0) { setCompletions({}); return }
+    let cancelled = false
+    const today = new Date().toISOString().split('T')[0]
+    const upcoming = visibleTests.filter((t) => t.test_date >= today)
+    ;(async () => {
+      const out: Record<string, TestCompletion> = {}
+      for (const t of upcoming) {
+        const b = batches.find((x) => x.id === t.batch_id)
+        const comp = await getTestCompletion(supabase, {
+          batchId: t.batch_id,
+          byDate: t.test_date,
+          partType: t.part_type,
+          subjectId: t.subject_id,
+          chapterIds: chaptersByTest[t.id] ?? [],
+          programId: b?.program_id ?? null,
+        })
+        if (cancelled) return
+        out[t.id] = comp
+      }
+      if (!cancelled) setCompletions(out)
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tests, chaptersByTest, visibleBatchIds])
+
   const batchLabel = (b: Batch) => `${b.name} — ${centres.find((c) => c.id === b.centre_id)?.name ?? ''}`
   const roomLabel = (c: Classroom) => (c.room_no ? `${c.room_no} · ${c.name}` : c.name)
   const testChapterNames = (testId: string) =>
@@ -151,7 +255,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     setShowForm(false); setEditingId(null)
     setBatchId(''); setName(''); setTestDate(''); setStartTime('10:00'); setDuration('60')
     setTestType('Objective'); setPartType('Full'); setSubjectId(''); setFacultyId(''); setClassroomId('')
-    setEligible([]); setSelectedChapters(new Set()); setCanShift(false)
+    setEligible([]); setSelectedChapters(new Set()); setCanShift(false); setFreeWindows([])
   }
 
   const startEdit = (t: TestRow) => {
@@ -172,7 +276,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const submit = (e: React.FormEvent) => { e.preventDefault(); doSubmit(false) }
 
   const doSubmit = async (testPriority: boolean) => {
-    setMsg(null); setCanShift(false)
+    setMsg(null); setCanShift(false); setFreeWindows([])
     if (!batchId) return setMsg({ type: 'error', text: 'Pick a batch.' })
     if (!name.trim()) return setMsg({ type: 'error', text: 'Give the test a name.' })
     if (!testDate) return setMsg({ type: 'error', text: 'Pick a test date.' })
@@ -208,6 +312,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       // A class/lecture clash can be resolved by giving the test priority; a
       // clash with another TEST cannot, so only offer the shift for the former.
       setCanShift(!testPriority && /class|planned lecture/i.test(res.error ?? ''))
+      // Whatever the clash, show the day's free windows so central can move it.
+      const fw = await getBatchFreeWindows(supabase, { batchId, date: testDate, durationMinutes: dur, ignoreTestId: editingId ?? undefined })
+      setFreeWindows(fw)
       return
     }
     const shiftNote = res.shifted ? ` ${res.shifted} clashing lecture(s) shifted forward.` : ''
@@ -234,6 +341,199 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     await loadData()
   }
 
+  // ---- Bulk CSV upload -----------------------------------------------------
+  const downloadBulkTemplate = () => {
+    const headers = ['Batch', 'Subject', 'Test Name', 'Date', 'Time', 'Duration', 'Type', 'Scope', 'Chapters', 'Room', 'Invigilator Email']
+    const example = ['(exact batch name)', '(blank = Full syllabus)', 'Weekly Test 3', '2026-08-15', '10:00', '60', 'Objective', 'Full', 'Chapter A; Chapter B', '(optional room no)', '(optional) faculty@pw.live']
+    const esc = (c: string) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)
+    const csv = [headers.join(','), example.map(esc).join(',')].join('\n')
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }))
+    const a = document.createElement('a'); a.href = url; a.download = 'test-upload-template.csv'; a.click(); URL.revokeObjectURL(url)
+  }
+
+  const colIndex = (headers: string[], aliases: string[]) => {
+    const h = headers.map((x) => x.toLowerCase().trim())
+    for (const a of aliases) { const i = h.indexOf(a); if (i >= 0) return i }
+    return -1
+  }
+
+  const chapterCache = useMemo(() => new Map<string, { id: string; name: string }[]>(), [])
+  const chaptersOfSubject = async (sid: string) => {
+    if (chapterCache.has(sid)) return chapterCache.get(sid)!
+    const { data } = await supabase.from('chapters').select('id, name').eq('subject_id', sid)
+    const rows = (data ?? []) as { id: string; name: string }[]
+    chapterCache.set(sid, rows)
+    return rows
+  }
+  const pickFreeRoom = async (rooms: Classroom[], date: string, time: string, dur: number): Promise<string | null> => {
+    if (!rooms.length) return null
+    const s = toMinutes(time), e = s + dur
+    const { data } = await supabase.from('test_schedules').select('classroom_id, start_time, duration_minutes').eq('test_date', date).in('classroom_id', rooms.map((r) => r.id))
+    const busy = new Set<string>()
+    for (const r of (data ?? []) as { classroom_id: string | null; start_time: string; duration_minutes: number }[]) {
+      const rs = toMinutes(r.start_time.slice(0, 5))
+      if (r.classroom_id && rs < e && rs + r.duration_minutes > s) busy.add(r.classroom_id)
+    }
+    return rooms.find((r) => !busy.has(r.id))?.id ?? rooms[0]?.id ?? null
+  }
+
+  const parseBulk = async (text: string) => {
+    setBulkMsg(null); setBulkRows([])
+    const raw = parseCsvRows(text)
+    if (raw.length < 2) { setBulkMsg({ type: 'error', text: 'The CSV needs a header row and at least one test row.' }); return }
+    const headers = raw[0]
+    const ci = {
+      batch: colIndex(headers, ['batch']),
+      subject: colIndex(headers, ['subject']),
+      name: colIndex(headers, ['test name', 'name']),
+      date: colIndex(headers, ['date', 'test date']),
+      time: colIndex(headers, ['time', 'start time']),
+      duration: colIndex(headers, ['duration', 'duration (min)', 'duration(min)', 'minutes']),
+      type: colIndex(headers, ['type', 'test type']),
+      scope: colIndex(headers, ['scope', 'part type', 'part']),
+      chapters: colIndex(headers, ['chapters', 'chapter']),
+      room: colIndex(headers, ['room', 'room no', 'classroom']),
+      invig: colIndex(headers, ['invigilator email', 'invigilator', 'faculty email', 'faculty']),
+    }
+    if (ci.batch < 0 || ci.name < 0 || ci.date < 0) {
+      setBulkMsg({ type: 'error', text: 'CSV must have at least Batch, Test Name and Date columns. Download the template.' }); return
+    }
+    setBulkBusy(true)
+    const get = (r: string[], i: number) => (i >= 0 && i < r.length ? r[i].trim() : '')
+    const dataRows = raw.slice(1)
+
+    // Resolve invigilator emails once.
+    const emails = [...new Set(dataRows.map((r) => get(r, ci.invig).toLowerCase()).filter(Boolean))]
+    const emailToId = new Map<string, string>()
+    if (emails.length) {
+      const { data } = await supabase.from('app_users').select('id, email').in('email', emails)
+      for (const u of (data ?? []) as { id: string; email: string | null }[]) if (u.email) emailToId.set(u.email.toLowerCase(), u.id)
+    }
+
+    const out: BulkRow[] = []
+    for (let idx = 0; idx < dataRows.length; idx++) {
+      const r = dataRows[idx]
+      const errors: string[] = []
+
+      // Batch
+      const bc = norm(get(r, ci.batch))
+      let cand = visibleBatches.filter((b) => norm(b.name) === bc)
+      if (cand.length !== 1) { const full = visibleBatches.filter((b) => norm(batchLabel(b)) === bc); if (full.length === 1) cand = full }
+      if (cand.length === 0) errors.push('Batch not found (must match exactly).')
+      else if (cand.length > 1) errors.push('Batch is ambiguous — write it as "Name — Centre".')
+      const batch = cand.length === 1 ? cand[0] : null
+
+      // Scope + subject
+      const subjectCell = get(r, ci.subject)
+      const scopeCell = norm(get(r, ci.scope))
+      const scope: 'Full' | 'Part' = scopeCell.startsWith('part') ? 'Part' : scopeCell.startsWith('full') ? 'Full' : (subjectCell ? 'Part' : 'Full')
+      let subjectId: string | null = null
+      if (scope === 'Part') {
+        if (!subjectCell) errors.push('Part test needs a Subject.')
+        else if (batch) {
+          const subs = subjects.filter((s) => s.program_id === batch.program_id && norm(s.name) === norm(subjectCell))
+          if (subs.length === 1) subjectId = subs[0].id
+          else errors.push(`Subject "${subjectCell}" not found in the batch’s program.`)
+        }
+      }
+
+      // Chapters (Part only)
+      let chapterIds: string[] = []
+      if (scope === 'Part' && subjectId) {
+        const names = get(r, ci.chapters).split(';').map((x) => x.trim()).filter(Boolean)
+        if (names.length === 0) errors.push('Part test needs at least one chapter.')
+        else {
+          const chs = await chaptersOfSubject(subjectId)
+          const missing: string[] = []
+          for (const nm of names) { const c = chs.find((x) => norm(x.name) === norm(nm)); if (c) chapterIds.push(c.id); else missing.push(nm) }
+          if (missing.length) errors.push(`Chapters not found: ${missing.join(', ')}.`)
+        }
+      }
+
+      // Date / time / duration / type / name
+      const date = normalizeDate(get(r, ci.date)); if (!date) errors.push('Bad or missing date (use YYYY-MM-DD).')
+      const time = normalizeTime(get(r, ci.time)) ?? '10:00'
+      const dur = parseInt(get(r, ci.duration), 10) || 60; if (dur < 15 || dur > 480) errors.push('Duration must be 15–480 minutes.')
+      const name = get(r, ci.name); if (!name) errors.push('Missing test name.')
+      const testType = /subj/i.test(get(r, ci.type)) ? 'Subjective' : 'Objective'
+
+      // Room (explicit or auto-pick a free one at the centre)
+      let classroomId: string | null = null
+      if (batch && date) {
+        const centreRooms = classrooms.filter((c) => c.centre_id === batch.centre_id && c.is_active)
+        const roomCell = get(r, ci.room)
+        if (roomCell && !/^\(/.test(roomCell)) {
+          const rm = centreRooms.filter((c) => norm(c.room_no ?? '') === norm(roomCell) || norm(c.name) === norm(roomCell))
+          if (rm.length >= 1) classroomId = rm[0].id
+          else errors.push(`Room "${roomCell}" not found at the batch’s centre.`)
+        } else {
+          classroomId = await pickFreeRoom(centreRooms, date, time, dur)
+        }
+      }
+
+      // Invigilator
+      let facultyId: string | null = null
+      const invigCell = norm(get(r, ci.invig))
+      if (invigCell && !/^\(/.test(invigCell)) { const id = emailToId.get(invigCell); if (id) facultyId = id; else errors.push('Invigilator email not found.') }
+
+      // Clash + completion
+      let status: BulkRow['status'] = errors.length ? 'error' : 'free'
+      let clashNote: string | null = null
+      let completion: TestCompletion | null = null
+      if (!errors.length && batch && date) {
+        const slot = { batchId: batch.id, facultyId, classroomId, date, startTime: time, durationMinutes: dur }
+        const priClash = await validateTestSlot(supabase, slot, { testPriority: true })
+        if (priClash) { status = 'error'; clashNote = priClash + ' (can’t auto-shift another test — fix the time).' }
+        else { const noPri = await validateTestSlot(supabase, slot); if (noPri) { status = 'shift'; clashNote = noPri } }
+        completion = await getTestCompletion(supabase, { batchId: batch.id, byDate: date, partType: scope, subjectId, chapterIds, programId: batch.program_id })
+      }
+
+      out.push({
+        line: idx + 2, raw: r, batchId: batch?.id ?? null, batchLabel: batch ? batchLabel(batch) : get(r, ci.batch),
+        subjectId, scope, name, date, time, duration: dur, testType, chapterIds, facultyId, classroomId, errors, status, clashNote, completion,
+      })
+    }
+    setBulkRows(out)
+    setBulkBusy(false)
+    const ok = out.filter((x) => x.status !== 'error').length
+    setBulkMsg({ type: ok ? 'info' : 'error', text: `${out.length} row(s) read · ${ok} ready to import · ${out.length - ok} need fixing.` })
+  }
+
+  const onBulkFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]; if (!f) return
+    const text = await f.text()
+    e.target.value = ''
+    await parseBulk(text)
+  }
+
+  const importBulk = async () => {
+    const rows = bulkRows.filter((x) => x.status !== 'error')
+    if (rows.length === 0) { setBulkMsg({ type: 'error', text: 'Nothing to import — every row has an error.' }); return }
+    setBulkBusy(true)
+    let ok = 0, shifted = 0
+    const failures: string[] = []
+    for (const row of rows) {
+      const inp: TestInput = {
+        batch_id: row.batchId!, subject_id: row.scope === 'Part' ? row.subjectId : null, classroom_id: row.classroomId ?? null,
+        faculty_id: row.facultyId, name: row.name, test_date: row.date!, start_time: row.time!, duration_minutes: row.duration,
+        test_type: row.testType, part_type: row.scope, created_by: appUser?.id ?? null,
+      }
+      // Tests take priority — any class/lecture clash shifts the planner forward.
+      const res = await createTest(supabase, inp, row.chapterIds, { testPriority: true })
+      if (res.ok) { ok++; shifted += res.shifted ?? 0 } else failures.push(`Line ${row.line} (${row.name}): ${res.error}`)
+    }
+    setBulkBusy(false)
+    setBulkRows([])
+    const warns = rows.filter((r) => r.completion?.warn).length
+    setBulkMsg({
+      type: failures.length ? 'error' : 'success',
+      text: `Imported ${ok} test(s) as draft${shifted ? `, ${shifted} clashing lecture(s) shifted forward` : ''}.` +
+        (warns ? ` ${warns} have <60% syllabus taught — see the warnings in the list.` : '') +
+        (failures.length ? ` Failed: ${failures.join('; ')}` : ''),
+    })
+    await loadData()
+  }
+
   const input = 'w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500'
   const subjName = (id: string | null) => subjects.find((s) => s.id === id)?.name
   const facName = (id: string | null) => faculty.find((f) => f.id === id)?.full_name
@@ -247,10 +547,85 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         description={isPrivileged
           ? 'Schedule batch tests (a whole year ahead if you like). Validated against the batch’s classes, room and faculty — nothing overlaps. Pick any chapters for part tests; the % is just a coverage hint.'
           : 'Tests for your batches, by stage. Central Team schedules; faculty confirm.'}
-        action={isPrivileged && !showForm ? <BtnPrimary onClick={() => { resetForm(); setShowForm(true) }}>+ Schedule Test</BtnPrimary> : undefined}
+        action={isPrivileged && !showForm ? (
+          <div className="flex flex-wrap gap-2">
+            <BtnSecondary onClick={() => { setShowBulk((v) => !v); setBulkMsg(null); setBulkRows([]) }}>{showBulk ? 'Close upload' : '⬆ Upload CSV'}</BtnSecondary>
+            <BtnPrimary onClick={() => { resetForm(); setShowForm(true) }}>+ Schedule Test</BtnPrimary>
+          </div>
+        ) : undefined}
       />
 
       {msg && <Alert type={msg.type === 'info' ? 'info' : msg.type}>{msg.text}</Alert>}
+
+      {isPrivileged && showBulk && (
+        <Card className="p-6 mb-8">
+          <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
+            <div>
+              <h3 className="text-sm font-semibold text-neutral-950 uppercase tracking-wider">Bulk upload tests</h3>
+              <p className="text-xs text-neutral-500 mt-1 max-w-2xl">
+                Columns: <span className="font-medium">Batch · Subject (blank = Full) · Test Name · Date · Time · Duration · Type · Scope · Chapters (“;”-separated) · Room (optional) · Invigilator Email (optional)</span>.
+                Tests take priority — if a row lands on a class, the planner is shifted forward automatically. A row that clashes with <em>another test</em> can’t be imported. Rooms are auto-assigned when left blank.
+              </p>
+            </div>
+            <BtnSecondary onClick={downloadBulkTemplate}>Download template</BtnSecondary>
+          </div>
+          <label className="inline-flex items-center gap-2 px-4 py-2 bg-neutral-950 hover:bg-neutral-800 text-white text-sm font-semibold rounded-xl cursor-pointer">
+            {bulkBusy ? 'Reading…' : 'Choose CSV file'}
+            <input type="file" accept=".csv,text/csv" onChange={onBulkFile} disabled={bulkBusy} className="hidden" />
+          </label>
+          {bulkMsg && <div className="mt-3"><Alert type={bulkMsg.type === 'info' ? 'info' : bulkMsg.type}>{bulkMsg.text}</Alert></div>}
+
+          {bulkRows.length > 0 && (
+            <div className="mt-4">
+              <div className="overflow-x-auto border border-neutral-200 rounded-xl">
+                <table className="w-full text-xs">
+                  <thead className="bg-neutral-50 text-neutral-500 uppercase tracking-wider">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-semibold">#</th>
+                      <th className="text-left px-3 py-2 font-semibold">Test</th>
+                      <th className="text-left px-3 py-2 font-semibold">Batch</th>
+                      <th className="text-left px-3 py-2 font-semibold">When</th>
+                      <th className="text-left px-3 py-2 font-semibold">Scope</th>
+                      <th className="text-left px-3 py-2 font-semibold">Syllabus</th>
+                      <th className="text-left px-3 py-2 font-semibold">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-100">
+                    {bulkRows.map((r) => (
+                      <tr key={r.line} className={r.status === 'error' ? 'bg-red-50/40' : ''}>
+                        <td className="px-3 py-2 text-neutral-400">{r.line}</td>
+                        <td className="px-3 py-2 font-medium text-neutral-800">{r.name || <span className="text-neutral-400">—</span>}<span className="ml-1 text-neutral-400">{r.testType}</span></td>
+                        <td className="px-3 py-2 text-neutral-600">{r.batchLabel}</td>
+                        <td className="px-3 py-2 text-neutral-600">{r.date ? `${r.date} ${r.time}` : <span className="text-red-500">no date</span>} · {r.duration}m</td>
+                        <td className="px-3 py-2 text-neutral-600">{r.scope}{r.scope === 'Part' && r.chapterIds.length ? ` · ${r.chapterIds.length} ch` : ''}</td>
+                        <td className="px-3 py-2">
+                          {r.completion?.hasData
+                            ? <span className={`font-bold ${r.completion.warn ? 'text-red-600' : 'text-emerald-600'}`}>{r.completion.pct}%{r.completion.warn ? ' ⚠' : ''}</span>
+                            : <span className="text-neutral-300">—</span>}
+                        </td>
+                        <td className="px-3 py-2">
+                          {r.status === 'error'
+                            ? <span className="text-red-600 font-semibold">✕ {r.errors[0] ?? r.clashNote}</span>
+                            : r.status === 'shift'
+                              ? <span className="text-amber-600 font-semibold" title={r.clashNote ?? ''}>⚠ will shift planner</span>
+                              : <span className="text-emerald-600 font-semibold">✓ free</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 mt-4">
+                <BtnPrimary onClick={importBulk} disabled={bulkBusy || bulkRows.every((r) => r.status === 'error')}>
+                  {bulkBusy ? 'Importing…' : `Import ${bulkRows.filter((r) => r.status !== 'error').length} test(s)`}
+                </BtnPrimary>
+                <BtnSecondary onClick={() => { setBulkRows([]); setBulkMsg(null) }}>Clear</BtnSecondary>
+                <span className="text-xs text-neutral-400">Rows with ✕ are skipped. Tests import as Draft — use “Send to Faculty” after.</span>
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
 
       {isPrivileged && showForm && (
         <Card className="p-6 mb-8">
@@ -352,6 +727,20 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
               <BtnSecondary type="button" onClick={resetForm}>Cancel</BtnSecondary>
             </div>
             {canShift && <p className="mt-2 text-xs text-amber-700">There&rsquo;s a class at this time. This will push that class (and its subject&rsquo;s later lectures) one class-date forward and place the test here.</p>}
+            {freeWindows.length > 0 && (
+              <div className="mt-3 p-3 bg-emerald-50 border border-emerald-200 rounded-xl">
+                <p className="text-xs font-semibold text-emerald-800 mb-2">Free slots for this batch on {testDate ? new Date(testDate + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }) : 'that day'} — click to use one:</p>
+                <div className="flex flex-wrap gap-2">
+                  {freeWindows.map((w) => (
+                    <button key={w.start} type="button" onClick={() => { setStartTime(w.start); setMsg(null); setCanShift(false); setFreeWindows([]) }}
+                      className="px-3 py-1.5 bg-white border border-emerald-300 text-emerald-800 text-xs font-semibold rounded-lg hover:bg-emerald-100">
+                      {formatTime(w.start)} – {formatTime(w.end)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {canShift && freeWindows.length === 0 && <p className="mt-2 text-xs text-neutral-500">No free window long enough on this day — either shift the planner (above) or pick another date.</p>}
           </form>
         </Card>
       )}
@@ -362,10 +751,19 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         <Card className="p-10 text-center text-neutral-400">No tests scheduled yet.</Card>
       ) : (
         <div className="space-y-3">
+          {(() => {
+            const warns = visibleTests.filter((t) => completions[t.id]?.warn)
+            return warns.length > 0 ? (
+              <Alert type="error">
+                {warns.length} upcoming test{warns.length > 1 ? 's have' : ' has'} less than 60% of the syllabus taught by the test date. Edit the test (chapters/date) or push the planner so the syllabus catches up.
+              </Alert>
+            ) : null
+          })()}
           {visibleTests.map((t) => {
             const chNames = testChapterNames(t.id)
+            const comp = completions[t.id]
             return (
-              <Card key={t.id} className="p-4">
+              <Card key={t.id} className={`p-4 ${comp?.warn ? 'ring-1 ring-red-200' : ''}`}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -373,6 +771,11 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                       <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 ${stageBadgeClass(t.stage)}`}>{t.stage}</span>
                       <span className="text-[10px] font-bold uppercase tracking-wider bg-neutral-100 text-neutral-600 px-2 py-0.5 rounded-full">{t.test_type}</span>
                       <span className="text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full">{t.part_type === 'Full' ? 'Full syllabus' : 'Part'}</span>
+                      {comp?.hasData && (
+                        <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${comp.warn ? 'bg-red-100 text-red-700 ring-1 ring-red-200' : 'bg-emerald-50 text-emerald-700'}`}>
+                          {comp.warn ? `⚠ Syllabus ${comp.pct}%` : `Syllabus ${comp.pct}%`}
+                        </span>
+                      )}
                     </div>
                     <p className="text-sm text-neutral-700 mt-1">{batchName(t.batch_id)} · {new Date(t.test_date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })} · {formatTime(t.start_time)} · {t.duration_minutes}m</p>
                     <p className="text-xs text-neutral-500 mt-0.5">

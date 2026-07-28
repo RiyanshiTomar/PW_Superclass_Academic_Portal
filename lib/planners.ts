@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { addDaysToDate, daysBetween, toMinutes } from '@/lib/utils'
 import { isDateInRange } from '@/lib/validation'
 import { notifyUsers } from '@/lib/notifications'
+import { resolveTestConflicts } from '@/lib/tests'
 
 // ============================================================
 // Planner engine: create planners, assign (materialise) them onto
@@ -19,6 +20,7 @@ export type PlannerLectureInput = {
   start_time: string | null
   duration_minutes: number
   is_buffer?: boolean
+  status?: string
 }
 
 export type BatchLite = { id: string; centre_id: string; start_date: string; end_date: string }
@@ -172,6 +174,7 @@ export async function createPlanner(
     start_time: l.start_time,
     duration_minutes: l.duration_minutes,
     is_buffer: l.is_buffer ?? false,
+    status: l.status ?? 'planned',
     sequence_no: i,
   }))
 
@@ -246,8 +249,10 @@ async function materialise(
     // Faculty is OPTIONAL — a lecture can be left unassigned (TBD) and the
     // teacher filled in later. Only validate the centre when one is set.
     if (facultyId && !centreFacultyIds.has(facultyId)) { errors.push(`${label}: faculty does not teach at this batch's centre`); continue }
-    if (!isDateInRange(new Date(date + 'T12:00:00'), batch.start_date, batch.end_date)) {
-      errors.push(`${label}: outside batch date range`)
+    // Allow up to a year past the end date: an over-length planner (more classes
+    // than the schedule holds) legitimately spills past the batch end.
+    if (!isDateInRange(new Date(date + 'T12:00:00'), batch.start_date, addDaysToDate(batch.end_date, 365))) {
+      errors.push(`${label}: date is before the batch starts or far beyond its end`)
       continue
     }
 
@@ -356,6 +361,9 @@ export async function assignPlanner(
     return { ok: false, imported: 0, errors: result.errors.length ? result.errors : ['No lectures could be assigned.'] }
   }
 
+  // Guarantee no class sits on an existing test: tests take priority.
+  await resolveTestConflicts(supabase, args.batch.id)
+
   return { ok: true, linkId: link.id, imported: result.imported, errors: result.errors }
 }
 
@@ -382,6 +390,9 @@ export async function rematerialiseLink(
     { id: b.id, centre_id: b.centre_id, start_date: b.start_date, end_date: b.end_date },
     link.stage as string
   )
+  // Re-materialise rebuilds the concrete rows from scratch — re-apply test
+  // priority so nothing lands back on a test.
+  await resolveTestConflicts(supabase, b.id)
   return { ok: result.imported > 0, imported: result.imported, errors: result.errors }
 }
 

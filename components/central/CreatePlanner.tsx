@@ -5,17 +5,18 @@ import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { createPlanner, assignPlanner, type PlannerLectureInput } from '@/lib/planners'
 import { fetchMaster, type Master } from '@/lib/syllabus'
-import { parseCSVWithHeaders, DAYS } from '@/lib/utils'
+import { parseCSVWithHeaders, DAYS, toMinutes } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card } from '@/components/PortalShell'
 
 type Subject = { id: string; name: string; program_id: string | null }
 type Faculty = { id: string; full_name: string; email: string }
 type Batch = { id: string; name: string; centre_id: string; program_id: string; start_date: string; end_date: string; status: string }
 type PlannerRow = { id: string; name: string; program_id: string | null; created_at: string; planner_lectures: { count: number }[] }
-type ScheduleSlot = { subject_id: string | null; day_of_week: number; faculty_id: string | null; effective_from: string | null; effective_to: string | null }
-// One planned lecture. Subject/Date/Faculty are pre-filled from the batch's
-// weekly schedule; Central fills Chapter + Topic (faculty editable).
-type Draft = { subject_id: string; faculty_id: string; planned_date: string; day: number; chapter: string; topic_name: string }
+type ScheduleSlot = { subject_id: string | null; day_of_week: number; faculty_id: string | null; effective_from: string | null; effective_to: string | null; start_time?: string | null; end_time?: string | null }
+type Status = 'planned' | 'confirmed' | 'conducted'
+// One planned lecture. status: planned (auto/floating), confirmed (central gave a
+// future date), conducted (its date is in the past → already taught).
+type Draft = { subject_id: string; faculty_id: string; planned_date: string; day: number; chapter: string; topic_name: string; status: Status }
 
 // Match tolerantly against the concept tags (the source of truth): unify dash
 // variants (‐ ‑ – — ―), collapse whitespace, and ignore a trailing plural "s"
@@ -52,6 +53,31 @@ function datesForDay(start: string, end: string, dow: number): string[] {
   return out
 }
 
+// A subject's class-dates from its weekly slots (segment-aware), deduped &
+// sorted. If `minCount` needs more than the batch has, it extends past the end
+// on the same weekdays (so an over-length planner still gets dates).
+function subjectClassDates(subjectSlots: ScheduleSlot[], batchStart: string, batchEnd: string, minCount = 0): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const s of subjectSlots) {
+    for (const dt of datesForDay(s.effective_from || batchStart, s.effective_to || batchEnd, s.day_of_week)) {
+      if (!seen.has(dt)) { seen.add(dt); out.push(dt) }
+    }
+  }
+  out.sort()
+  if (minCount && out.length < minCount) {
+    const days = new Set(subjectSlots.map((s) => s.day_of_week))
+    const d = new Date((out[out.length - 1] || batchEnd) + 'T12:00:00')
+    d.setDate(d.getDate() + 1)
+    let guard = 0
+    while (out.length < minCount && guard++ < 4000) {
+      if (days.has(d.getDay())) out.push(d.toISOString().split('T')[0])
+      d.setDate(d.getDate() + 1)
+    }
+  }
+  return out
+}
+
 
 export default function CreatePlanner() {
   const supabase = createClient()
@@ -76,6 +102,7 @@ export default function CreatePlanner() {
 
   const [reviewing, setReviewing] = useState(false)
   const [draft, setDraft] = useState<Draft[]>([])
+  const [scheduleSlots, setScheduleSlots] = useState<ScheduleSlot[]>([])
   const [master, setMaster] = useState<Master | null>(null)
 
   const batch = useMemo(() => batches.find((b) => b.id === batchId) ?? null, [batches, batchId])
@@ -84,8 +111,13 @@ export default function CreatePlanner() {
   const programSubjects = useMemo(() => (batch ? subjects.filter((s) => s.program_id === batch.program_id) : []), [subjects, batch])
   const subjName = (id: string) => subjects.find((s) => s.id === id)?.name ?? '—'
   const facEmail = (id: string) => faculty.find((f) => f.id === id)?.email ?? ''
-  const chapterOptions = useMemo(() => (master ? Array.from(new Set(master.subjects.flatMap((s) => s.chapters.map((c) => c.name)))) : []), [master])
   const topicOptions = useMemo(() => (master ? Array.from(new Set(master.subjects.flatMap((s) => s.chapters.flatMap((c) => c.topics)))) : []), [master])
+  // Chapter suggestions PER subject (only that subject's chapters, so no cross-subject confusion).
+  const chaptersBySubject = useMemo(() => {
+    const m = new Map<string, string[]>()
+    for (const s of master?.subjects ?? []) m.set(s.id, Array.from(new Set(s.chapters.map((c) => c.name))))
+    return m
+  }, [master])
 
   // subjectId -> (chapterName -> set of its topic names), all normalised.
   const masterMap = useMemo(() => {
@@ -128,10 +160,11 @@ export default function CreatePlanner() {
     setName(`${b.name} — Planner`)
     setBusy(true)
     const [schedRes, m] = await Promise.all([
-      supabase.from('batch_schedules').select('subject_id, day_of_week, faculty_id, effective_from, effective_to').eq('batch_id', id),
+      supabase.from('batch_schedules').select('subject_id, day_of_week, faculty_id, effective_from, effective_to, start_time, end_time').eq('batch_id', id),
       fetchMaster(supabase, b.program_id),
     ])
     setMaster(m)
+    setScheduleSlots([])
     let slots = (schedRes.data ?? []) as ScheduleSlot[]
     if (schedRes.error) {
       // Most likely the effective_from/to columns don't exist yet (segments
@@ -141,6 +174,7 @@ export default function CreatePlanner() {
       if (base.error) { setBusy(false); setMessage({ type: 'error', text: `Could not load the schedule: ${base.error.message}` }); return }
       slots = (base.data ?? []).map((s) => ({ ...(s as { subject_id: string | null; day_of_week: number; faculty_id: string | null }), effective_from: null, effective_to: null }))
     }
+    setScheduleSlots(slots)
     const seen = new Set<string>()
     const rows: Draft[] = []
     for (const s of slots) {
@@ -154,7 +188,7 @@ export default function CreatePlanner() {
         const key = `${s.subject_id}|${dt}`
         if (seen.has(key)) continue // one lecture per subject per day
         seen.add(key)
-        rows.push({ subject_id: s.subject_id, faculty_id: s.faculty_id ?? '', planned_date: dt, day: s.day_of_week, chapter: '', topic_name: '' })
+        rows.push({ subject_id: s.subject_id, faculty_id: s.faculty_id ?? '', planned_date: dt, day: s.day_of_week, chapter: '', topic_name: '', status: 'planned' })
       }
     }
     // Subject-first, then date (all of Accounts, then next subject…).
@@ -189,6 +223,41 @@ export default function CreatePlanner() {
   }
   const invalidCount = useMemo(() => draft.filter((r) => rowError(r) !== '').length, [draft]) // eslint-disable-line react-hooks/exhaustive-deps
   const bufferCount = useMemo(() => draft.filter((r) => !r.chapter.trim() && !r.topic_name.trim() && r.planned_date >= todayISO).length, [draft]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Slot duration (mins) by subject:weekday, from the weekly schedule.
+  const slotMin = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const s of scheduleSlots) {
+      if (!s.subject_id || !s.start_time || !s.end_time) continue
+      const k = `${s.subject_id}:${s.day_of_week}`
+      if (!m.has(k)) m.set(k, Math.max(0, toMinutes(s.end_time.slice(0, 5)) - toMinutes(s.start_time.slice(0, 5))))
+    }
+    return m
+  }, [scheduleSlots])
+  const durOf = (subjectId: string, dateISO: string) => (dateISO ? (slotMin.get(`${subjectId}:${new Date(dateISO + 'T12:00:00').getDay()}`) ?? 60) : 60)
+  const fmtHrs = (min: number) => (min / 60).toFixed(min % 60 === 0 ? 0 : 1)
+
+  // Per-subject: planner hours vs the scheduler's capacity, + confirmed/conducted
+  // counts. `over` when the planner needs more hours than the schedule allows.
+  const subjectStats = useMemo(() => {
+    return programSubjects.map((s) => {
+      const rows = draft.filter((r) => r.subject_id === s.id && r.chapter.trim() && r.topic_name.trim())
+      const plannerMin = rows.reduce((a, r) => a + durOf(s.id, r.planned_date), 0)
+      const subjSlots = scheduleSlots.filter((x) => x.subject_id === s.id)
+      const capDates = batch ? subjectClassDates(subjSlots, batch.start_date, batch.end_date) : []
+      const scheduledMin = capDates.reduce((a, d) => a + (slotMin.get(`${s.id}:${new Date(d + 'T12:00:00').getDay()}`) ?? 60), 0)
+      return {
+        id: s.id, name: s.name,
+        lectures: rows.length,
+        plannerMin, scheduledMin,
+        confirmed: rows.filter((r) => r.status === 'confirmed').length,
+        conducted: rows.filter((r) => r.status === 'conducted').length,
+        over: plannerMin > scheduledMin && scheduledMin > 0,
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft, scheduleSlots, programSubjects, batch, slotMin])
+  const overSubjects = useMemo(() => subjectStats.filter((s) => s.over), [subjectStats])
 
   // Existing-planners search + centre filter (planner → centre via its batch links).
   const plannerCentres = useMemo(() => {
@@ -269,38 +338,63 @@ export default function CreatePlanner() {
     return { headers, rows }
   }
 
-  // Upload the filled CSV → match each row to a generated (subject + date) slot
-  // and fill its Chapter / Topic / Faculty. Dates are fixed by the schedule.
+  // Upload the planner CSV/Excel = the CONTENT (one row per lecture). Date is
+  // OPTIONAL per row: a date central puts LOCKS the class there (past → already
+  // conducted, future → confirmed); a blank date FLOATS onto the subject's next
+  // schedule class-dates in CSV order (status planned). The whole draft is rebuilt.
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
+    if (!batch) { setMessage({ type: 'error', text: 'Select a batch first.' }); return }
     setBusy(true); setMessage(null)
     try {
       const { headers, rows } = await readUpload(file)
       const col = (...keys: string[]) => headers.findIndex((h) => keys.some((k) => h.includes(k)))
-      const iSub = col('subject'), iDate = col('date'), iChap = col('chapter'), iTopic = col('topic'), iFac = col('faculty', 'email', 'teacher')
-      if (iSub < 0 || iDate < 0 || iChap < 0 || iTopic < 0) { setMessage({ type: 'error', text: 'File needs Subject, Date, Chapter, Topic columns.' }); return }
+      const iSub = col('subject'), iChap = col('chapter'), iTopic = col('topic'), iFac = col('faculty', 'email', 'teacher'), iDate = col('date')
+      if (iSub < 0 || iChap < 0 || iTopic < 0) { setMessage({ type: 'error', text: 'File needs Subject, Chapter, Topic columns (Date optional).' }); return }
       const subByName = new Map(programSubjects.map((s) => [norm(s.name), s.id]))
       const facByEmail = new Map(faculty.map((f) => [f.email.toLowerCase(), f.id]))
       const facByName = new Map(faculty.map((f) => [norm(f.full_name), f.id]))
-      const idx = new Map<string, number>()
-      draft.forEach((r, i) => idx.set(`${r.subject_id}|${r.planned_date}`, i))
-      const next = [...draft]
-      let filled = 0, unmatched = 0
+      const facBySubject = new Map<string, string>()
+      for (const s of scheduleSlots) if (s.subject_id && s.faculty_id && !facBySubject.has(s.subject_id)) facBySubject.set(s.subject_id, s.faculty_id)
+
+      type Parsed = { subject_id: string; faculty_id: string; chapter: string; topic_name: string; date: string | null }
+      const bySubject = new Map<string, Parsed[]>()
+      let unmatched = 0
       for (const row of rows) {
         const get = (i: number) => (i >= 0 ? (row[i] ?? '').trim() : '')
         const sid = subByName.get(norm(get(iSub)))
-        const date = normalizeDate(get(iDate))
-        if (!sid || !date) { unmatched++; continue }
-        const at = idx.get(`${sid}|${date}`)
-        if (at == null) { unmatched++; continue }
+        if (!sid) { if (get(iSub) || get(iChap) || get(iTopic)) unmatched++; continue }
         const facRaw = get(iFac)
-        const fid = facRaw ? (facByEmail.get(facRaw.toLowerCase()) ?? facByName.get(norm(facRaw)) ?? next[at].faculty_id) : next[at].faculty_id
-        next[at] = { ...next[at], chapter: get(iChap), topic_name: get(iTopic), faculty_id: fid }
-        filled++
+        const fid = facRaw ? (facByEmail.get(facRaw.toLowerCase()) ?? facByName.get(norm(facRaw)) ?? facBySubject.get(sid) ?? '') : (facBySubject.get(sid) ?? '')
+        const d = normalizeDate(get(iDate))
+        const date = /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null
+        if (!bySubject.has(sid)) bySubject.set(sid, [])
+        bySubject.get(sid)!.push({ subject_id: sid, faculty_id: fid, chapter: get(iChap), topic_name: get(iTopic), date })
       }
-      setDraft(next)
-      setMessage({ type: unmatched ? 'info' : 'success', text: `${filled} row(s) filled from CSV${unmatched ? ` · ${unmatched} row(s) didn’t match a scheduled class-date (ignored)` : ''}.` })
+
+      const draftRows: Draft[] = []
+      for (const [sid, items] of bySubject) {
+        const subjSlots = scheduleSlots.filter((s) => s.subject_id === sid)
+        const allDates = subjectClassDates(subjSlots, batch.start_date, batch.end_date, items.length)
+        const lockedDates = new Set(items.filter((p) => p.date).map((p) => p.date!))
+        const freeDates = allDates.filter((dt) => !lockedDates.has(dt))
+        let fi = 0
+        for (const p of items) {
+          const explicit = !!p.date
+          const date = p.date ?? (freeDates[fi++] ?? '')
+          let status: Status = 'planned'
+          if (date && date < todayISO) status = 'conducted'
+          else if (date && explicit) status = 'confirmed'
+          const day = date ? new Date(date + 'T12:00:00').getDay() : 0
+          draftRows.push({ subject_id: sid, faculty_id: p.faculty_id, planned_date: date, day, chapter: p.chapter, topic_name: p.topic_name, status })
+        }
+      }
+      draftRows.sort((a, b) => subjName(a.subject_id).localeCompare(subjName(b.subject_id)) || a.planned_date.localeCompare(b.planned_date))
+      if (draftRows.length === 0) { setMessage({ type: 'error', text: 'No valid rows found (check the Subject names match this program).' }); return }
+      setDraft(draftRows)
+      setReviewing(true)
+      setMessage({ type: unmatched ? 'info' : 'success', text: `${draftRows.length} class(es) loaded from the file${unmatched ? ` · ${unmatched} row(s) had a subject not in this program (skipped)` : ''}. Dates you left blank were placed on the schedule; check the hours summary above.` })
     } catch (err) {
       setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to parse file.' })
     } finally {
@@ -324,7 +418,9 @@ export default function CreatePlanner() {
     for (const r of draft) {
       const hasContent = !!r.chapter.trim() && !!r.topic_name.trim() // real lecture needs both
       if (hasContent) {
-        clean.push({ subject_id: r.subject_id, faculty_id: r.faculty_id, chapter: r.chapter.trim(), topic_name: r.topic_name.trim(), planned_date: r.planned_date, start_time: null, duration_minutes: 60, is_buffer: false })
+        // Safety: any real class whose date is already past is 'conducted'.
+        const status = r.planned_date && r.planned_date < todayISO ? 'conducted' : r.status
+        clean.push({ subject_id: r.subject_id, faculty_id: r.faculty_id, chapter: r.chapter.trim(), topic_name: r.topic_name.trim(), planned_date: r.planned_date, start_time: null, duration_minutes: 60, is_buffer: false, status })
       } else if (r.planned_date >= todayISO) {
         clean.push({ subject_id: r.subject_id, faculty_id: r.faculty_id, chapter: '', topic_name: '', planned_date: r.planned_date, start_time: null, duration_minutes: 60, is_buffer: true })
       } else {
@@ -364,7 +460,9 @@ export default function CreatePlanner() {
 
   return (
     <div className="space-y-6">
-      <datalist id="cp-chapters">{chapterOptions.map((c) => <option key={c} value={c} />)}</datalist>
+      {Array.from(chaptersBySubject).map(([sid, chaps]) => (
+        <datalist key={sid} id={`cp-ch-${sid}`}>{chaps.map((c) => <option key={c} value={c} />)}</datalist>
+      ))}
       <datalist id="cp-topics">{topicOptions.map((t) => <option key={t} value={t} />)}</datalist>
 
       {message && <Alert type={message.type === 'info' ? 'info' : message.type}>{message.text}</Alert>}
@@ -403,7 +501,7 @@ export default function CreatePlanner() {
           <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
             <div>
               <h3 className="font-bold text-neutral-950">Fill the planner — {batch?.name}</h3>
-              <p className="text-sm text-neutral-500">{draft.length} slots (start→end). Fill <b>Chapter &amp; Topic</b> for real classes (concept-tag checked). Leave a slot empty → <span className="text-sky-600 font-medium">future = buffer</span> ({bufferCount}), <span className="text-neutral-500 font-medium">past = didn’t happen</span>. Save when no red rows.</p>
+              <p className="text-sm text-neutral-500">{draft.length} classes. Upload your CSV (Subject · Chapter · Topic · Date optional). A <b>date you set</b> locks the class (past → <span className="text-neutral-500 font-medium">already conducted</span>, future → <span className="text-emerald-600 font-medium">confirmed</span>); a <b>blank date</b> floats onto the schedule (<span className="text-sky-600 font-medium">planned</span>). Concept-tag checked; save when no red rows.</p>
             </div>
             <div className="flex flex-wrap gap-2">
               <BtnSecondary onClick={downloadXlsx}>Download Excel</BtnSecondary>
@@ -415,8 +513,32 @@ export default function CreatePlanner() {
               {invalidCount > 0 && <BtnSecondary onClick={downloadErrorReport}>Error report ({invalidCount})</BtnSecondary>}
             </div>
           </div>
+          {overSubjects.length > 0 && (
+            <Alert type="error">
+              <b>Planner exceeds the scheduled hours</b> for: {overSubjects.map((s) => `${s.name} (${fmtHrs(s.plannerMin)}h vs ${fmtHrs(s.scheduledMin)}h scheduled)`).join(' · ')}. You can still save (extra classes will run past the batch end), or trim the planner.
+            </Alert>
+          )}
+          <div className="mb-4 border border-neutral-200 rounded-xl overflow-hidden">
+            <div className="bg-neutral-50 px-4 py-2.5">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-600">Total hours per subject <span className="normal-case font-normal text-neutral-400">· planner vs scheduled · confirmed/conducted so far</span></h4>
+            </div>
+            <div className="divide-y divide-neutral-100">
+              {subjectStats.map((s) => (
+                <div key={s.id} className="flex items-center justify-between gap-3 px-4 py-2 text-sm">
+                  <span className="text-neutral-700">{s.name}</span>
+                  <div className="flex items-center gap-3 text-xs">
+                    <span className={s.over ? 'text-red-600 font-semibold' : 'text-neutral-700'}><b>{fmtHrs(s.plannerMin)}h</b> planned <span className="text-neutral-400">/ {fmtHrs(s.scheduledMin)}h scheduled</span></span>
+                    <span className="text-neutral-400">·</span>
+                    <span className="text-emerald-700">{s.confirmed} confirmed</span>
+                    <span className="text-neutral-500">{s.conducted} conducted</span>
+                    <span className="text-neutral-400">· {s.lectures} class{s.lectures === 1 ? '' : 'es'}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
           <div className="overflow-x-auto border border-neutral-200 rounded-xl mb-4 max-h-[60vh]">
-            <table className="w-full text-sm min-w-[900px]">
+            <table className="w-full text-sm min-w-[980px]">
               <thead className="sticky top-0 z-10">
                 <tr className="bg-neutral-100 text-neutral-500 text-xs uppercase tracking-wider">
                   <th className="text-left px-3 py-2">Date</th>
@@ -425,16 +547,19 @@ export default function CreatePlanner() {
                   <th className="text-left px-3 py-2 min-w-[150px]">Faculty</th>
                   <th className="text-left px-3 py-2">Chapter *</th>
                   <th className="text-left px-3 py-2 min-w-[150px]">Topic *</th>
-                  <th className="text-left px-3 py-2 min-w-[170px]">Problem</th>
+                  <th className="text-left px-3 py-2">Status</th>
+                  <th className="text-left px-3 py-2 min-w-[150px]">Problem</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100">
                 {draft.map((r, i) => {
                   const err = rowError(r)
+                  const eff: Status = r.planned_date && r.planned_date < todayISO ? 'conducted' : r.status
+                  const stCls = eff === 'conducted' ? 'bg-neutral-200 text-neutral-700' : eff === 'confirmed' ? 'bg-emerald-100 text-emerald-800' : 'bg-sky-100 text-sky-800'
                   return (
                     <tr key={i} className={err ? 'bg-rose-50/50' : ''}>
-                      <td className="px-3 py-2 whitespace-nowrap text-neutral-700">{new Date(r.planned_date + 'T12:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</td>
-                      <td className="px-3 py-2 text-neutral-500">{DAYS[r.day]}</td>
+                      <td className="px-3 py-2 whitespace-nowrap text-neutral-700">{r.planned_date ? new Date(r.planned_date + 'T12:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : <span className="text-rose-500">no date</span>}</td>
+                      <td className="px-3 py-2 text-neutral-500">{r.planned_date ? DAYS[r.day] : '—'}</td>
                       <td className="px-3 py-2 text-neutral-700">{subjName(r.subject_id)}</td>
                       <td className="px-3 py-2">
                         <select value={r.faculty_id} onChange={(e) => updateDraft(i, { faculty_id: e.target.value })} className={cell}>
@@ -442,8 +567,9 @@ export default function CreatePlanner() {
                           {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                         </select>
                       </td>
-                      <td className="px-3 py-2"><input list="cp-chapters" value={r.chapter} onChange={(e) => updateDraft(i, { chapter: e.target.value })} className={cell} placeholder="Chapter" /></td>
+                      <td className="px-3 py-2"><input list={`cp-ch-${r.subject_id}`} value={r.chapter} onChange={(e) => updateDraft(i, { chapter: e.target.value })} className={cell} placeholder="Chapter" /></td>
                       <td className="px-3 py-2"><input list="cp-topics" value={r.topic_name} onChange={(e) => updateDraft(i, { topic_name: e.target.value })} className={cell} placeholder="Topic" /></td>
+                      <td className="px-3 py-2"><span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ${stCls}`}>{eff}</span></td>
                       <td className="px-3 py-2 text-xs">{err ? <span className="text-rose-600">{err}</span> : <span className={rowNote(r).startsWith('Buffer') ? 'text-sky-600' : 'text-neutral-400'}>{rowNote(r)}</span>}</td>
                     </tr>
                   )

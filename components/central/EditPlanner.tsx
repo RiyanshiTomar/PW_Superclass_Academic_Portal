@@ -4,12 +4,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { rematerialiseLink } from '@/lib/planners'
 import { fetchMaster, type Master } from '@/lib/syllabus'
+import { toMinutes } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card } from '@/components/PortalShell'
 
 type Planner = { id: string; name: string; program_id: string | null }
 type Subject = { id: string; name: string; program_id: string | null }
 type Faculty = { id: string; full_name: string; email: string }
-type LinkLite = { id: string; stage: string; batches: { name: string } | { name: string }[] | null }
+type LinkLite = { id: string; stage: string; batch_id?: string; batches: { name: string } | { name: string }[] | null }
 type Status = 'planned' | 'confirmed' | 'conducted'
 type EditRow = {
   key: string
@@ -20,6 +21,8 @@ type EditRow = {
   planned_date: string
   duration_minutes: number
   status: Status
+  db_id?: string        // batch_planners row id — set only in LIVE (batch) mode
+  stage?: string        // batch_planners.stage — shown read-only in LIVE mode
 }
 // Buffer / empty template rows are preserved untouched (not shown in this board).
 type Keep = { subject_id: string | null; faculty_id: string | null; chapter: string; topic_name: string; planned_date: string; start_time: string | null; duration_minutes: number; is_buffer: boolean; status: string }
@@ -54,6 +57,22 @@ export default function EditPlanner() {
   const [saving, setSaving] = useState(false)
   const [master, setMaster] = useState<Master | null>(null)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
+
+  // LIVE (per-batch) mode: when a batch is picked, we edit that batch's
+  // materialised planner (batch_planners) — which reflects faculty-approved
+  // reschedules / prepones / cancellations — instead of the shared template.
+  const [liveLinkId, setLiveLinkId] = useState('')
+  const [liveStage, setLiveStage] = useState('')
+  const [liveBatchLabel, setLiveBatchLabel] = useState('')
+  const [liveHasStatus, setLiveHasStatus] = useState(false)
+  const liveOrigIdsRef = useRef<Set<string>>(new Set())
+  const liveSlotByDateRef = useRef<Map<string, { start_time: string | null; classroom_id: string | null; duration: number }>>(new Map())
+  // For safe "+ add row" in live mode: the batch's weekly slots per subject,
+  // its date bounds, and the dates/times tests occupy — so a new row lands on a
+  // genuinely free class-date (no lecture, no test) and never overlaps.
+  const liveSchedRef = useRef<Map<string, Map<number, { start: string; duration: number; classroom: string | null }>>>(new Map())
+  const liveTestsRef = useRef<Map<string, [number, number][]>>(new Map())
+  const liveBoundsRef = useRef<{ start: string; end: string }>({ start: '', end: '' })
 
   const [activeSubject, setActiveSubject] = useState('')
   const [search, setSearch] = useState('')
@@ -120,20 +139,49 @@ export default function EditPlanner() {
 
   const selectPlanner = async (id: string) => {
     setSelectedId(id); setMessage(null); setSearch('')
-    if (!id) { setRows([]); setKeptBuffers([]); setLinks([]); setMaster(null); setActiveSubject(''); return }
+    if (!id) { setRows([]); setKeptBuffers([]); setLinks([]); setMaster(null); setActiveSubject(''); setLiveLinkId(''); setLiveStage(''); setLiveBatchLabel(''); return }
     const prog = planners.find((p) => p.id === id)?.program_id ?? null
     fetchMaster(supabase, prog ?? '').then(setMaster)
-    let [lecRes, linkRes] = await Promise.all([
-      supabase.from('planner_lectures').select('subject_id, faculty_id, chapter, topic_name, planned_date, duration_minutes, is_buffer, status').eq('planner_id', id).order('planned_date', { ascending: true }),
-      supabase.from('batch_planner_links').select('id, stage, batches(name)').eq('planner_id', id),
-    ])
-    // If the status column isn't there yet (migration not run), read without it.
-    if (lecRes.error) {
-      lecRes = (await supabase.from('planner_lectures').select('subject_id, faculty_id, chapter, topic_name, planned_date, duration_minutes, is_buffer').eq('planner_id', id).order('planned_date', { ascending: true })) as typeof lecRes
+    const linkRes = await supabase.from('batch_planner_links').select('id, stage, batch_id, batches(name)').eq('planner_id', id)
+    const linksData = (linkRes.data ?? []) as unknown as LinkLite[]
+    setLinks(linksData)
+
+    // If a specific batch is chosen and this planner is linked to it → LIVE mode.
+    const liveLink = filterBatch ? linksData.find((l) => l.batch_id === filterBatch) : undefined
+    if (liveLink) {
+      setLiveLinkId(liveLink.id); setLiveStage(liveLink.stage); setLiveBatchLabel(batchName(liveLink.batches))
+      await loadLiveRows(liveLink.id)
+    } else {
+      setLiveLinkId(''); setLiveStage(''); setLiveBatchLabel('')
+      await loadTemplateRows(id)
     }
+  }
+
+  // Paginate a select, falling back to a column set without `status` if absent.
+  type PgRes = { data: unknown[] | null; error: { message: string } | null }
+  const paginate = async (table: string, cols: string, colsNoStatus: string, plannerCol: string, plannerVal: string): Promise<{ rows: Record<string, unknown>[]; hasStatus: boolean; error?: string }> => {
+    let useCols = cols
+    let hasStatus = true
+    const out: Record<string, unknown>[] = []
+    const fetchPage = (c: string, from: number) => supabase.from(table).select(c).eq(plannerCol, plannerVal).order('planned_date', { ascending: true }).range(from, from + 999) as unknown as Promise<PgRes>
+    for (let from = 0; from < 20000; from += 1000) {
+      let res = await fetchPage(useCols, from)
+      if (res.error && useCols === cols) { useCols = colsNoStatus; hasStatus = false; res = await fetchPage(colsNoStatus, from) }
+      if (res.error) { if (from === 0) return { rows: [], hasStatus: false, error: res.error.message }; break }
+      const chunk = (res.data ?? []) as Record<string, unknown>[]
+      out.push(...chunk)
+      if (chunk.length < 1000) break
+    }
+    return { rows: out, hasStatus }
+  }
+
+  // TEMPLATE mode — the shared blueprint (planner_lectures).
+  const loadTemplateRows = async (id: string) => {
+    const { rows: lecData, error } = await paginate('planner_lectures', 'subject_id, faculty_id, chapter, topic_name, planned_date, duration_minutes, is_buffer, status', 'subject_id, faculty_id, chapter, topic_name, planned_date, duration_minutes, is_buffer', 'planner_id', id)
+    if (error) { setMessage({ type: 'error', text: `Could not load the planner: ${error}` }); return }
     const real: EditRow[] = []
     const buffers: Keep[] = []
-    for (const l of (lecRes.data ?? []) as Record<string, unknown>[]) {
+    for (const l of lecData) {
       const chapter = (l.chapter as string) ?? ''
       const topic = (l.topic_name as string) ?? ''
       if (chapter.trim() && topic.trim()) {
@@ -147,17 +195,75 @@ export default function EditPlanner() {
           status: (['planned', 'confirmed', 'conducted'].includes(l.status as string) ? l.status : 'planned') as Status,
         })
       } else {
-        // preserve buffer / empty rows exactly as they are
         buffers.push({ subject_id: (l.subject_id as string) ?? null, faculty_id: (l.faculty_id as string) ?? null, chapter, topic_name: topic, planned_date: (l.planned_date as string) ?? '', start_time: null, duration_minutes: (l.duration_minutes as number) ?? 60, is_buffer: (l.is_buffer as boolean) ?? true, status: (l.status as string) ?? 'planned' })
       }
     }
-    // Show the COMPLETE planner with its real dates (past + future). Central
-    // marks each class Confirmed or Already-conducted (with its final date).
-    setRows(real)
-    setKeptBuffers(buffers)
-    setLinks((linkRes.data ?? []) as unknown as LinkLite[])
-    const firstSubj = real[0]?.subject_id ?? ''
-    setActiveSubject(firstSubj)
+    liveOrigIdsRef.current = new Set(); liveSlotByDateRef.current = new Map()
+    setRows(real); setKeptBuffers(buffers)
+    setActiveSubject(real[0]?.subject_id ?? '')
+  }
+
+  // LIVE mode — this batch's materialised planner (batch_planners), which
+  // already reflects faculty-approved reschedules / prepones / cancellations.
+  const loadLiveRows = async (linkId: string) => {
+    const { rows: lecData, hasStatus, error } = await paginate('batch_planners', 'id, subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes, is_buffer, classroom_id, stage, status', 'id, subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes, is_buffer, classroom_id, stage', 'link_id', linkId)
+    if (error) { setMessage({ type: 'error', text: `Could not load the batch schedule: ${error}` }); return }
+    setLiveHasStatus(hasStatus)
+    const real: EditRow[] = []
+    const origIds = new Set<string>()
+    const slotByDate = new Map<string, { start_time: string | null; classroom_id: string | null; duration: number }>()
+    for (const l of lecData) {
+      const date = (l.planned_date as string) ?? ''
+      // Every dated slot carries its inherited time/room — key by date so a
+      // reorder (which only permutes existing dates) keeps the right slot.
+      if (date && !slotByDate.has(date)) slotByDate.set(date, { start_time: (l.start_time as string) ?? null, classroom_id: (l.classroom_id as string) ?? null, duration: (l.duration_minutes as number) ?? 60 })
+      const chapter = (l.chapter as string) ?? ''
+      const topic = (l.topic_name as string) ?? ''
+      const isBuffer = (l.is_buffer as boolean) ?? false
+      // Buffers stay untouched in the DB (we never load them for edit, so a
+      // per-row save can't disturb them).
+      if (isBuffer || !chapter.trim()) continue
+      const id = l.id as string
+      origIds.add(id)
+      real.push({
+        key: nextKey(), db_id: id,
+        subject_id: (l.subject_id as string) ?? '',
+        faculty_id: (l.faculty_id as string) ?? '',
+        chapter, topic_name: topic,
+        planned_date: date,
+        duration_minutes: (l.duration_minutes as number) ?? 60,
+        status: (hasStatus && ['planned', 'confirmed', 'conducted'].includes(l.status as string) ? l.status : 'planned') as Status,
+        stage: (l.stage as string) ?? '',
+      })
+    }
+    liveOrigIdsRef.current = origIds
+    liveSlotByDateRef.current = slotByDate
+
+    // Extra context for safe "+ add row": weekly slots per subject, test-busy
+    // dates, and the batch's date bounds.
+    const [schedRes, testRes, batchRes] = await Promise.all([
+      supabase.from('batch_schedules').select('subject_id, day_of_week, start_time, end_time, classroom_id').eq('batch_id', filterBatch),
+      supabase.from('test_schedules').select('test_date, start_time, duration_minutes').eq('batch_id', filterBatch),
+      supabase.from('batches').select('start_date, end_date').eq('id', filterBatch).single<{ start_date: string; end_date: string }>(),
+    ])
+    const sched = new Map<string, Map<number, { start: string; duration: number; classroom: string | null }>>()
+    for (const s of (schedRes.data ?? []) as { subject_id: string | null; day_of_week: number; start_time: string; end_time: string; classroom_id: string | null }[]) {
+      if (!s.subject_id) continue
+      if (!sched.has(s.subject_id)) sched.set(s.subject_id, new Map())
+      const m = sched.get(s.subject_id)!
+      if (!m.has(s.day_of_week)) m.set(s.day_of_week, { start: s.start_time.slice(0, 5), duration: toMinutes(s.end_time.slice(0, 5)) - toMinutes(s.start_time.slice(0, 5)), classroom: s.classroom_id ?? null })
+    }
+    const testsByDate = new Map<string, [number, number][]>()
+    for (const t of (testRes.data ?? []) as { test_date: string; start_time: string; duration_minutes: number }[]) {
+      const ts = toMinutes(t.start_time.slice(0, 5)); const arr = testsByDate.get(t.test_date) ?? []
+      arr.push([ts, ts + t.duration_minutes]); testsByDate.set(t.test_date, arr)
+    }
+    liveSchedRef.current = sched
+    liveTestsRef.current = testsByDate
+    liveBoundsRef.current = { start: batchRes.data?.start_date ?? todayISO, end: batchRes.data?.end_date ?? todayISO }
+
+    setRows(real); setKeptBuffers([])
+    setActiveSubject(real[0]?.subject_id ?? '')
   }
 
   // Subjects present in the planner (tabs).
@@ -228,6 +334,40 @@ export default function EditPlanner() {
       next.splice(idx + 1, 0, newRow)
       return next
     })
+  }
+
+  // LIVE mode add: land the new class on the subject's NEXT free class-date —
+  // one with no existing lecture and no test — so it can never overlap.
+  const liveAddRow = (subjectId: string, chapter: string) => {
+    const sched = liveSchedRef.current.get(subjectId)
+    const used = new Set(rows.filter((r) => r.subject_id === subjectId).map((r) => r.planned_date))
+    let newDate = ''
+    let slotInfo = { start_time: null as string | null, classroom_id: null as string | null, duration: 60 }
+    if (sched && sched.size) {
+      const testFree = (date: string, slot: { start: string; duration: number }) => {
+        const s = toMinutes(slot.start), e = s + slot.duration
+        return !(liveTestsRef.current.get(date) ?? []).some(([ts, te]) => s < te && e > ts)
+      }
+      const from = liveBoundsRef.current.start > todayISO ? liveBoundsRef.current.start : todayISO
+      const d = new Date(from + 'T12:00:00')
+      const end = new Date(liveBoundsRef.current.end + 'T12:00:00'); end.setDate(end.getDate() + 180)
+      while (d <= end) {
+        const dateStr = d.toISOString().split('T')[0]
+        const slot = sched.get(d.getDay())
+        if (slot && !used.has(dateStr) && testFree(dateStr, slot)) { newDate = dateStr; slotInfo = { start_time: slot.start, classroom_id: slot.classroom, duration: slot.duration }; break }
+        d.setDate(d.getDate() + 1)
+      }
+    }
+    if (!newDate) { setMessage({ type: 'info', text: 'No free class-date to add this class without an overlap. Reschedule an existing lecture instead, or add the subject’s weekly slot first.' }); return }
+    liveSlotByDateRef.current.set(newDate, slotInfo)
+    setRows((prev) => {
+      const sample = prev.find((r) => r.subject_id === subjectId && r.chapter === chapter)
+      const newRow: EditRow = { key: nextKey(), subject_id: subjectId, faculty_id: sample?.faculty_id ?? '', chapter, topic_name: '', planned_date: newDate, duration_minutes: slotInfo.duration, status: 'planned' }
+      let idx = -1
+      prev.forEach((r, i) => { if (r.subject_id === subjectId && r.chapter === chapter) idx = i })
+      const next = [...prev]; next.splice(idx + 1, 0, newRow); return next
+    })
+    setMessage({ type: 'success', text: `Added a class on ${fmtDate(newDate)} — the next free slot for ${subjName(subjectId)} (no overlap).` })
   }
 
   const removeRow = (key: string) => setRows((prev) => prev.filter((r) => r.key !== key))
@@ -305,6 +445,47 @@ export default function EditPlanner() {
         if (topics && topics.size > 0 && !topics.has(norm(r.topic_name))) return setMessage({ type: 'error', text: `${where}: topic "${r.topic_name}" isn't under this chapter in the concept tags.` })
       }
     }
+    // ---- LIVE (per-batch) save — write straight to batch_planners, per row.
+    // No delete-all + rebuild: we UPDATE each row by id, INSERT added rows, and
+    // DELETE removed ones. This preserves faculty-approved reschedules and can
+    // never scramble the plan the way a full rebuild could.
+    if (liveLinkId) {
+      setSaving(true)
+      const slotByDate = liveSlotByDateRef.current
+      const batchId = filterBatch // live mode is only entered when this === link.batch_id
+      const keptIds = new Set<string>()
+      let updated = 0, inserted = 0
+      for (const r of rows) {
+        const slot = slotByDate.get(r.planned_date)
+        const patch: Record<string, unknown> = {
+          subject_id: r.subject_id || null, faculty_id: r.faculty_id, chapter: r.chapter.trim(), topic_name: r.topic_name.trim(),
+          planned_date: r.planned_date, duration_minutes: slot?.duration ?? r.duration_minutes ?? 60,
+          start_time: slot?.start_time ?? null, classroom_id: slot?.classroom_id ?? null,
+        }
+        if (liveHasStatus) patch.status = r.status
+        if (r.db_id) {
+          keptIds.add(r.db_id)
+          const { error } = await supabase.from('batch_planners').update(patch).eq('id', r.db_id)
+          if (error) { setSaving(false); setMessage({ type: 'error', text: `Save failed: ${error.message}` }); return }
+          updated++
+        } else {
+          const { error } = await supabase.from('batch_planners').insert({ ...patch, batch_id: batchId, link_id: liveLinkId, is_buffer: false, stage: liveStage || 'Draft' })
+          if (error) { setSaving(false); setMessage({ type: 'error', text: `Add failed: ${error.message}` }); return }
+          inserted++
+        }
+      }
+      // Rows the user removed → delete only those (buffers were never loaded).
+      const toDelete = [...liveOrigIdsRef.current].filter((id) => !keptIds.has(id))
+      let deleted = 0
+      if (toDelete.length) { const { error } = await supabase.from('batch_planners').delete().in('id', toDelete); if (!error) deleted = toDelete.length }
+      setSaving(false)
+      setMessage({ type: 'success', text: `Batch schedule saved — ${updated} updated${inserted ? `, ${inserted} added` : ''}${deleted ? `, ${deleted} removed` : ''}. This is the live plan for ${liveBatchLabel}.` })
+      await loadLiveRows(liveLinkId)
+      return
+    }
+
+    // ---- TEMPLATE save — the shared blueprint (planner_lectures) + rebuild
+    // of Draft/Rework links.
     if (rows.length === 0 && keptBuffers.length === 0) return setMessage({ type: 'error', text: 'A planner needs at least one lecture.' })
 
     // Order everything by date, then persist with fresh sequence numbers.
@@ -368,8 +549,14 @@ export default function EditPlanner() {
             </select>
           </div>
         </div>
-        <p className="text-xs text-neutral-400 mt-3">Filter by centre &amp; batch to find that batch&rsquo;s planner. Chapters are locked (concept tags); edit the <b>topic</b>, mark each class <b>Confirmed</b> or <b>Already conducted</b> (with its final date), and drag to reorder. Dates always stay in order. Editing re-builds only Draft/Rework links — sent/confirmed classes change via a reschedule request.</p>
+        <p className="text-xs text-neutral-400 mt-3">Filter by centre &amp; batch to find that batch&rsquo;s planner. Chapters are locked (concept tags); edit the <b>topic</b>{!liveLinkId && <>, mark each class <b>Confirmed</b> or <b>Already conducted</b> (with its final date)</>}, and drag to reorder. Dates always stay in order. {liveLinkId ? 'You are editing this batch’s LIVE schedule.' : 'Pick a Batch too to edit that batch’s live schedule; without a batch you edit the shared template (re-builds Draft/Rework links).'}</p>
       </Card>
+
+      {selected && liveLinkId && (
+        <Alert type="info">
+          <b>Live batch schedule — {liveBatchLabel}.</b> This is the actual materialised plan for this batch and <b>includes every faculty-approved reschedule, prepone and cancellation</b>. Edits (topic, faculty, order) save straight to this batch only — the shared template and other batches are untouched.
+        </Alert>
+      )}
 
       {selected && subjectTabs.length > 0 && (
         <>
@@ -443,11 +630,15 @@ export default function EditPlanner() {
                         <option value="">Faculty…</option>
                         {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                       </select>
-                      <select value={r.status} onChange={(e) => setStatus(r.key, e.target.value as Status)} className={`w-[150px] shrink-0 h-9 px-2 rounded-lg text-xs font-semibold border ${statusPill(r.status)}`}>
-                        <option value="planned">Planned</option>
-                        <option value="confirmed">Confirmed ✓</option>
-                        <option value="conducted">Already conducted</option>
-                      </select>
+                      {(!liveLinkId || liveHasStatus) ? (
+                        <select value={r.status} onChange={(e) => setStatus(r.key, e.target.value as Status)} className={`w-[150px] shrink-0 h-9 px-2 rounded-lg text-xs font-semibold border ${statusPill(r.status)}`}>
+                          <option value="planned">Planned</option>
+                          <option value="confirmed">Confirmed ✓</option>
+                          <option value="conducted">Already conducted</option>
+                        </select>
+                      ) : (
+                        <span className="w-[150px] shrink-0 text-[11px] font-medium text-neutral-500 truncate" title="Faculty confirmation stage (live)">{r.stage || 'Draft'}</span>
+                      )}
                       <button onClick={() => removeRow(r.key)} title="Remove" className="shrink-0 text-neutral-300 hover:text-red-600 text-lg leading-none">×</button>
                     </div>
                   ))}
@@ -456,7 +647,7 @@ export default function EditPlanner() {
             ))}
           </div>
 
-          <BtnPrimary onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save Planner'}</BtnPrimary>
+          <BtnPrimary onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : liveLinkId ? `Save live schedule (${liveBatchLabel})` : 'Save Planner (template)'}</BtnPrimary>
         </>
       )}
 

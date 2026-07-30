@@ -104,7 +104,7 @@ export default function RescheduleRequestsPage() {
     // A test reschedule re-validates the new slot (room/faculty/batch) then moves it.
     if (isTest(req) && req.test_id) {
       const newTime = (req.requested_start_time ?? req.original_start_time ?? '').slice(0, 5)
-      const result = await rescheduleTest(supabase, req.test_id, req.requested_date!, newTime)
+      let result = await rescheduleTest(supabase, req.test_id, req.requested_date!, newTime)
       // A reschedule retains the safe date-shift behaviour above, then applies
       // the selected GTT chapter/topic only to the requested lecture.
       if (result.ok && !isExtra(req) && !isPrepone(req) && !isCancellation(req) && !isTest(req) && req.extra_chapter && req.extra_topic) {

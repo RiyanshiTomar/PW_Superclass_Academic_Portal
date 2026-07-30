@@ -29,6 +29,7 @@ export type ChapterPace = {
   name: string
   totalLectures: number
   doneLectures: number
+  seq: number
 }
 
 export type BatchPacing = {
@@ -50,10 +51,20 @@ export async function computeBatchPacing(
   const endDate = b.end_date
 
   const { data: lecs } = await supabase
-    .from('batch_planners')
-    .select('subject_id, chapter, planned_date, duration_minutes, subjects(name)')
-    .eq('batch_id', batchId)
-    .eq('is_buffer', false)
+  .from('batch_planners')
+  .select('subject_id, chapter, planned_date, duration_minutes, subjects(name)')
+  .eq('batch_id', batchId)
+  .eq('is_buffer', false)
+
+// NEW — fetch each chapter's syllabus order from Concept Tags
+const subjectIds = [...new Set((lecs ?? []).map((r) => r.subject_id).filter((id): id is string => !!id))]
+const { data: chapterDefs } = subjectIds.length
+  ? await supabase.from('chapters').select('subject_id, name, sequence_no').in('subject_id', subjectIds)
+  : { data: [] as { subject_id: string; name: string; sequence_no: number | null }[] }
+const seqMap = new Map<string, number>()
+for (const c of chapterDefs ?? []) {
+  seqMap.set(`${c.subject_id}::${(c.name ?? '').trim().toLowerCase()}`, c.sequence_no ?? 999)
+}
 
   type Row = { subject_id: string | null; chapter: string | null; planned_date: string; duration_minutes: number; subjects: { name: string } | { name: string }[] | null }
   const bySubject = new Map<string, { name: string; rows: Row[] }>()
@@ -72,19 +83,24 @@ export async function computeBatchPacing(
     const doneLectures = done.length
     const totalHours = Math.round((rows.reduce((s, r) => s + (r.duration_minutes || 0), 0) / 60) * 10) / 10
     const doneHours = Math.round((done.reduce((s, r) => s + (r.duration_minutes || 0), 0) / 60) * 10) / 10
-    const byChapter = new Map<string, Row[]>()
-    for (const row of rows) {
-      const chapter = row.chapter?.trim() || 'Untitled chapter'
-      if (!byChapter.has(chapter)) byChapter.set(chapter, [])
-      byChapter.get(chapter)!.push(row)
-    }
-    const chapters = [...byChapter.entries()]
-      .map(([name, chapterRows]) => ({
-        name,
-        totalLectures: chapterRows.length,
-        doneLectures: chapterRows.filter((row) => row.planned_date < todayISO).length,
-      }))
-      .sort((a, b2) => a.name.localeCompare(b2.name))
+    
+    const byChapter = new Map<string, { display: string; rows: Row[] }>()
+for (const row of rows) {
+  const raw = row.chapter?.trim() || 'Untitled chapter'
+  const key = raw.toLowerCase()
+  if (!byChapter.has(key)) byChapter.set(key, { display: raw, rows: [] })
+  byChapter.get(key)!.rows.push(row)
+}
+const chapters = [...byChapter.entries()]
+  .map(([key, { display, rows: chapterRows }]) => ({
+    name: display,
+    totalLectures: chapterRows.length,
+    doneLectures: chapterRows.filter((row) => row.planned_date < todayISO).length,
+    seq: seqMap.get(`${subjectId}::${key}`) ?? 999,
+  }))
+  .sort((a, b2) => a.seq - b2.seq || a.name.localeCompare(b2.name))
+
+
     const finishDate = rows.length ? rows.reduce((mx, r) => (r.planned_date > mx ? r.planned_date : mx), rows[0].planned_date) : null
     const marginDays = finishDate ? daysBetween(finishDate, endDate) : null
     let status: SubjectPace['status']

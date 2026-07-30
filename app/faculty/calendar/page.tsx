@@ -196,7 +196,7 @@ export default function FacultyCalendarPage() {
       <div>
         <label className="block text-xs font-medium text-neutral-500 mb-1">Chapter</label>
         <select value={extraChapter} onChange={(e) => { setExtraChapter(e.target.value); setExtraTopic('') }} className={inputClass} disabled={tagsLoading || conceptChapters.length === 0}>
-          <option value="">{tagsLoading ? 'Loading chaptersâ€¦' : conceptChapters.length ? 'Select chapter' : 'No Concept Tags available'}</option>
+          <option value="">{tagsLoading ? 'Loading chapters...' : conceptChapters.length ? 'Select chapter' : 'No Concept Tags available'}</option>
           {conceptChapters.map((chapter) => <option key={chapter.id} value={chapter.name}>{chapter.name}</option>)}
         </select>
       </div>
@@ -358,34 +358,40 @@ export default function FacultyCalendarPage() {
             )}
 
             {mode === 'prepone' && (
-              <div className="mb-3 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm">
-                <label className="block text-xs font-medium text-neutral-600 mb-1">Chapter from Concept Tags</label>
-                <select value={extraChapter} onChange={(e) => { setExtraChapter(e.target.value); setExtraTopic('') }} className={inputClass} disabled={tagsLoading || conceptChapters.length === 0}>
-                  <option value="">{tagsLoading ? 'Loading chaptersâ€¦' : conceptChapters.length ? 'Select chapter' : 'No Concept Tags available'}</option>
-                  {conceptChapters.map((chapter) => <option key={chapter.id} value={chapter.name}>{chapter.name}</option>)}
-                </select>
-                <p className="text-neutral-700">Prepone the <b>whole chapter</b> <span className="font-semibold text-sky-700">“{selected.chapter}”</span> ({one(selected.subjects)?.name}).</p>
-                <p className="text-xs text-neutral-500 mt-1">Individual topics can&apos;t be preponed — the entire chapter&apos;s remaining classes move up to the next available dates, and the other upcoming chapters slide after it.</p>
-              </div>
-            )}
+  <div className="mb-3 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm">
+    <label className="block text-xs font-medium text-neutral-600 mb-1">Chapter from Concept Tags</label>
+    <select value={extraChapter} onChange={(e) => { setExtraChapter(e.target.value); setExtraTopic('') }} className={inputClass} disabled={tagsLoading || conceptChapters.length === 0}>
+      <option value="">{tagsLoading ? 'Loading chapters...' : conceptChapters.length ? 'Select chapter' : 'No Concept Tags available'}</option>
+      {conceptChapters.map((chapter) => <option key={chapter.id} value={chapter.name}>{chapter.name}</option>)}
+    </select>
+    <p className="text-neutral-700 mt-2">
+      Prepone the <b>whole chapter</b>{' '}
+      {extraChapter ? <span className="font-semibold text-sky-700">"{extraChapter}"</span> : <span className="text-neutral-400">(select a chapter above)</span>}
+      {' '}({one(selected.subjects)?.name}).
+    </p>
+    <p className="text-xs text-neutral-500 mt-1">Individual topics can&apos;t be preponed — the entire chapter&apos;s remaining classes move up to the next available dates, and the other upcoming chapters slide after it.</p>
+  </div>
+)}
 
             {mode === 'extra' && (
-              <div className="grid grid-cols-3 gap-3 mb-3">
-                <div>
-                  <label className="block text-xs font-medium text-neutral-500 mb-1">Date</label>
-                  <input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} className={inputClass} />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-neutral-500 mb-1">Time</label>
-                  <input type="time" value={newTime} onChange={(e) => setNewTime(e.target.value)} className={inputClass} />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-neutral-500 mb-1">Mins</label>
-                  <input type="number" min={15} max={480} value={newDuration} onChange={(e) => setNewDuration(e.target.value)} className={inputClass} />
-                </div>
-              </div>
-              <TeachingTags />
-            )}
+  <>
+  <div className="grid grid-cols-3 gap-3 mb-3">
+    <div>
+      <label className="block text-xs font-medium text-neutral-500 mb-1">Date</label>
+      <input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} className={inputClass} />
+    </div>
+    <div>
+      <label className="block text-xs font-medium text-neutral-500 mb-1">Time</label>
+      <input type="time" value={newTime} onChange={(e) => setNewTime(e.target.value)} className={inputClass} />
+    </div>
+    <div>
+      <label className="block text-xs font-medium text-neutral-500 mb-1">Mins</label>
+      <input type="number" min={15} max={480} value={newDuration} onChange={(e) => setNewDuration(e.target.value)} className={inputClass} />
+    </div>
+  </div>
+  <TeachingTags />
+  </>
+)}
 
             <div className="mb-4">
               <label className="block text-xs font-medium text-neutral-500 mb-1">Reason</label>

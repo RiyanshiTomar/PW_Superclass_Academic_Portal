@@ -1,0 +1,1 @@
+Run `schema.sql` first in the Supabase SQL Editor, then set `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `.env` and execute `npm run import-data`. The CSV inputs must be placed at the repository root with the exact names referenced in `CSV_FILES`.

@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: shared_lib
+title: Shared Domain Utilities & Supabase Client Wrappers
+scope:
+    - lib/
+source_files: []
+depends_on: []
+related_to: []

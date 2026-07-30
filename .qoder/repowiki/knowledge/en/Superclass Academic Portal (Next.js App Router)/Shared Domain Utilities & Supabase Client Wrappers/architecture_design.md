@@ -1,0 +1,7 @@
+Flat module layout under `lib/` where each file owns one concern:
+- `supabase/client.ts` and `supabase/server.ts` are dual entry points that both export a `createClient()` function — the former uses `@supabase/ssr`'s `createBrowserClient`, the latter wraps `createServerClient` with a cookie-store adapter so Server Components can read/write session cookies. Both pull credentials from `NEXT_PUBLIC_SUPABASE_*` env vars.
+- `auth.ts` defines the `AppUser` / `UserCentre` domain types and provides `getAppUser` (lookup by auth id then email fallback, auto-linking), `getUserCentreIds`, and `hasRole` — pure functions that take a `SupabaseClient` instance rather than creating one themselves.
+- `scheduling.ts` builds on `utils.timesOverlap` and `validation.minutesToTimeString` to query `batch_schedules` and `batch_planners` for faculty conflict detection; `checkFacultyAssignmentOverlap` composes the weekly and planner checks.
+- `utils.ts` holds shared constants (`DAYS`, `PLANNER_STAGES`) plus pure helpers (`toMinutes`, `timesOverlap`, `formatTime`, `shortId`, `parseCSV`, `stageBadgeClass`).
+- `validation.ts` contains input validators returning either `null` or an error string, plus `minutesToTimeString` used by scheduling.
+Dependency direction is strictly inward: `scheduling.ts` → `utils.ts` + `validation.ts`; `auth.ts` depends only on `@supabase/supabase-js`. No file imports another sibling except through these two channels, keeping concerns decoupled.

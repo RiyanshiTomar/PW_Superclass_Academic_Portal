@@ -1,0 +1,1 @@
+`npm run dev` starts the Next dev server; `npm run import-data` seeds the database from CSVs via `scripts/import-portal-data.js`; `npm run import-faculty <csv>` imports a single faculty CSV.

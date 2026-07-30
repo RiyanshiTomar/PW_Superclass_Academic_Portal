@@ -1,0 +1,1 @@
+Node.js seed scripts and SQL schema that create the Superclass Academic Portal database, import CSV master data into Supabase, and provide ad-hoc inspection helpers.

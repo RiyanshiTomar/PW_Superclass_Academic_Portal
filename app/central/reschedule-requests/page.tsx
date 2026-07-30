@@ -105,6 +105,15 @@ export default function RescheduleRequestsPage() {
     if (isTest(req) && req.test_id) {
       const newTime = (req.requested_start_time ?? req.original_start_time ?? '').slice(0, 5)
       const result = await rescheduleTest(supabase, req.test_id, req.requested_date!, newTime)
+      // A reschedule retains the safe date-shift behaviour above, then applies
+      // the selected GTT chapter/topic only to the requested lecture.
+      if (result.ok && !isExtra(req) && !isPrepone(req) && !isCancellation(req) && !isTest(req) && req.extra_chapter && req.extra_topic) {
+        const { error: contentError } = await supabase
+          .from('batch_planners')
+          .update({ chapter: req.extra_chapter, topic_name: req.extra_topic })
+          .eq('id', req.planner_id)
+        if (contentError) result = { ok: false, error: contentError.message }
+      }
       if (!result.ok) {
         setReviewingId(null)
         setMessage({ type: 'error', text: result.error ?? 'Could not reschedule the test.' })
@@ -115,6 +124,24 @@ export default function RescheduleRequestsPage() {
     // Apply the change to the planner first (cascade), so we don't mark it
     // approved if the shift would create an overlap.
     if (req.planner_id) {
+      const needsConceptTags = isExtra(req) || isPrepone(req) || (!isCancellation(req) && !isTest(req))
+      if (needsConceptTags) {
+        const { data: context } = await supabase.from('batch_planners').select('subject_id').eq('id', req.planner_id).single<{ subject_id: string | null }>()
+        if (!context?.subject_id || !req.extra_chapter || (isPrepone(req) ? false : !req.extra_topic)) {
+          setReviewingId(null)
+          setMessage({ type: 'error', text: 'This request is missing its required Concept Tag chapter/topic.' })
+          return
+        }
+        const { data: chapter } = await supabase.from('chapters').select('id').eq('subject_id', context.subject_id).eq('name', req.extra_chapter).maybeSingle<{ id: string }>()
+        const topicResult = chapter && !isPrepone(req)
+          ? await supabase.from('topics').select('id').eq('chapter_id', chapter.id).eq('name', req.extra_topic!).maybeSingle<{ id: string }>()
+          : null
+        if (!chapter || (!isPrepone(req) && !topicResult?.data)) {
+          setReviewingId(null)
+          setMessage({ type: 'error', text: 'The selected chapter/topic is not in this subject’s Concept Tags. Ask the faculty to submit a fresh request.' })
+          return
+        }
+      }
       let result: { ok: boolean; error?: string }
       if (isExtra(req)) {
         const dur = req.requested_start_time && req.requested_end_time

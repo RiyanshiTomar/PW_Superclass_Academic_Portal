@@ -1,0 +1,5 @@
+- Each script bootstraps itself by reading `.env` from `process.cwd()` via an inline `loadDotEnv()` helper rather than relying on dotenv, keeping the scripts runnable without extra dependencies.
+- All database mutations use Supabase's `upsert(..., { onConflict: ... })` pattern so imports are idempotent and can be re-run safely.
+- User identities are derived deterministically from display names by lowercasing and replacing spaces with dots, then appending `@pw.live` as the email address.
+- CSV headers are located by fuzzy matching (`header.includes('program')`, etc.) after normalizing to lowercase, making the importer resilient to minor header renames.
+- Multi-valued cells (centres, subjects) are split on both commas and newlines via regex like `/[,\n]/` to handle multi-line quoted fields produced by the CSV exporter.

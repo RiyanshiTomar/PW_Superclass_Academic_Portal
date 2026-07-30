@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: error_handling
+title: Ad-hoc Supabase error handling with redirect-based auth errors
+scope: []
+source_files:
+    - app/auth/callback/route.ts
+    - proxy.ts
+    - lib/supabase/server.ts
+depends_on: []
+related_to: []

@@ -1,0 +1,1 @@
+Next.js 16 App Router + React 19, Tailwind CSS v4, Supabase JS client with `@supabase/ssr` for cookie-passed auth, ESLint 9, TypeScript 5.

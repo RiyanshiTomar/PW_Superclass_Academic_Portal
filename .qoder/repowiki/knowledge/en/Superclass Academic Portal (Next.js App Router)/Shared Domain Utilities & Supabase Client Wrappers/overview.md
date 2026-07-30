@@ -1,0 +1,1 @@
+Cross-cutting helpers for authentication, scheduling overlap checks, time/date validation, CSV parsing, and Next.js-aware Supabase client creation.

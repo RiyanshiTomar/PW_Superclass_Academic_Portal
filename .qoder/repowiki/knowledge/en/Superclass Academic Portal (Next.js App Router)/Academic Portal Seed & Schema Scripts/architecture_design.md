@@ -1,0 +1,8 @@
+The module is a flat collection of standalone Node CLI scripts plus one SQL migration file — there is no package.json or shared library; each script is self-contained.
+
+- `schema.sql` is the single source of truth for the Postgres/Supabase schema: it drops/recreates tables (`centres`, `app_users`, `user_centres`, `programs`, `subjects`, `faculty_subjects`, `batches`, `batch_schedules`, `batch_planners`, `audit_log`), defines two PL/pgSQL functions (`list_active_faculty`, `lookup_faculty_by_email`) and enables RLS with per-table authenticated policies. It must be run first in the Supabase SQL Editor before any import.
+- `import-portal-data.js` is the main seed entry point (invoked via `npm run import-data`). It loads `.env` for `NEXT_PUBLIC_SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`, connects through `@supabase/supabase-js`, and runs four ordered upsert passes — Programs & Subjects → Centres (+ Branch Heads/Batch Managers) → Central Team → Faculty — using idempotent `onConflict` constraints so re-runs are safe.
+- `inspect-centres.js` and `test-parse-csv.js` are throwaway diagnostics that read raw CSV files from `process.cwd()` to surface column layout and centre-name variations before committing them to the importer.
+- The three loose CSV files at the repo root (`Acad Portal - Req - *`) are the canonical input datasets consumed by the importer; their filenames are hard-coded in the `CSV_FILES` map.
+
+Dependency direction is one-way: scripts depend on Supabase client + filesystem only; nothing in the app code depends on these scripts at runtime.

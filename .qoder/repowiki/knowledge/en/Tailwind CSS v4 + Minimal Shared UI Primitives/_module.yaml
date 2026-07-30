@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: frontend_style
+title: Tailwind CSS v4 + Minimal Shared UI Primitives
+scope: []
+source_files:
+    - app/globals.css
+    - postcss.config.mjs
+    - app/layout.tsx
+    - components/PortalShell.tsx
+depends_on: []
+related_to: []

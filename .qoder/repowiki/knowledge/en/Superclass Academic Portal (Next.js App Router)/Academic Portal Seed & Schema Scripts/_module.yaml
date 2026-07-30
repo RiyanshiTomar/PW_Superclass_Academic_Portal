@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: scripts_and_data
+title: Academic Portal Seed & Schema Scripts
+scope:
+    - scripts/
+    - Acad Portal - Req - Central Team (1).csv
+    - Acad Portal - Req - Centres (1).csv
+    - Acad Portal - Req - Programs & Subjects (2).csv
+source_files: []
+depends_on: []
+related_to: []

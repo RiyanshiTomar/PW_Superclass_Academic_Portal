@@ -1,51 +1,53 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
 # dependencies
 /node_modules
 /.pnp
 .pnp.*
 .yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
 
 # next.js
 /.next/
 /out/
-next-env.d.ts
-tsconfig.tsbuildinfo
 
 # production
 /build
 
 # misc
 .DS_Store
-Thumbs.db
 *.pem
-*.log
 
-# build tooling caches
-.turbo/
-/coverage
-
-# debug logs
+# debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (NEVER commit real secrets)
+# env files (can opt-in for committing if needed)
 .env
-.env*.local
-.env.production
+.env*
+
+# Local credentials and source extracts (never commit)
+/service-account.json
+service-account*.json
+*.credentials.json
+/Acad Portal*.csv
 
 # vercel
 .vercel
 
-# editor / tooling
-.qoder/
-.idea/
-.vscode/
+# typescript
+*.tsbuildinfo
+next-env.d.ts
 
-# local data CSVs (contain PII — do not commit)
-/Acad Portal*.csv
+AGENTS.md
+CLAUDE.md
 
-# Google service account key (attendance sync) — NEVER commit
-/service-account.json
-service-account*.json
-*.credentials.json
+seed_and_schema.sql

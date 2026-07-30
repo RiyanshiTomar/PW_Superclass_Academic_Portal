@@ -1,0 +1,14 @@
+schema_version: 1
+module_path: build_system
+title: Next.js App Router Build & Data Seeding
+scope: []
+source_files:
+    - package.json
+    - next.config.ts
+    - tsconfig.json
+    - postcss.config.mjs
+    - eslint.config.mjs
+    - scripts/import-portal-data.js
+    - scripts/schema.sql
+depends_on: []
+related_to: []

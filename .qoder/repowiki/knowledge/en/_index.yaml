@@ -1,0 +1,172 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: en-US
+branch: master
+nodes_managed: true
+exported_at: "2026-07-01T18:47:52Z"
+modules:
+    "":
+        dir_name: Superclass Academic Portal (Next.js App Router)
+        title: Superclass Academic Portal (Next.js App Router)
+        scope:
+            - README.md
+            - AGENTS.md
+            - CLAUDE.md
+            - next.config.ts
+            - package.json
+            - eslint.config.mjs
+            - postcss.config.mjs
+            - tsconfig.json
+            - proxy.ts
+            - .env
+            - Acad Portal - Req -  Faculty (2).csv
+            - app\admin\audit-log\page.tsx
+            - app\admin\batch-managers\page.tsx
+            - app\admin\branch-heads\page.tsx
+            - app\admin\central-team\page.tsx
+            - app\admin\centres\page.tsx
+            - app\admin\faculty\page.tsx
+            - app\admin\layout.tsx
+            - app\admin\page.tsx
+            - app\admin\programs\page.tsx
+            - app\auth\callback\route.ts
+            - app\batch-manager\layout.tsx
+            - app\batch-manager\page.tsx
+            - app\branch\layout.tsx
+            - app\branch\page.tsx
+            - app\central\assign-planner\page.tsx
+            - app\central\batch-planner\page.tsx
+            - app\central\batch-scheduler\page.tsx
+            - app\central\layout.tsx
+            - app\central\page.tsx
+            - app\choose-role\page.tsx
+            - app\faculty\layout.tsx
+            - app\faculty\page.tsx
+            - app\faculty\schedule\page.tsx
+            - app\favicon.ico
+            - app\globals.css
+            - app\layout.tsx
+            - app\login\LoginForm.tsx
+            - app\login\page.tsx
+            - app\page.tsx
+            - components\LogoutButton.tsx
+            - components\PortalShell.tsx
+            - lib\auth.ts
+            - lib\scheduling.ts
+            - lib\supabase\client.ts
+            - lib\supabase\server.ts
+            - lib\utils.ts
+            - lib\validation.ts
+            - next-env.d.ts
+            - package-lock.json
+            - public\file.svg
+            - public\globe.svg
+            - public\next.svg
+            - public\vercel.svg
+            - public\window.svg
+            - scripts\db-introspect.js
+            - scripts\import-portal-data.js
+            - scripts\inspect-centres.js
+            - scripts\schema.sql
+            - scripts\test-parse-csv.js
+            - tsconfig.tsbuildinfo
+        source_files: []
+        children:
+            - scripts_and_data
+            - shared_lib
+        depends_on: []
+        related_to: []
+    build_system:
+        dir_name: Next.js App Router Build & Data Seeding
+        title: Next.js App Router Build & Data Seeding
+        scope: []
+        source_files:
+            - package.json
+            - next.config.ts
+            - tsconfig.json
+            - postcss.config.mjs
+            - eslint.config.mjs
+            - scripts/import-portal-data.js
+            - scripts/schema.sql
+        children: []
+        depends_on: []
+        related_to: []
+    configuration_system:
+        dir_name: Environment-based Configuration via .env and Next.js process.env
+        title: Environment-based Configuration via .env and Next.js process.env
+        scope: []
+        source_files:
+            - .env
+            - lib/supabase/client.ts
+            - lib/supabase/server.ts
+            - proxy.ts
+            - scripts/db-introspect.js
+            - scripts/import-portal-data.js
+            - next.config.ts
+        children: []
+        depends_on: []
+        related_to: []
+    dependency_management:
+        dir_name: npm + lockfile for a single Next.js app
+        title: npm + lockfile for a single Next.js app
+        scope: []
+        source_files:
+            - package.json
+            - package-lock.json
+        children: []
+        depends_on: []
+        related_to: []
+    error_handling:
+        dir_name: Ad-hoc Supabase error handling with redirect-based auth errors
+        title: Ad-hoc Supabase error handling with redirect-based auth errors
+        scope: []
+        source_files:
+            - app/auth/callback/route.ts
+            - proxy.ts
+            - lib/supabase/server.ts
+        children: []
+        depends_on: []
+        related_to: []
+    frontend_style:
+        dir_name: Tailwind CSS v4 + Minimal Shared UI Primitives
+        title: Tailwind CSS v4 + Minimal Shared UI Primitives
+        scope: []
+        source_files:
+            - app/globals.css
+            - postcss.config.mjs
+            - app/layout.tsx
+            - components/PortalShell.tsx
+        children: []
+        depends_on: []
+        related_to: []
+    logging_system:
+        dir_name: No Structured Logging System — Bare console.log in Scripts Only
+        title: No Structured Logging System — Bare console.log in Scripts Only
+        scope: []
+        source_files:
+            - scripts/db-introspect.js
+            - scripts/import-portal-data.js
+        children: []
+        depends_on: []
+        related_to: []
+    scripts_and_data:
+        dir_name: Academic Portal Seed & Schema Scripts
+        title: Academic Portal Seed & Schema Scripts
+        scope:
+            - scripts/
+            - Acad Portal - Req - Central Team (1).csv
+            - Acad Portal - Req - Centres (1).csv
+            - Acad Portal - Req - Programs & Subjects (2).csv
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    shared_lib:
+        dir_name: Shared Domain Utilities & Supabase Client Wrappers
+        title: Shared Domain Utilities & Supabase Client Wrappers
+        scope:
+            - lib/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []

@@ -1,0 +1,68 @@
+schema_version: 1
+module_path: ""
+title: Superclass Academic Portal (Next.js App Router)
+scope:
+    - README.md
+    - AGENTS.md
+    - CLAUDE.md
+    - next.config.ts
+    - package.json
+    - eslint.config.mjs
+    - postcss.config.mjs
+    - tsconfig.json
+    - proxy.ts
+    - .env
+    - Acad Portal - Req -  Faculty (2).csv
+    - app\admin\audit-log\page.tsx
+    - app\admin\batch-managers\page.tsx
+    - app\admin\branch-heads\page.tsx
+    - app\admin\central-team\page.tsx
+    - app\admin\centres\page.tsx
+    - app\admin\faculty\page.tsx
+    - app\admin\layout.tsx
+    - app\admin\page.tsx
+    - app\admin\programs\page.tsx
+    - app\auth\callback\route.ts
+    - app\batch-manager\layout.tsx
+    - app\batch-manager\page.tsx
+    - app\branch\layout.tsx
+    - app\branch\page.tsx
+    - app\central\assign-planner\page.tsx
+    - app\central\batch-planner\page.tsx
+    - app\central\batch-scheduler\page.tsx
+    - app\central\layout.tsx
+    - app\central\page.tsx
+    - app\choose-role\page.tsx
+    - app\faculty\layout.tsx
+    - app\faculty\page.tsx
+    - app\faculty\schedule\page.tsx
+    - app\favicon.ico
+    - app\globals.css
+    - app\layout.tsx
+    - app\login\LoginForm.tsx
+    - app\login\page.tsx
+    - app\page.tsx
+    - components\LogoutButton.tsx
+    - components\PortalShell.tsx
+    - lib\auth.ts
+    - lib\scheduling.ts
+    - lib\supabase\client.ts
+    - lib\supabase\server.ts
+    - lib\utils.ts
+    - lib\validation.ts
+    - next-env.d.ts
+    - package-lock.json
+    - public\file.svg
+    - public\globe.svg
+    - public\next.svg
+    - public\vercel.svg
+    - public\window.svg
+    - scripts\db-introspect.js
+    - scripts\import-portal-data.js
+    - scripts\inspect-centres.js
+    - scripts\schema.sql
+    - scripts\test-parse-csv.js
+    - tsconfig.tsbuildinfo
+source_files: []
+depends_on: []
+related_to: []

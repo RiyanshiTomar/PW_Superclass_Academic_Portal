@@ -22,6 +22,13 @@ export type SubjectPace = {
   finishDate: string | null       // last real lecture date
   marginDays: number | null       // end_date − finishDate (>0 finishes early, <0 overruns)
   status: 'done' | 'ahead' | 'on-track' | 'behind'
+  chapters: ChapterPace[]
+}
+
+export type ChapterPace = {
+  name: string
+  totalLectures: number
+  doneLectures: number
 }
 
 export type BatchPacing = {
@@ -44,11 +51,11 @@ export async function computeBatchPacing(
 
   const { data: lecs } = await supabase
     .from('batch_planners')
-    .select('subject_id, planned_date, duration_minutes, subjects(name)')
+    .select('subject_id, chapter, planned_date, duration_minutes, subjects(name)')
     .eq('batch_id', batchId)
     .eq('is_buffer', false)
 
-  type Row = { subject_id: string | null; planned_date: string; duration_minutes: number; subjects: { name: string } | { name: string }[] | null }
+  type Row = { subject_id: string | null; chapter: string | null; planned_date: string; duration_minutes: number; subjects: { name: string } | { name: string }[] | null }
   const bySubject = new Map<string, { name: string; rows: Row[] }>()
   for (const r of (lecs ?? []) as Row[]) {
     const sid = r.subject_id
@@ -65,6 +72,19 @@ export async function computeBatchPacing(
     const doneLectures = done.length
     const totalHours = Math.round((rows.reduce((s, r) => s + (r.duration_minutes || 0), 0) / 60) * 10) / 10
     const doneHours = Math.round((done.reduce((s, r) => s + (r.duration_minutes || 0), 0) / 60) * 10) / 10
+    const byChapter = new Map<string, Row[]>()
+    for (const row of rows) {
+      const chapter = row.chapter?.trim() || 'Untitled chapter'
+      if (!byChapter.has(chapter)) byChapter.set(chapter, [])
+      byChapter.get(chapter)!.push(row)
+    }
+    const chapters = [...byChapter.entries()]
+      .map(([name, chapterRows]) => ({
+        name,
+        totalLectures: chapterRows.length,
+        doneLectures: chapterRows.filter((row) => row.planned_date < todayISO).length,
+      }))
+      .sort((a, b2) => a.name.localeCompare(b2.name))
     const finishDate = rows.length ? rows.reduce((mx, r) => (r.planned_date > mx ? r.planned_date : mx), rows[0].planned_date) : null
     const marginDays = finishDate ? daysBetween(finishDate, endDate) : null
     let status: SubjectPace['status']
@@ -72,7 +92,7 @@ export async function computeBatchPacing(
     else if (marginDays != null && marginDays < 0) status = 'behind'
     else if (marginDays != null && marginDays >= AHEAD_MARGIN) status = 'ahead'
     else status = 'on-track'
-    subjects.push({ subjectId, name, totalLectures, doneLectures, remainingLectures: totalLectures - doneLectures, totalHours, doneHours, finishDate, marginDays, status })
+    subjects.push({ subjectId, name, totalLectures, doneLectures, remainingLectures: totalLectures - doneLectures, totalHours, doneHours, finishDate, marginDays, status, chapters })
   }
   subjects.sort((a, b2) => a.name.localeCompare(b2.name))
 

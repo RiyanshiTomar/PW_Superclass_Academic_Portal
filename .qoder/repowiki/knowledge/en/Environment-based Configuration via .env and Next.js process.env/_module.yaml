@@ -1,0 +1,14 @@
+schema_version: 1
+module_path: configuration_system
+title: Environment-based Configuration via .env and Next.js process.env
+scope: []
+source_files:
+    - .env
+    - lib/supabase/client.ts
+    - lib/supabase/server.ts
+    - proxy.ts
+    - scripts/db-introspect.js
+    - scripts/import-portal-data.js
+    - next.config.ts
+depends_on: []
+related_to: []

@@ -485,7 +485,8 @@ export async function cascadeReschedule(
   supabase: SupabaseClient,
   rowId: string,
   newDate: string,
-  newTime: string | null
+  newTime: string | null,
+  override?: { topic_name?: string | null; chapter?: string | null }
 ): Promise<{ ok: boolean; shifted: number; error?: string }> {
   const { data: target } = await supabase
     .from('batch_planners')
@@ -541,10 +542,14 @@ export async function cascadeReschedule(
   }
 
   for (const u of updates) {
-    const { error } = await supabase
-      .from('batch_planners')
-      .update({ planned_date: u.planned_date, start_time: u.start_time })
-      .eq('id', u.id)
+    const patch: { planned_date: string; start_time: string | null; topic_name?: string; chapter?: string } = { planned_date: u.planned_date, start_time: u.start_time }
+    // Only the requested class changes its teaching content. Later lectures
+    // shift dates but keep their own GTT tags.
+    if (u.id === target.id && override?.topic_name?.trim() && override?.chapter?.trim()) {
+      patch.topic_name = override.topic_name.trim()
+      patch.chapter = override.chapter.trim()
+    }
+    const { error } = await supabase.from('batch_planners').update(patch).eq('id', u.id)
     if (error) return { ok: false, shifted: 0, error: error.message }
   }
 

@@ -1,0 +1,4 @@
+- Each portal is a top-level `app/<role>/` route group with its own `layout.tsx` and pages, never nested deeper than one level.
+- Supabase access goes through `lib/supabase/server.ts` on the server side and `lib/supabase/client.ts` in components — raw `@supabase/supabase-js` calls are avoided in pages.
+- Role-to-path mapping is declared once in `proxy.ts` (`PROTECTED_ROLE_PATHS`) and mirrored in redirect logic; new portals must register both there and in their layout.
+- User identity is resolved by email lookup against `app_users` rather than relying on `auth_id`, since rows may be inserted manually.

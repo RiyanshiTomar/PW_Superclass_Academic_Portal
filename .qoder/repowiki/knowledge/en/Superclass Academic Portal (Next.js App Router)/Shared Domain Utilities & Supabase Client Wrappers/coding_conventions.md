@@ -1,0 +1,4 @@
+- Validation helpers return `string | null` (error message or success) instead of throwing, letting callers surface messages directly.
+- Database accessors accept a `SupabaseClient` parameter rather than importing a singleton, making them testable and environment-agnostic.
+- Time values are passed as `'HH:mm'` strings internally and converted to minutes via `toMinutes` before arithmetic, never using `Date` objects for time-of-day math.
+- Dual `createClient()` exports in `supabase/client.ts` and `supabase/server.ts` follow the same signature so call sites stay identical across client and server code.

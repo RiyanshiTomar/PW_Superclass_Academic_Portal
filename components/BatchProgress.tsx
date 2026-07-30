@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import { computeBatchPacing, pacingWarnings, type BatchPacing, type SubjectPace } from '@/lib/pacing'
@@ -158,7 +158,8 @@ export default function BatchProgress({ scope = 'central' }: { scope?: Scope }) 
                     const pct = s.totalLectures ? clampPct((s.doneLectures / s.totalLectures) * 100) : 0
                     const st = STATUS[s.status]
                     return (
-                      <tr key={s.subjectId} className="hover:bg-neutral-50/60">
+                      <Fragment key={s.subjectId}>
+                      <tr className="hover:bg-neutral-50/60">
                         <td className="px-5 py-2 font-medium text-neutral-900">{s.name}</td>
                         <td className="px-3 py-2">
                           <div className="flex items-center gap-2">
@@ -171,6 +172,19 @@ export default function BatchProgress({ scope = 'central' }: { scope?: Scope }) 
                         <td className="px-3 py-2 whitespace-nowrap text-neutral-600">{fmt(s.finishDate)}{s.marginDays != null && s.status !== 'done' && <span className={`ml-1 text-[11px] ${s.marginDays < 0 ? 'text-red-600' : 'text-neutral-400'}`}>({s.marginDays < 0 ? `${Math.abs(s.marginDays)}d over` : `${s.marginDays}d spare`})</span>}</td>
                         <td className="px-3 py-2"><span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${st.cls}`}>{st.label}</span></td>
                       </tr>
+                      <tr className="bg-neutral-50/70">
+                        <td colSpan={6} className="px-5 py-2.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 mr-1">Chapters</span>
+                            {s.chapters.map((chapter) => {
+                              const chapterPct = chapter.totalLectures ? clampPct((chapter.doneLectures / chapter.totalLectures) * 100) : 0
+                              const complete = chapter.doneLectures === chapter.totalLectures
+                              return <span key={chapter.name} title={`${chapter.doneLectures}/${chapter.totalLectures} lectures completed`} className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-violet-100 bg-white text-neutral-700'}`}><span className={`h-1.5 w-1.5 rounded-full ${complete ? 'bg-emerald-500' : 'bg-violet-400'}`} />{chapter.name}<span className="font-semibold text-neutral-400">{chapter.doneLectures}/{chapter.totalLectures} · {chapterPct}%</span></span>
+                            })}
+                          </div>
+                        </td>
+                      </tr>
+                      </Fragment>
                     )
                   })}
                 </tbody>

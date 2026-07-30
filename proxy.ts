@@ -41,7 +41,7 @@ export async function proxy(request: NextRequest) {
 
   // Allow public routes through
   const isPublicRoute =
-    path === '/login' || path.startsWith('/auth/') || path === '/'
+    path === '/login' || path.startsWith('/auth/') || path.startsWith('/api/internal/') || path === '/'
 
   if (isPublicRoute) {
     return response

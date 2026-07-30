@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: logging_system
+title: No Structured Logging System — Bare console.log in Scripts Only
+scope: []
+source_files:
+    - scripts/db-introspect.js
+    - scripts/import-portal-data.js
+depends_on: []
+related_to: []

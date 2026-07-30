@@ -1,0 +1,1 @@
+Plain Node.js (CommonJS `require`) with `@supabase/supabase-js` v2 client using the service-role key; target database is Supabase-hosted PostgreSQL with RLS enabled. No external CSV parser — a custom character-by-character parser handles quoted/multi-line fields.

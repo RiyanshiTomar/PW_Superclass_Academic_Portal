@@ -1,0 +1,1 @@
+Next.js 16 app-root that wires role-based portals (admin, central, faculty, branch, batch-manager) around a shared Supabase-backed domain layer and seed scripts.

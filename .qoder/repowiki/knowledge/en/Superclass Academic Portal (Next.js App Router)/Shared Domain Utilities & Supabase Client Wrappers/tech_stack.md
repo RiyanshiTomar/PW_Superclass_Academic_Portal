@@ -1,0 +1,1 @@
+Supabase via `@supabase/ssr` (browser vs server client split) and `@supabase/supabase-js`; Next.js `cookies()` API for server-side session handling; Tailwind utility classes embedded in `stageBadgeClass`.

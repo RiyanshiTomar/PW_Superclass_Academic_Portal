@@ -29,6 +29,12 @@ Then seed reference data locally:
 npm run import-data       # needs SUPABASE_SERVICE_ROLE_KEY in .env + the CSVs in repo root
 ```
 
+### Student enrollment sync
+
+`npm run sync-students` imports all students from the enrollment sheet and maps sheet centres such as `Patna - Boring Road Superclass` and `Jaipur - Tonk Road Superclass` to their portal centres. It never changes `batch_id`; portal users remain responsible for assigning batches.
+
+For automatic daily syncing on Vercel, configure `GOOGLE_SERVICE_ACCOUNT_JSON` (the complete service-account JSON), `CRON_SECRET`, and `SUPABASE_SERVICE_ROLE_KEY`. The protected scheduled endpoint then runs daily at 02:00 UTC.
+
 ## Environment variables
 | Variable | Where | Notes |
 |---|---|---|

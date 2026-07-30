@@ -241,6 +241,29 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
       const studentByReg = new Map(students.map((s) => [norm(s.regno), s]))
       const batchByName = new Map(batches.map((b) => [norm(b.name), b.id]))
 
+      // Collect regnos not found at this centre so we can do a cross-centre lookup.
+      const missingRegnos: string[] = []
+      const rowRegnos: string[] = []
+      for (const row of rows) {
+        const regno = (row[iId] ?? '').trim()
+        if (!regno) continue
+        rowRegnos.push(regno)
+        if (!studentByReg.has(norm(regno))) missingRegnos.push(regno)
+      }
+
+      // Cross-centre lookup: check if missing students exist in DB at all (any centre).
+      const globalStudentMap = new Map<string, { centre_id: string | null }>()
+      if (missingRegnos.length > 0) {
+        // Query in chunks of 200 to avoid URL limits.
+        for (let i = 0; i < missingRegnos.length; i += 200) {
+          const chunk = missingRegnos.slice(i, i + 200)
+          const { data } = await supabase.from('students').select('regno, centre_id').in('regno', chunk)
+          for (const s of (data ?? []) as { regno: string; centre_id: string | null }[]) {
+            globalStudentMap.set(norm(s.regno), { centre_id: s.centre_id })
+          }
+        }
+      }
+
       // Parse rows (dedupe by regno — last wins).
       const byReg = new Map<string, UploadRow>()
       for (const row of rows) {
@@ -250,8 +273,17 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
         const assignRaw = get(iBatch)
         const student = studentByReg.get(norm(regno)) ?? null
         let error = '', warning = '', targetBatchId: string | null = null, skip = false
-        if (!student) error = `Student ID "${regno}" is not at this centre`
-        else if (!assignRaw) skip = true // blank = leave unchanged
+        if (!student) {
+          const global = globalStudentMap.get(norm(regno))
+          if (global) {
+            const otherCentreName = global.centre_id ? centres.find((c) => c.id === global.centre_id)?.name : null
+            error = otherCentreName
+              ? `Student "${regno}" belongs to ${otherCentreName}, not this centre`
+              : `Student "${regno}" exists but has no centre assigned — re-run student sync`
+          } else {
+            error = `Student ID "${regno}" not found in DB — run student sync to import from sheet`
+          }
+        } else if (!assignRaw) skip = true // blank = leave unchanged
         else {
           targetBatchId = batchByName.get(norm(assignRaw)) ?? null
           if (!targetBatchId) error = `Batch "${assignRaw}" not found at this centre`
@@ -259,6 +291,12 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
         byReg.set(norm(regno), { regno, name: student?.student_name ?? '', studentId: student?.id ?? null, currentBatchId: student?.batch_id ?? null, targetBatchId, skip, error, warning })
       }
       const parsed = Array.from(byReg.values())
+
+      // If every single row is an error, show a top-level hint.
+      const allErrors = parsed.length > 0 && parsed.every((r) => r.error)
+      if (allErrors) {
+        setMsg({ type: 'error', text: `All ${parsed.length} students failed. Students may not be synced yet — ask your admin to run "npm run sync-students".` })
+      }
 
       // Project post-upload counts to flag over-capacity.
       const projected = new Map<string, number>()

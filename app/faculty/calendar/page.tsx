@@ -10,6 +10,8 @@ import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/
 
 type Lecture = {
   id: string
+  batch_id: string
+  subject_id: string | null
   planned_date: string
   start_time: string | null
   duration_minutes: number
@@ -20,6 +22,8 @@ type Lecture = {
   subjects: { name: string } | { name: string }[] | null
   classrooms: { name: string } | { name: string }[] | null
 }
+
+type ConceptChapter = { id: string; name: string; topics: { id: string; name: string }[] }
 
 function one<T>(v: T | T[] | null | undefined): T | null {
   if (!v) return null
@@ -48,6 +52,8 @@ export default function FacultyCalendarPage() {
   const [newDuration, setNewDuration] = useState('60')
   const [extraTopic, setExtraTopic] = useState('')
   const [extraChapter, setExtraChapter] = useState('')
+  const [conceptChapters, setConceptChapters] = useState<ConceptChapter[]>([])
+  const [tagsLoading, setTagsLoading] = useState(false)
   const [reason, setReason] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -58,7 +64,7 @@ export default function FacultyCalendarPage() {
     if (!appUser) { setLoading(false); return }
     const { data } = await supabase
       .from('batch_planners')
-      .select('id, planned_date, start_time, duration_minutes, topic_name, chapter, stage, batches(name, centres(name)), subjects(name), classrooms(name)')
+      .select('id, batch_id, subject_id, planned_date, start_time, duration_minutes, topic_name, chapter, stage, batches(name, centres(name)), subjects(name), classrooms(name)')
       .eq('faculty_id', appUser.id)
       .eq('stage', 'Confirmed')   // calendar shows only what the faculty has confirmed
       .order('planned_date', { ascending: true })
@@ -99,6 +105,22 @@ export default function FacultyCalendarPage() {
   const prevMonth = () => { if (month === 0) { setMonth(11); setYear((y) => y - 1) } else setMonth((m) => m - 1) }
   const nextMonth = () => { if (month === 11) { setMonth(0); setYear((y) => y + 1) } else setMonth((m) => m + 1) }
 
+  async function loadConceptTags(subjectId: string | null, initialChapter: string, initialTopic: string) {
+    setConceptChapters([])
+    setTagsLoading(true)
+    if (!subjectId) { setTagsLoading(false); return }
+    const { data: chapterRows, error: chapterError } = await supabase.from('chapters').select('id, name, sequence_no').eq('subject_id', subjectId).order('sequence_no')
+    if (chapterError || !chapterRows?.length) { setTagsLoading(false); return }
+    const { data: topicRows } = await supabase.from('topics').select('id, chapter_id, name, sequence_no').in('chapter_id', chapterRows.map((chapter) => chapter.id)).order('sequence_no')
+    const chapters = chapterRows.map((chapter) => ({ id: chapter.id, name: chapter.name, topics: (topicRows ?? []).filter((topic) => topic.chapter_id === chapter.id).map((topic) => ({ id: topic.id, name: topic.name })) }))
+    setConceptChapters(chapters)
+    const matchingChapter = chapters.find((chapter) => chapter.name.trim().toLowerCase() === initialChapter.trim().toLowerCase())
+    const matchingTopic = matchingChapter?.topics.find((topic) => topic.name.trim().toLowerCase() === initialTopic.trim().toLowerCase())
+    setExtraChapter(matchingChapter?.name ?? '')
+    setExtraTopic(matchingTopic?.name ?? '')
+    setTagsLoading(false)
+  }
+
   function openModal(l: Lecture) {
     setSelected(l)
     setMode('reschedule')
@@ -107,6 +129,7 @@ export default function FacultyCalendarPage() {
     setNewDuration(String(l.duration_minutes || 60))
     setExtraTopic(l.topic_name)
     setExtraChapter(l.chapter)
+    void loadConceptTags(l.subject_id, l.chapter, l.topic_name)
     setReason('')
     setMessage(null)
   }
@@ -114,6 +137,8 @@ export default function FacultyCalendarPage() {
   async function submit() {
     if (!selected || !reason.trim()) return
     if ((mode === 'reschedule' || mode === 'extra') && !newDate) return
+    if ((mode === 'reschedule' || mode === 'extra') && (!extraChapter || !extraTopic)) return
+    if (mode === 'prepone' && !extraChapter) return
     setSubmitting(true)
     const { data: { user } } = await supabase.auth.getUser()
     const appUser = user ? await getAppUser(supabase, user) : null
@@ -138,9 +163,9 @@ export default function FacultyCalendarPage() {
       requested_date: noDate ? null : newDate,
       requested_start_time: noDate ? null : newTime || null,
       requested_end_time: requestedEnd,
-      extra_topic: mode === 'extra' ? (extraTopic.trim() || null) : null,
-      // For prepone we store the chapter being brought forward.
-      extra_chapter: mode === 'extra' ? (extraChapter.trim() || null) : mode === 'prepone' ? (selected.chapter || null) : null,
+      // All teaching content comes from the selected subject's Concept Tags.
+      extra_topic: mode === 'cancel' || mode === 'prepone' ? null : extraTopic,
+      extra_chapter: mode === 'cancel' ? null : extraChapter,
       reason: reason.trim(),
       status: 'pending',
     })
@@ -162,6 +187,29 @@ export default function FacultyCalendarPage() {
   }
 
   const inputClass = 'w-full h-10 px-3 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500'
+  const selectedChapter = conceptChapters.find((chapter) => chapter.name === extraChapter)
+  const needsTeachingTags = mode === 'reschedule' || mode === 'extra'
+  const canSend = !submitting && !!reason.trim() && !tagsLoading && (!needsTeachingTags || (!!extraChapter && !!extraTopic)) && (mode !== 'prepone' || !!extraChapter) && (!(mode === 'reschedule' || mode === 'extra') || !!newDate)
+  const TeachingTags = () => (
+    <div className="grid grid-cols-2 gap-3 mb-3 rounded-lg border border-violet-100 bg-violet-50/40 p-3">
+      <div className="col-span-2 text-xs font-semibold text-violet-800">What will you teach in this class? <span className="font-normal text-neutral-500">Choose only from this subject&apos;s Concept Tags.</span></div>
+      <div>
+        <label className="block text-xs font-medium text-neutral-500 mb-1">Chapter</label>
+        <select value={extraChapter} onChange={(e) => { setExtraChapter(e.target.value); setExtraTopic('') }} className={inputClass} disabled={tagsLoading || conceptChapters.length === 0}>
+          <option value="">{tagsLoading ? 'Loading chaptersâ€¦' : conceptChapters.length ? 'Select chapter' : 'No Concept Tags available'}</option>
+          {conceptChapters.map((chapter) => <option key={chapter.id} value={chapter.name}>{chapter.name}</option>)}
+        </select>
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-neutral-500 mb-1">Topic</label>
+        <select value={extraTopic} onChange={(e) => setExtraTopic(e.target.value)} className={inputClass} disabled={!selectedChapter || tagsLoading}>
+          <option value="">{selectedChapter ? 'Select topic' : 'Select chapter first'}</option>
+          {selectedChapter?.topics.map((topic) => <option key={topic.id} value={topic.name}>{topic.name}</option>)}
+        </select>
+      </div>
+      {!tagsLoading && conceptChapters.length === 0 && <p className="col-span-2 text-xs text-amber-700">No Concept Tags exist for this subject. Ask an admin to add its chapters and topics before sending this request.</p>}
+    </div>
+  )
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -294,6 +342,7 @@ export default function FacultyCalendarPage() {
             </div>
 
             {mode === 'reschedule' && (
+              <>
               <div className="grid grid-cols-2 gap-3 mb-3">
                 <div>
                   <label className="block text-xs font-medium text-neutral-500 mb-1">New Date</label>
@@ -304,10 +353,17 @@ export default function FacultyCalendarPage() {
                   <input type="time" value={newTime} onChange={(e) => setNewTime(e.target.value)} className={inputClass} />
                 </div>
               </div>
+              <TeachingTags />
+              </>
             )}
 
             {mode === 'prepone' && (
               <div className="mb-3 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm">
+                <label className="block text-xs font-medium text-neutral-600 mb-1">Chapter from Concept Tags</label>
+                <select value={extraChapter} onChange={(e) => { setExtraChapter(e.target.value); setExtraTopic('') }} className={inputClass} disabled={tagsLoading || conceptChapters.length === 0}>
+                  <option value="">{tagsLoading ? 'Loading chaptersâ€¦' : conceptChapters.length ? 'Select chapter' : 'No Concept Tags available'}</option>
+                  {conceptChapters.map((chapter) => <option key={chapter.id} value={chapter.name}>{chapter.name}</option>)}
+                </select>
                 <p className="text-neutral-700">Prepone the <b>whole chapter</b> <span className="font-semibold text-sky-700">“{selected.chapter}”</span> ({one(selected.subjects)?.name}).</p>
                 <p className="text-xs text-neutral-500 mt-1">Individual topics can&apos;t be preponed — the entire chapter&apos;s remaining classes move up to the next available dates, and the other upcoming chapters slide after it.</p>
               </div>
@@ -327,15 +383,8 @@ export default function FacultyCalendarPage() {
                   <label className="block text-xs font-medium text-neutral-500 mb-1">Mins</label>
                   <input type="number" min={15} max={480} value={newDuration} onChange={(e) => setNewDuration(e.target.value)} className={inputClass} />
                 </div>
-                <div className="col-span-2">
-                  <label className="block text-xs font-medium text-neutral-500 mb-1">Topic</label>
-                  <input value={extraTopic} onChange={(e) => setExtraTopic(e.target.value)} className={inputClass} placeholder="Topic for this class" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-neutral-500 mb-1">Chapter</label>
-                  <input value={extraChapter} onChange={(e) => setExtraChapter(e.target.value)} className={inputClass} placeholder="Ch" />
-                </div>
               </div>
+              <TeachingTags />
             )}
 
             <div className="mb-4">
@@ -354,7 +403,7 @@ export default function FacultyCalendarPage() {
             </p>
 
             <div className="flex gap-3">
-              <BtnPrimary className="flex-1" onClick={submit} disabled={submitting || !reason.trim() || ((mode === 'reschedule' || mode === 'extra') && !newDate)}>
+              <BtnPrimary className="flex-1" onClick={submit} disabled={!canSend}>
                 {submitting ? 'Sending…' : 'Send Request'}
               </BtnPrimary>
               <BtnSecondary className="flex-1" onClick={() => setSelected(null)}>Close</BtnSecondary>

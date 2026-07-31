@@ -389,41 +389,14 @@ export default function EditPlanner() {
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, status } : r)))
   }
 
-  const resolveLiveSlot = (subjectId: string, faculty_id: string, date: string, excludeKey: string): { ok: boolean; error?: string } => {
+  const resolveLiveSlot = (subjectId: string, date: string): { ok: boolean; error?: string } => {
     if (!liveLinkId) return { ok: true }
-
-    let slot = liveSlotByDateRef.current.get(date)
-    if (!slot) {
-      const sched = liveSchedRef.current.get(subjectId)
-      const dow = new Date(date + 'T12:00:00').getDay()
-      const weekly = sched?.get(dow)
-      if (!weekly) return { ok: false, error: `No weekly class for ${subjName(subjectId)} on that day.` }
-      slot = { start_time: weekly.start, classroom_id: weekly.classroom, duration: weekly.duration }
-      liveSlotByDateRef.current.set(date, slot)
-    }
-    if (!slot.start_time) return { ok: true }
-
-    const start = toMinutes(slot.start_time.slice(0, 5))
-    const end = start + slot.duration
-
-    const testHit = (liveTestsRef.current.get(date) ?? []).some(([ts, te]) => start < te && end > ts)
-    if (testHit) return { ok: false, error: `A test is already scheduled in this slot on ${fmtDate(date)}.` }
-
-    if (faculty_id) {
-      for (const other of rows) {
-        if (other.key === excludeKey || other.faculty_id !== faculty_id || other.planned_date !== date) continue
-        const otherSlot = liveSlotByDateRef.current.get(other.planned_date) ?? (() => {
-          const sched = liveSchedRef.current.get(other.subject_id)
-          const dow = new Date(other.planned_date + 'T12:00:00').getDay()
-          const w = sched?.get(dow)
-          return w ? { start_time: w.start, classroom_id: w.classroom, duration: w.duration } : null
-        })()
-        if (!otherSlot?.start_time) continue
-        const os = toMinutes(otherSlot.start_time.slice(0, 5))
-        const oe = os + otherSlot.duration
-        if (start < oe && end > os) return { ok: false, error: `${facName(faculty_id)} already has ${subjName(other.subject_id)} at an overlapping time on ${fmtDate(date)}.` }
-      }
-    }
+    if (liveSlotByDateRef.current.has(date)) return { ok: true }
+    const sched = liveSchedRef.current.get(subjectId)
+    const dow = new Date(date + 'T12:00:00').getDay()
+    const weekly = sched?.get(dow)
+    if (!weekly) return { ok: false, error: `No weekly class for ${subjName(subjectId)} on that day.` }
+    liveSlotByDateRef.current.set(date, { start_time: weekly.start, classroom_id: weekly.classroom, duration: weekly.duration })
     return { ok: true }
   }
 
@@ -431,7 +404,7 @@ export default function EditPlanner() {
     if (!conductKey || !conductDate) return
     const r = rows.find((x) => x.key === conductKey)
     if (r && conductDate !== r.planned_date) {
-      const check = resolveLiveSlot(r.subject_id, r.faculty_id, conductDate, conductKey)
+      const check = resolveLiveSlot(r.subject_id, conductDate)
       if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
     }
     setRows((prev) => prev.map((row) => (row.key === conductKey ? { ...row, status: 'conducted' as Status, planned_date: conductDate } : row)))
@@ -442,7 +415,7 @@ export default function EditPlanner() {
     if (!confirmKey || !confirmDate) return
     const r = rows.find((x) => x.key === confirmKey)
     if (r && confirmDate !== r.planned_date) {
-      const check = resolveLiveSlot(r.subject_id, r.faculty_id, confirmDate, confirmKey)
+      const check = resolveLiveSlot(r.subject_id, confirmDate)
       if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
     }
     setRows((prev) => prev.map((row) => (row.key === confirmKey ? { ...row, status: 'confirmed' as Status, planned_date: confirmDate } : row)))
@@ -505,34 +478,6 @@ export default function EditPlanner() {
     // DELETE removed ones. This preserves faculty-approved reschedules and can
     // never scramble the plan the way a full rebuild could.
     if (liveLinkId) {
-      const timedRows = rows.filter((r) => r.faculty_id && liveSlotByDateRef.current.get(r.planned_date)?.start_time)
-      if (timedRows.length) {
-        const facultyIds = Array.from(new Set(timedRows.map((r) => r.faculty_id)))
-        const dates = Array.from(new Set(timedRows.map((r) => r.planned_date)))
-        const { data: busyRows, error: busyErr } = await supabase
-          .from('batch_planners')
-          .select('id, faculty_id, planned_date, start_time, duration_minutes, subject_id, subjects(name)')
-          .in('faculty_id', facultyIds)
-          .in('planned_date', dates)
-          .not('start_time', 'is', null)
-        if (busyErr) { setMessage({ type: 'error', text: `Could not verify faculty availability: ${busyErr.message}` }); return }
-        const ownIds = new Set(rows.map((r) => r.db_id).filter(Boolean))
-        for (const r of timedRows) {
-          const slot = liveSlotByDateRef.current.get(r.planned_date)!
-          const s = toMinutes(slot.start_time!.slice(0, 5))
-          const e = s + slot.duration
-          for (const b of (busyRows ?? []) as { id: string; faculty_id: string; planned_date: string; start_time: string; duration_minutes: number; subject_id: string | null; subjects: { name: string } | { name: string }[] | null }[]) {
-            if (ownIds.has(b.id) || b.faculty_id !== r.faculty_id || b.planned_date !== r.planned_date) continue
-            const bs = toMinutes(b.start_time.slice(0, 5))
-            const be = bs + b.duration_minutes
-            if (s < be && e > bs) {
-              const subjName2 = Array.isArray(b.subjects) ? b.subjects[0]?.name : b.subjects?.name
-              setMessage({ type: 'error', text: `Save blocked: ${facName(r.faculty_id)} already has ${subjName2 ?? 'a class'} in another batch at an overlapping time on ${fmtDate(r.planned_date)}.` })
-              return
-            }
-          }
-        }
-      }
       setSaving(true)
       const slotByDate = liveSlotByDateRef.current
       const batchId = filterBatch // live mode is only entered when this === link.batch_id
@@ -545,7 +490,7 @@ export default function EditPlanner() {
           planned_date: r.planned_date, duration_minutes: slot?.duration ?? r.duration_minutes ?? 60,
           start_time: slot?.start_time ?? null, classroom_id: slot?.classroom_id ?? null,
         }
-        if (liveHasStatus) patch.status = r.status
+        patch.status = r.status
         if (r.db_id) {
           keptIds.add(r.db_id)
           const { error } = await supabase.from('batch_planners').update(patch).eq('id', r.db_id)
@@ -714,7 +659,7 @@ export default function EditPlanner() {
                         onChange={(e) => {
                           const newDate = e.target.value
                           if (!newDate) return
-                          const check = resolveLiveSlot(r.subject_id, r.faculty_id, newDate, r.key)
+                          const check = resolveLiveSlot(r.subject_id, newDate)
                           if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
                           updateRow(r.key, { planned_date: newDate })
                         }}
@@ -726,15 +671,11 @@ export default function EditPlanner() {
                         <option value="">Faculty…</option>
                         {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                       </select>
-                      {(!liveLinkId || liveHasStatus) ? (
-                        <select value={r.status} onChange={(e) => setStatus(r.key, e.target.value as Status)} className={`w-[150px] shrink-0 h-9 px-2 rounded-lg text-xs font-semibold border ${statusPill(r.status)}`}>
-                          <option value="planned">Planned</option>
-                          <option value="confirmed">Confirmed ✓</option>
-                          <option value="conducted">Already conducted</option>
-                        </select>
-                      ) : (
-                        <span className="w-[150px] shrink-0 text-[11px] font-medium text-neutral-500 truncate" title="Faculty confirmation stage (live)">{r.stage || 'Draft'}</span>
-                      )}
+                      <select value={r.status} onChange={(e) => setStatus(r.key, e.target.value as Status)} className={`w-[150px] shrink-0 h-9 px-2 rounded-lg text-xs font-semibold border ${statusPill(r.status)}`}>
+                        <option value="planned">Planned</option>
+                        <option value="confirmed">Confirmed ✓</option>
+                        <option value="conducted">Already conducted</option>
+                      </select>
                       <button onClick={() => removeRow(r.key)} title="Remove" className="shrink-0 text-neutral-300 hover:text-red-600 text-lg leading-none">×</button>
                     </div>
                   ))}

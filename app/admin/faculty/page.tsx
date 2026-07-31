@@ -27,6 +27,7 @@ const rateText = (r: Rate) => `₹${Number(r.amount).toLocaleString('en-IN')}${r
 export default function ManageFacultyPage() {
   const supabase = createClient()
   const [faculty, setFaculty] = useState<Faculty[]>([])
+  const [facultyCentresMap, setFacultyCentresMap] = useState<Map<string, { id: string; name: string }[]>>(new Map())
   const [centres, setCentres] = useState<Centre[]>([])
   const [programs, setPrograms] = useState<Program[]>([])
   const [subjects, setSubjects] = useState<Subject[]>([])
@@ -42,7 +43,7 @@ export default function ManageFacultyPage() {
   const [email, setEmail] = useState('')
   const [phone, setPhone] = useState('')
   const [facultyType, setFacultyType] = useState('Permanent')
-  const [centreId, setCentreId] = useState('')
+  const [selectedCentreIds, setSelectedCentreIds] = useState<string[]>([])
   const [selectedSubjectIds, setSelectedSubjectIds] = useState<string[]>([])
 
   // Cost / rates
@@ -58,7 +59,7 @@ export default function ManageFacultyPage() {
 
   const loadAll = async () => {
     setLoading(true)
-    const [facultyRes, centresRes, programsRes, subjectsRes, ratesRes] = await Promise.all([
+    const [facultyRes, centresRes, programsRes, subjectsRes, ratesRes, userCentresRes] = await Promise.all([
       supabase
         .from('app_users')
         .select('id, full_name, email, phone, faculty_type, status, centre_id')
@@ -68,6 +69,7 @@ export default function ManageFacultyPage() {
       supabase.from('programs').select('id, name').order('name'),
       supabase.from('subjects').select('id, name, program_id').order('name'),
       supabase.from('faculty_rates').select('id, faculty_id, rate_type, amount, effective_from, created_at').order('effective_from', { ascending: false }),
+      supabase.from('user_centres').select('user_id, centre_id, is_primary').order('is_primary', { ascending: false }),
     ])
 
     if (facultyRes.error) {
@@ -78,6 +80,17 @@ export default function ManageFacultyPage() {
     if (programsRes.data) setPrograms(programsRes.data)
     if (subjectsRes.data) setSubjects(subjectsRes.data)
     if (ratesRes.data) setRates(ratesRes.data as Rate[])
+    if (userCentresRes.data && centresRes.data) {
+      const centreById = new Map(centresRes.data.map((c) => [c.id, c]))
+      const m = new Map<string, { id: string; name: string }[]>()
+      for (const row of userCentresRes.data as { user_id: string; centre_id: string; is_primary: boolean }[]) {
+        const c = centreById.get(row.centre_id)
+        if (!c) continue
+        if (!m.has(row.user_id)) m.set(row.user_id, [])
+        m.get(row.user_id)!.push(c)
+      }
+      setFacultyCentresMap(m)
+    }
     setLoading(false)
   }
 
@@ -163,7 +176,7 @@ export default function ManageFacultyPage() {
     setEmail('')
     setPhone('')
     setFacultyType('Permanent')
-    setCentreId('')
+    setSelectedCentreIds([])
     setSelectedSubjectIds([])
     setEditingId(null)
     setShowForm(false)
@@ -175,13 +188,14 @@ export default function ManageFacultyPage() {
     setEmail(f.email)
     setPhone(f.phone || '')
     setFacultyType(f.faculty_type || 'Permanent')
-    setCentreId(f.centre_id || '')
 
-    const { data } = await supabase
-      .from('faculty_subjects')
-      .select('subject_id')
-      .eq('faculty_id', f.id)
-    setSelectedSubjectIds(data?.map((d) => d.subject_id) || [])
+    const [subjRes, centresRes] = await Promise.all([
+      supabase.from('faculty_subjects').select('subject_id').eq('faculty_id', f.id),
+      supabase.from('user_centres').select('centre_id, is_primary').eq('user_id', f.id).order('is_primary', { ascending: false }),
+    ])
+    setSelectedSubjectIds(subjRes.data?.map((d) => d.subject_id) || [])
+    const existingCentreIds = centresRes.data?.map((d) => d.centre_id) || (f.centre_id ? [f.centre_id] : [])
+    setSelectedCentreIds(existingCentreIds)
 
     setShowForm(true)
   }
@@ -189,6 +203,11 @@ export default function ManageFacultyPage() {
   const toggleSubject = (id: string) => {
     setSelectedSubjectIds((prev) =>
       prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
+    )
+  }
+  const toggleCentre = (id: string) => {
+    setSelectedCentreIds((prev) =>
+      prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]
     )
   }
 
@@ -212,7 +231,7 @@ export default function ManageFacultyPage() {
           email: cleanEmail,
           phone: phone.trim() || null,
           faculty_type: facultyType,
-          centre_id: centreId || null,
+          centre_id: selectedCentreIds[0] || null,
         })
         .eq('id', editingId)
 
@@ -238,8 +257,8 @@ export default function ManageFacultyPage() {
         const existingRoles = Array.isArray(existing.roles)
           ? existing.roles.map((role) => String(role))
           : existing.role
-          ? [existing.role]
-          : []
+            ? [existing.role]
+            : []
         const mergedRoles = Array.from(new Set([...existingRoles, 'faculty']))
 
         const { error } = await supabase
@@ -251,7 +270,7 @@ export default function ManageFacultyPage() {
             email: cleanEmail,
             phone: phone.trim() || null,
             faculty_type: facultyType,
-            centre_id: centreId || null,
+            centre_id: selectedCentreIds[0] || null,
           })
           .eq('id', existing.id)
 
@@ -272,7 +291,7 @@ export default function ManageFacultyPage() {
             role: 'faculty',
             roles: ['faculty'],
             faculty_type: facultyType,
-            centre_id: centreId || null,
+            centre_id: selectedCentreIds[0] || null,
             status: 'active',
           })
           .select()
@@ -300,15 +319,19 @@ export default function ManageFacultyPage() {
     }
 
     // Sync user_centres junction (required for batch scheduler dropdown)
-    if (facultyId && centreId) {
-      // Remove old centre assignments
+    // Sync user_centres junction (required for batch scheduler dropdown) — one
+    // row per selected centre; the first selected is the primary.
+    if (facultyId) {
       await supabase.from('user_centres').delete().eq('user_id', facultyId)
-      // Add new centre assignment (primary)
-      await supabase.from('user_centres').insert({
-        user_id: facultyId,
-        centre_id: centreId,
-        is_primary: true,
-      })
+      if (selectedCentreIds.length > 0) {
+        const rows = selectedCentreIds.map((centre_id, i) => ({
+          user_id: facultyId,
+          centre_id,
+          is_primary: i === 0,
+        }))
+        const { error: ucError } = await supabase.from('user_centres').insert(rows)
+        if (ucError) { setMessage({ type: 'error', text: `Faculty saved but centre-linking failed: ${ucError.message}` }); setSaving(false); return }
+      }
     }
 
     setMessage({ type: 'success', text: editingId ? 'Faculty updated.' : 'Faculty added.' })
@@ -340,10 +363,10 @@ export default function ManageFacultyPage() {
     const matchesSearch =
       f.full_name.toLowerCase().includes(search.toLowerCase()) ||
       f.email.toLowerCase().includes(search.toLowerCase())
-    const matchesCentre = !filterCentre || f.centre_id === filterCentre
+    const facCentreIds = (facultyCentresMap.get(f.id) ?? []).map((c) => c.id)
+    const matchesCentre = !filterCentre || facCentreIds.includes(filterCentre) || f.centre_id === filterCentre
     return matchesSearch && matchesCentre
   })
-
   return (
     <div className="max-w-5xl">
       <div className="flex items-center justify-between mb-6">
@@ -410,20 +433,27 @@ export default function ManageFacultyPage() {
                 <option value="Hourly/Contract">Hourly/Contract</option>
               </select>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Centre</label>
-              <select
-                value={centreId}
-                onChange={(e) => setCentreId(e.target.value)}
-                className="w-full h-10 px-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="">Select centre</option>
+            <div className="col-span-2">
+              <label className="block text-xs font-medium text-gray-600 mb-2">Centre(s) taught at <span className="font-normal text-gray-400">— first selected becomes primary</span></label>
+              <div className="flex flex-wrap gap-2 border border-gray-200 rounded-lg p-3">
                 {centres.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
+                  <label
+                    key={c.id}
+                    className={`text-xs px-2.5 py-1 rounded-full border cursor-pointer ${selectedCentreIds.includes(c.id)
+                        ? 'bg-blue-50 border-blue-400 text-blue-700'
+                        : 'bg-white border-gray-300 text-gray-600'
+                      }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="hidden"
+                      checked={selectedCentreIds.includes(c.id)}
+                      onChange={() => toggleCentre(c.id)}
+                    />
+                    {c.name}{selectedCentreIds[0] === c.id && selectedCentreIds.length > 1 ? ' (primary)' : ''}
+                  </label>
                 ))}
-              </select>
+              </div>
             </div>
           </div>
 
@@ -440,11 +470,10 @@ export default function ManageFacultyPage() {
                       {progSubjects.map((s) => (
                         <label
                           key={s.id}
-                          className={`text-xs px-2.5 py-1 rounded-full border cursor-pointer ${
-                            selectedSubjectIds.includes(s.id)
+                          className={`text-xs px-2.5 py-1 rounded-full border cursor-pointer ${selectedSubjectIds.includes(s.id)
                               ? 'bg-blue-50 border-blue-400 text-blue-700'
                               : 'bg-white border-gray-300 text-gray-600'
-                          }`}
+                            }`}
                         >
                           <input
                             type="checkbox"
@@ -483,11 +512,10 @@ export default function ManageFacultyPage() {
 
       {message && (
         <div
-          className={`mb-4 p-3 rounded-lg text-sm ${
-            message.type === 'success'
+          className={`mb-4 p-3 rounded-lg text-sm ${message.type === 'success'
               ? 'bg-green-50 text-green-700 border border-green-200'
               : 'bg-red-50 text-red-700 border border-red-200'
-          }`}
+            }`}
         >
           {message.text}
         </div>
@@ -537,7 +565,7 @@ export default function ManageFacultyPage() {
                 <tr key={f.id} className="border-t border-gray-100">
                   <td className="px-4 py-3 font-medium text-gray-900">{f.full_name}</td>
                   <td className="px-4 py-3 text-gray-600">{f.email}</td>
-                  <td className="px-4 py-3 text-gray-600">{centres.find((c) => c.id === f.centre_id)?.name || '—'}</td>
+                  <td className="px-4 py-3 text-gray-600">{(facultyCentresMap.get(f.id) ?? []).map((c) => c.name).join(', ') || centres.find((c) => c.id === f.centre_id)?.name || '—'}</td>
                   <td className="px-4 py-3 text-gray-600 text-xs">{f.faculty_type || '—'}</td>
                   <td className="px-4 py-3 text-xs">
                     {currentRate(f.id) ? (
@@ -549,11 +577,10 @@ export default function ManageFacultyPage() {
                   </td>
                   <td className="px-4 py-3">
                     <span
-                      className={`text-xs px-2 py-0.5 rounded-full ${
-                        f.status === 'active'
+                      className={`text-xs px-2 py-0.5 rounded-full ${f.status === 'active'
                           ? 'bg-green-50 text-green-700'
                           : 'bg-gray-100 text-gray-500'
-                      }`}
+                        }`}
                     >
                       {f.status}
                     </span>

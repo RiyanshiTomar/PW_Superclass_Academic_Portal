@@ -204,18 +204,17 @@ export default function CreatePlanner() {
   // A real lecture needs BOTH Chapter & Topic. Leave both empty → future =
   // buffer, past = didn't happen. Partial (one filled) is an error.
   const rowError = (r: Draft): string => {
-    const hasChap = !!r.chapter.trim(), hasTop = !!r.topic_name.trim()
-    if (!hasChap && !hasTop) return '' // buffer / off-day — fine
-    if (hasChap !== hasTop) return 'Fill BOTH Chapter & Topic (or leave both empty)'
-    if (!r.faculty_id) return 'Faculty missing'
-    const cm = masterMap.get(r.subject_id)
-    if (cm && cm.size > 0) {
-      const topics = cm.get(norm(r.chapter))
-      if (!topics) return `Chapter "${r.chapter}" is not in this subject’s concept tags`
-      if (topics.size > 0 && !topics.has(norm(r.topic_name))) return `Topic "${r.topic_name}" is not under this chapter in concept tags`
-    }
-    return ''
+  const hasChap = !!r.chapter.trim(), hasTop = !!r.topic_name.trim()
+  if (!hasChap && !hasTop) return '' // buffer / off-day — fine
+  if (hasChap !== hasTop) return 'Fill BOTH Chapter & Topic (or leave both empty)'
+  if (!r.faculty_id) return 'Faculty missing'
+  const cm = masterMap.get(r.subject_id)
+  if (cm && cm.size > 0) {
+    const topics = cm.get(norm(r.chapter))
+    if (!topics) return `Chapter "${r.chapter}" is not in this subject's concept tags`
   }
+  return ''
+}
   // A note for empty rows (not an error): what the slot will become.
   const rowNote = (r: Draft): string => {
     if (r.chapter.trim() || r.topic_name.trim()) return ''

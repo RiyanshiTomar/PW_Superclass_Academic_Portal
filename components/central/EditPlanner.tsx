@@ -83,6 +83,9 @@ export default function EditPlanner() {
   const [conductKey, setConductKey] = useState<string | null>(null)
   const [conductDate, setConductDate] = useState('')
 
+  const [confirmKey, setConfirmKey] = useState<string | null>(null)
+  const [confirmDate, setConfirmDate] = useState('')
+
   const selected = planners.find((p) => p.id === selectedId) ?? null
   const todayISO = new Date().toISOString().split('T')[0]
 
@@ -378,15 +381,72 @@ export default function EditPlanner() {
       setConductKey(key); setConductDate(r?.planned_date && r.planned_date <= todayISO ? r.planned_date : todayISO)
       return
     }
-    // Just set the status — do NOT re-shuffle dates (that used to scramble the plan).
+    if (status === 'confirmed') {
+      const r = rows.find((x) => x.key === key)
+      setConfirmKey(key); setConfirmDate(r?.planned_date ?? todayISO)
+      return
+    }
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, status } : r)))
+  }
+
+  const resolveLiveSlot = (subjectId: string, faculty_id: string, date: string, excludeKey: string): { ok: boolean; error?: string } => {
+    if (!liveLinkId) return { ok: true }
+
+    let slot = liveSlotByDateRef.current.get(date)
+    if (!slot) {
+      const sched = liveSchedRef.current.get(subjectId)
+      const dow = new Date(date + 'T12:00:00').getDay()
+      const weekly = sched?.get(dow)
+      if (!weekly) return { ok: false, error: `No weekly class for ${subjName(subjectId)} on that day.` }
+      slot = { start_time: weekly.start, classroom_id: weekly.classroom, duration: weekly.duration }
+      liveSlotByDateRef.current.set(date, slot)
+    }
+    if (!slot.start_time) return { ok: true }
+
+    const start = toMinutes(slot.start_time.slice(0, 5))
+    const end = start + slot.duration
+
+    const testHit = (liveTestsRef.current.get(date) ?? []).some(([ts, te]) => start < te && end > ts)
+    if (testHit) return { ok: false, error: `A test is already scheduled in this slot on ${fmtDate(date)}.` }
+
+    if (faculty_id) {
+      for (const other of rows) {
+        if (other.key === excludeKey || other.faculty_id !== faculty_id || other.planned_date !== date) continue
+        const otherSlot = liveSlotByDateRef.current.get(other.planned_date) ?? (() => {
+          const sched = liveSchedRef.current.get(other.subject_id)
+          const dow = new Date(other.planned_date + 'T12:00:00').getDay()
+          const w = sched?.get(dow)
+          return w ? { start_time: w.start, classroom_id: w.classroom, duration: w.duration } : null
+        })()
+        if (!otherSlot?.start_time) continue
+        const os = toMinutes(otherSlot.start_time.slice(0, 5))
+        const oe = os + otherSlot.duration
+        if (start < oe && end > os) return { ok: false, error: `${facName(faculty_id)} already has ${subjName(other.subject_id)} at an overlapping time on ${fmtDate(date)}.` }
+      }
+    }
+    return { ok: true }
   }
 
   const applyConducted = () => {
     if (!conductKey || !conductDate) return
-    // Only this row changes (status + its final date). Nothing else moves.
-    setRows((prev) => prev.map((r) => (r.key === conductKey ? { ...r, status: 'conducted' as Status, planned_date: conductDate } : r)))
+    const r = rows.find((x) => x.key === conductKey)
+    if (r && conductDate !== r.planned_date) {
+      const check = resolveLiveSlot(r.subject_id, r.faculty_id, conductDate, conductKey)
+      if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
+    }
+    setRows((prev) => prev.map((row) => (row.key === conductKey ? { ...row, status: 'conducted' as Status, planned_date: conductDate } : row)))
     setConductKey(null); setConductDate('')
+  }
+
+  const applyConfirmed = () => {
+    if (!confirmKey || !confirmDate) return
+    const r = rows.find((x) => x.key === confirmKey)
+    if (r && confirmDate !== r.planned_date) {
+      const check = resolveLiveSlot(r.subject_id, r.faculty_id, confirmDate, confirmKey)
+      if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
+    }
+    setRows((prev) => prev.map((row) => (row.key === confirmKey ? { ...row, status: 'confirmed' as Status, planned_date: confirmDate } : row)))
+    setConfirmKey(null); setConfirmDate('')
   }
 
   // --- Drag reorder ---
@@ -439,17 +499,40 @@ export default function EditPlanner() {
       if (!r.chapter.trim()) return setMessage({ type: 'error', text: `${where}: chapter missing.` })
       if (!r.topic_name.trim()) return setMessage({ type: 'error', text: `${where}: topic is required.` })
       if (!r.planned_date) return setMessage({ type: 'error', text: `${where}: date required.` })
-      const cm = masterMap.get(r.subject_id)
-      if (cm && cm.size > 0) {
-        const topics = cm.get(norm(r.chapter))
-        if (topics && topics.size > 0 && !topics.has(norm(r.topic_name))) return setMessage({ type: 'error', text: `${where}: topic "${r.topic_name}" isn't under this chapter in the concept tags.` })
-      }
     }
     // ---- LIVE (per-batch) save — write straight to batch_planners, per row.
     // No delete-all + rebuild: we UPDATE each row by id, INSERT added rows, and
     // DELETE removed ones. This preserves faculty-approved reschedules and can
     // never scramble the plan the way a full rebuild could.
     if (liveLinkId) {
+      const timedRows = rows.filter((r) => r.faculty_id && liveSlotByDateRef.current.get(r.planned_date)?.start_time)
+      if (timedRows.length) {
+        const facultyIds = Array.from(new Set(timedRows.map((r) => r.faculty_id)))
+        const dates = Array.from(new Set(timedRows.map((r) => r.planned_date)))
+        const { data: busyRows, error: busyErr } = await supabase
+          .from('batch_planners')
+          .select('id, faculty_id, planned_date, start_time, duration_minutes, subject_id, subjects(name)')
+          .in('faculty_id', facultyIds)
+          .in('planned_date', dates)
+          .not('start_time', 'is', null)
+        if (busyErr) { setMessage({ type: 'error', text: `Could not verify faculty availability: ${busyErr.message}` }); return }
+        const ownIds = new Set(rows.map((r) => r.db_id).filter(Boolean))
+        for (const r of timedRows) {
+          const slot = liveSlotByDateRef.current.get(r.planned_date)!
+          const s = toMinutes(slot.start_time!.slice(0, 5))
+          const e = s + slot.duration
+          for (const b of (busyRows ?? []) as { id: string; faculty_id: string; planned_date: string; start_time: string; duration_minutes: number; subject_id: string | null; subjects: { name: string } | { name: string }[] | null }[]) {
+            if (ownIds.has(b.id) || b.faculty_id !== r.faculty_id || b.planned_date !== r.planned_date) continue
+            const bs = toMinutes(b.start_time.slice(0, 5))
+            const be = bs + b.duration_minutes
+            if (s < be && e > bs) {
+              const subjName2 = Array.isArray(b.subjects) ? b.subjects[0]?.name : b.subjects?.name
+              setMessage({ type: 'error', text: `Save blocked: ${facName(r.faculty_id)} already has ${subjName2 ?? 'a class'} in another batch at an overlapping time on ${fmtDate(r.planned_date)}.` })
+              return
+            }
+          }
+        }
+      }
       setSaving(true)
       const slotByDate = liveSlotByDateRef.current
       const batchId = filterBatch // live mode is only entered when this === link.batch_id
@@ -517,7 +600,7 @@ export default function EditPlanner() {
   const statusPill = (s: Status) =>
     s === 'conducted' ? 'bg-neutral-200 text-neutral-700 border-neutral-300'
       : s === 'confirmed' ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
-      : 'bg-white text-neutral-500 border-neutral-200'
+        : 'bg-white text-neutral-500 border-neutral-200'
   const rowTint = (s: Status) => (s === 'confirmed' ? 'bg-emerald-50/60 border-emerald-200' : s === 'conducted' ? 'bg-neutral-100/70 border-neutral-200' : 'bg-white border-neutral-200')
 
   return (
@@ -624,7 +707,20 @@ export default function EditPlanner() {
                       className={`flex flex-wrap md:flex-nowrap items-center gap-2 px-3 py-2.5 border-l-4 ${rowTint(r.status)} ${reorderMode === 'rows' && r.status !== 'conducted' ? 'cursor-grab' : ''}`}
                     >
                       {reorderMode === 'rows' && <span className="text-neutral-300 text-lg leading-none w-4 shrink-0">{r.status !== 'conducted' ? '⠿' : ''}</span>}
-                      <div className="w-[130px] shrink-0 text-xs font-semibold text-neutral-600">{fmtDate(r.planned_date)}{r.planned_date < todayISO && r.status !== 'conducted' && <span className="ml-1 text-rose-500" title="date is in the past">•</span>}</div>
+                      <input
+                        type="date"
+                        value={r.planned_date}
+                        disabled={r.status === 'conducted'}
+                        onChange={(e) => {
+                          const newDate = e.target.value
+                          if (!newDate) return
+                          const check = resolveLiveSlot(r.subject_id, r.faculty_id, newDate, r.key)
+                          if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
+                          updateRow(r.key, { planned_date: newDate })
+                        }}
+                        title={r.planned_date < todayISO && r.status !== 'conducted' ? 'This date is in the past' : ''}
+                        className={`w-[130px] shrink-0 h-9 px-2 border rounded-lg text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-violet-500 ${r.planned_date < todayISO && r.status !== 'conducted' ? 'border-rose-200 text-rose-600 bg-rose-50/40' : 'border-neutral-200 text-neutral-600 bg-white/70'}`}
+                      />
                       <input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(r.key, { topic_name: e.target.value })} placeholder="Topic taught" className="flex-1 min-w-[160px] h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
                       <select value={r.faculty_id} onChange={(e) => updateRow(r.key, { faculty_id: e.target.value })} className="w-[160px] shrink-0 h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
                         <option value="">Faculty…</option>
@@ -661,6 +757,20 @@ export default function EditPlanner() {
             <div className="flex gap-3">
               <BtnPrimary className="flex-1" onClick={applyConducted} disabled={!conductDate}>Mark conducted</BtnPrimary>
               <BtnSecondary className="flex-1" onClick={() => setConductKey(null)}>Cancel</BtnSecondary>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmKey && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-950/50 backdrop-blur-sm" onClick={() => setConfirmKey(null)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl border border-neutral-200" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-neutral-950 mb-1">Confirm this class</h3>
+            <p className="text-sm text-neutral-500 mb-4">Keep the current date, or move it to a new one — either way it'll be marked Confirmed.</p>
+            <input type="date" value={confirmDate} onChange={(e) => setConfirmDate(e.target.value)} className="w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 mb-4" />
+            <div className="flex gap-3">
+              <BtnPrimary className="flex-1" onClick={applyConfirmed} disabled={!confirmDate}>Confirm</BtnPrimary>
+              <BtnSecondary className="flex-1" onClick={() => setConfirmKey(null)}>Cancel</BtnSecondary>
             </div>
           </div>
         </div>

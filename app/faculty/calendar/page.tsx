@@ -22,8 +22,7 @@ type Lecture = {
   subjects: { name: string } | { name: string }[] | null
   classrooms: { name: string } | { name: string }[] | null
 }
-
-type ConceptChapter = { id: string; name: string; topics: { id: string; name: string }[] }
+type ConceptChapter = { id: string; name: string }
 
 function one<T>(v: T | T[] | null | undefined): T | null {
   if (!v) return null
@@ -111,13 +110,11 @@ export default function FacultyCalendarPage() {
     if (!subjectId) { setTagsLoading(false); return }
     const { data: chapterRows, error: chapterError } = await supabase.from('chapters').select('id, name, sequence_no').eq('subject_id', subjectId).order('sequence_no')
     if (chapterError || !chapterRows?.length) { setTagsLoading(false); return }
-    const { data: topicRows } = await supabase.from('topics').select('id, chapter_id, name, sequence_no').in('chapter_id', chapterRows.map((chapter) => chapter.id)).order('sequence_no')
-    const chapters = chapterRows.map((chapter) => ({ id: chapter.id, name: chapter.name, topics: (topicRows ?? []).filter((topic) => topic.chapter_id === chapter.id).map((topic) => ({ id: topic.id, name: topic.name })) }))
+    const chapters = chapterRows.map((chapter) => ({ id: chapter.id, name: chapter.name }))
     setConceptChapters(chapters)
     const matchingChapter = chapters.find((chapter) => chapter.name.trim().toLowerCase() === initialChapter.trim().toLowerCase())
-    const matchingTopic = matchingChapter?.topics.find((topic) => topic.name.trim().toLowerCase() === initialTopic.trim().toLowerCase())
     setExtraChapter(matchingChapter?.name ?? '')
-    setExtraTopic(matchingTopic?.name ?? '')
+    setExtraTopic(initialTopic.trim())
     setTagsLoading(false)
   }
 
@@ -180,34 +177,29 @@ export default function FacultyCalendarPage() {
     setSelected(null)
     const sentMsg = mode === 'cancel' ? 'Cancellation request sent to Central Team.'
       : mode === 'extra' ? 'Extra-class request sent to Central Team.'
-      : mode === 'prepone' ? 'Prepone-chapter request sent to Central Team.'
-      : 'Reschedule request sent to Central Team.'
+        : mode === 'prepone' ? 'Prepone-chapter request sent to Central Team.'
+          : 'Reschedule request sent to Central Team.'
     setMessage({ type: 'success', text: sentMsg })
     await loadData()
   }
-
   const inputClass = 'w-full h-10 px-3 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500'
-  const selectedChapter = conceptChapters.find((chapter) => chapter.name === extraChapter)
   const needsTeachingTags = mode === 'reschedule' || mode === 'extra'
-  const canSend = !submitting && !!reason.trim() && !tagsLoading && (!needsTeachingTags || (!!extraChapter && !!extraTopic)) && (mode !== 'prepone' || !!extraChapter) && (!(mode === 'reschedule' || mode === 'extra') || !!newDate)
+  const canSend = !submitting && !!reason.trim() && !tagsLoading && (!needsTeachingTags || (!!extraChapter && !!extraTopic.trim())) && (mode !== 'prepone' || !!extraChapter) && (!(mode === 'reschedule' || mode === 'extra') || !!newDate)
   const TeachingTags = () => (
     <div className="grid grid-cols-2 gap-3 mb-3 rounded-lg border border-violet-100 bg-violet-50/40 p-3">
-      <div className="col-span-2 text-xs font-semibold text-violet-800">What will you teach in this class? <span className="font-normal text-neutral-500">Choose only from this subject&apos;s Concept Tags.</span></div>
+      <div className="col-span-2 text-xs font-semibold text-violet-800">What will you teach in this class? <span className="font-normal text-neutral-500">Chapter is from Concept Tags; type the topic you&apos;ll cover.</span></div>
       <div>
         <label className="block text-xs font-medium text-neutral-500 mb-1">Chapter</label>
-        <select value={extraChapter} onChange={(e) => { setExtraChapter(e.target.value); setExtraTopic('') }} className={inputClass} disabled={tagsLoading || conceptChapters.length === 0}>
+        <select value={extraChapter} onChange={(e) => setExtraChapter(e.target.value)} className={inputClass} disabled={tagsLoading || conceptChapters.length === 0}>
           <option value="">{tagsLoading ? 'Loading chapters...' : conceptChapters.length ? 'Select chapter' : 'No Concept Tags available'}</option>
           {conceptChapters.map((chapter) => <option key={chapter.id} value={chapter.name}>{chapter.name}</option>)}
         </select>
       </div>
       <div>
         <label className="block text-xs font-medium text-neutral-500 mb-1">Topic</label>
-        <select value={extraTopic} onChange={(e) => setExtraTopic(e.target.value)} className={inputClass} disabled={!selectedChapter || tagsLoading}>
-          <option value="">{selectedChapter ? 'Select topic' : 'Select chapter first'}</option>
-          {selectedChapter?.topics.map((topic) => <option key={topic.id} value={topic.name}>{topic.name}</option>)}
-        </select>
+        <input type="text" value={extraTopic} onChange={(e) => setExtraTopic(e.target.value)} className={inputClass} placeholder="What will you teach?" disabled={!extraChapter} />
       </div>
-      {!tagsLoading && conceptChapters.length === 0 && <p className="col-span-2 text-xs text-amber-700">No Concept Tags exist for this subject. Ask an admin to add its chapters and topics before sending this request.</p>}
+      {!tagsLoading && conceptChapters.length === 0 && <p className="col-span-2 text-xs text-amber-700">No Concept Tags exist for this subject. Ask an admin to add its chapters before sending this request.</p>}
     </div>
   )
 
@@ -243,9 +235,8 @@ export default function FacultyCalendarPage() {
               return (
                 <div
                   key={i}
-                  className={`min-h-[100px] rounded-xl border p-1.5 transition-all duration-300 hover:shadow-md ${
-                    isToday ? 'border-violet-400 bg-violet-50/50 ring-2 ring-violet-300/50' : 'border-neutral-200 bg-white/80 hover:border-violet-200'
-                  }`}
+                  className={`min-h-[100px] rounded-xl border p-1.5 transition-all duration-300 hover:shadow-md ${isToday ? 'border-violet-400 bg-violet-50/50 ring-2 ring-violet-300/50' : 'border-neutral-200 bg-white/80 hover:border-violet-200'
+                    }`}
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span className={`grid h-5 min-w-5 place-items-center rounded-full px-1 text-xs font-bold ${isToday ? 'bg-violet-600 text-white' : 'text-neutral-400'}`}>{dayNum}</span>
@@ -343,55 +334,55 @@ export default function FacultyCalendarPage() {
 
             {mode === 'reschedule' && (
               <>
-              <div className="grid grid-cols-2 gap-3 mb-3">
-                <div>
-                  <label className="block text-xs font-medium text-neutral-500 mb-1">New Date</label>
-                  <input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} className={inputClass} />
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-500 mb-1">New Date</label>
+                    <input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-500 mb-1">New Time</label>
+                    <input type="time" value={newTime} onChange={(e) => setNewTime(e.target.value)} className={inputClass} />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs font-medium text-neutral-500 mb-1">New Time</label>
-                  <input type="time" value={newTime} onChange={(e) => setNewTime(e.target.value)} className={inputClass} />
-                </div>
-              </div>
-              <TeachingTags />
+                <TeachingTags />
               </>
             )}
 
             {mode === 'prepone' && (
-  <div className="mb-3 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm">
-    <label className="block text-xs font-medium text-neutral-600 mb-1">Chapter from Concept Tags</label>
-    <select value={extraChapter} onChange={(e) => { setExtraChapter(e.target.value); setExtraTopic('') }} className={inputClass} disabled={tagsLoading || conceptChapters.length === 0}>
-      <option value="">{tagsLoading ? 'Loading chapters...' : conceptChapters.length ? 'Select chapter' : 'No Concept Tags available'}</option>
-      {conceptChapters.map((chapter) => <option key={chapter.id} value={chapter.name}>{chapter.name}</option>)}
-    </select>
-    <p className="text-neutral-700 mt-2">
-      Prepone the <b>whole chapter</b>{' '}
-      {extraChapter ? <span className="font-semibold text-sky-700">"{extraChapter}"</span> : <span className="text-neutral-400">(select a chapter above)</span>}
-      {' '}({one(selected.subjects)?.name}).
-    </p>
-    <p className="text-xs text-neutral-500 mt-1">Individual topics can&apos;t be preponed — the entire chapter&apos;s remaining classes move up to the next available dates, and the other upcoming chapters slide after it.</p>
-  </div>
-)}
+              <div className="mb-3 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm">
+                <label className="block text-xs font-medium text-neutral-600 mb-1">Chapter from Concept Tags</label>
+                <select value={extraChapter} onChange={(e) => { setExtraChapter(e.target.value); setExtraTopic('') }} className={inputClass} disabled={tagsLoading || conceptChapters.length === 0}>
+                  <option value="">{tagsLoading ? 'Loading chapters...' : conceptChapters.length ? 'Select chapter' : 'No Concept Tags available'}</option>
+                  {conceptChapters.map((chapter) => <option key={chapter.id} value={chapter.name}>{chapter.name}</option>)}
+                </select>
+                <p className="text-neutral-700 mt-2">
+                  Prepone the <b>whole chapter</b>{' '}
+                  {extraChapter ? <span className="font-semibold text-sky-700">"{extraChapter}"</span> : <span className="text-neutral-400">(select a chapter above)</span>}
+                  {' '}({one(selected.subjects)?.name}).
+                </p>
+                <p className="text-xs text-neutral-500 mt-1">Individual topics can&apos;t be preponed — the entire chapter&apos;s remaining classes move up to the next available dates, and the other upcoming chapters slide after it.</p>
+              </div>
+            )}
 
             {mode === 'extra' && (
-  <>
-  <div className="grid grid-cols-3 gap-3 mb-3">
-    <div>
-      <label className="block text-xs font-medium text-neutral-500 mb-1">Date</label>
-      <input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} className={inputClass} />
-    </div>
-    <div>
-      <label className="block text-xs font-medium text-neutral-500 mb-1">Time</label>
-      <input type="time" value={newTime} onChange={(e) => setNewTime(e.target.value)} className={inputClass} />
-    </div>
-    <div>
-      <label className="block text-xs font-medium text-neutral-500 mb-1">Mins</label>
-      <input type="number" min={15} max={480} value={newDuration} onChange={(e) => setNewDuration(e.target.value)} className={inputClass} />
-    </div>
-  </div>
-  <TeachingTags />
-  </>
-)}
+              <>
+                <div className="grid grid-cols-3 gap-3 mb-3">
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-500 mb-1">Date</label>
+                    <input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-500 mb-1">Time</label>
+                    <input type="time" value={newTime} onChange={(e) => setNewTime(e.target.value)} className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-500 mb-1">Mins</label>
+                    <input type="number" min={15} max={480} value={newDuration} onChange={(e) => setNewDuration(e.target.value)} className={inputClass} />
+                  </div>
+                </div>
+                <TeachingTags />
+              </>
+            )}
 
             <div className="mb-4">
               <label className="block text-xs font-medium text-neutral-500 mb-1">Reason</label>
@@ -402,10 +393,10 @@ export default function FacultyCalendarPage() {
               {mode === 'cancel'
                 ? 'On approval, this class is removed and later lectures of the planner slide up to fill the gap.'
                 : mode === 'extra'
-                ? 'On approval, one extra class is added on this same topic (same batch, subject & room). Nothing else shifts.'
-                : mode === 'prepone'
-                ? 'On approval, this whole chapter moves to the front of the subject’s upcoming classes; the other upcoming chapters slide after it (dates stay in order, no overlap).'
-                : 'On approval, this class moves forward and this subject’s later lectures shift to the next class-dates.'}
+                  ? 'On approval, one extra class is added on this same topic (same batch, subject & room). Nothing else shifts.'
+                  : mode === 'prepone'
+                    ? 'On approval, this whole chapter moves to the front of the subject’s upcoming classes; the other upcoming chapters slide after it (dates stay in order, no overlap).'
+                    : 'On approval, this class moves forward and this subject’s later lectures shift to the next class-dates.'}
             </p>
 
             <div className="flex gap-3">

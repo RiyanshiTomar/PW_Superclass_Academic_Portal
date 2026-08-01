@@ -176,18 +176,17 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
     return dayBounds[dow] ?? null
   }
 
-  const usingPlanner = planRows.length > 0
+  // Active class days come straight from the BATCH SCHEDULE: every day in the
+  // window whose weekday is one the batch has classes on. Simple and effective —
+  // the schedule is the source of truth for when this batch meets.
   const activeDatesAll = useMemo(() => {
     const set = new Set<string>()
-    const today = iso(todayNoon())
-    if (planRows.length) {
-      for (const p of planRows) if (p.planned_date <= today) set.add(p.planned_date)
-    } else if (weekdays.size) {
-      const base = todayNoon()
+    const base = todayNoon()
+    if (weekdays.size) {
       for (let i = 0; i < 95; i++) { const d = new Date(base.getTime() - i * 86400000); if (weekdays.has(d.getDay())) set.add(iso(d)) }
     }
     return Array.from(set).sort().reverse()
-  }, [planRows, weekdays])
+  }, [weekdays])
 
   const datesInWindow = (n: number) => {
     const cutoff = iso(new Date(todayNoon().getTime() - (n - 1) * 86400000))
@@ -243,13 +242,24 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, planRows, scheds, windowDays, students])
 
+  // Group a flat instance list into one entry per student (unique), newest first.
+  const groupByStudent = (items: Instance[]) => {
+    const m = new Map<string, { regno: string; name: string; items: Instance[] }>()
+    for (const it of items) {
+      if (!m.has(it.regno)) m.set(it.regno, { regno: it.regno, name: it.name, items: [] })
+      m.get(it.regno)!.items.push(it)
+    }
+    for (const g of m.values()) g.items.sort((a, b) => b.date.localeCompare(a.date))
+    return Array.from(m.values()).sort((a, b) => b.items.length - a.items.length || (a.name || '').localeCompare(b.name || ''))
+  }
+
   const categories = [
-    { key: 'absent', label: 'Absentees', sub: 'Full day absent', items: analysis.cat.absent, timed: false },
+    { key: 'absent', label: 'Absentees', sub: 'Students absent ≥ 1 day', items: analysis.cat.absent, timed: false },
     { key: 'late', label: 'Late Punch In', sub: 'After batch start', items: analysis.cat.late, timed: true },
     { key: 'early', label: 'Early Punch Out', sub: 'Before batch end', items: analysis.cat.early, timed: true },
     { key: 'missedIn', label: 'Missed Check-in', sub: 'Out punched, no in', items: analysis.cat.missedIn, timed: true },
     { key: 'missedOut', label: 'Missed Check-out', sub: 'In punched, no out', items: analysis.cat.missedOut, timed: true },
-  ]
+  ].map((c) => ({ ...c, grouped: groupByStudent(c.items), students: new Set(c.items.map((i) => i.regno)).size }))
 
   const centreName = (id: string) => centres.find((c) => c.id === id)?.name ?? ''
   const chip = 'inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold'
@@ -305,7 +315,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
       ) : roster.length === 0 ? (
         <Alert type="info">No students assigned to this batch yet — the Branch Head assigns them under Students. Attendance is measured against the batch’s assigned students.</Alert>
       ) : activeDatesAll.length === 0 ? (
-        <Alert type="info">No planner (or weekly schedule) found for this batch, so there are no class days to measure against. Create the batch’s planner first.</Alert>
+        <Alert type="info">This batch has no weekly schedule, so there are no class days to measure against. Set up the batch’s schedule (Batch Scheduler) first.</Alert>
       ) : (
         <div className="space-y-6">
           {/* Summary tiles */}
@@ -323,8 +333,8 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
               <div className="text-xs font-medium text-sky-900/60 mt-1">Active class days · {windowDays}d</div>
             </div>
             <div className={`${tile} border-rose-100 bg-gradient-to-br from-rose-50 to-white`}>
-              <div className="text-3xl font-black text-rose-600">{analysis.cat.absent.length}</div>
-              <div className="text-xs font-medium text-rose-900/60 mt-1">Absentee instances · {windowDays}d</div>
+              <div className="text-3xl font-black text-rose-600">{new Set(analysis.cat.absent.map((i) => i.regno)).size}</div>
+              <div className="text-xs font-medium text-rose-900/60 mt-1">Absent students · {windowDays}d{analysis.cat.absent.length ? ` · ${analysis.cat.absent.length} day-misses` : ''}</div>
             </div>
           </div>
 
@@ -337,7 +347,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
                 return <span key={w} className={`${chip} ${p == null ? 'bg-neutral-100 text-neutral-400' : p >= 75 ? 'bg-emerald-50 text-emerald-700' : p >= 50 ? 'bg-amber-50 text-amber-700' : 'bg-rose-50 text-rose-700'}`}>{w}d: <b className="ml-1">{p == null ? '—' : p + '%'}</b></span>
               })}
             </div>
-            <p className="text-xs text-neutral-400 mt-3">{usingPlanner ? 'Class days derived from this batch’s planner.' : 'No planner attached — falling back to the weekly schedule for class days.'}</p>
+            <p className="text-xs text-neutral-400 mt-3">Class days come from this batch’s weekly schedule (the days it has classes).</p>
           </Card>
 
           {/* Issue categories */}
@@ -352,9 +362,9 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
                 const active = openCat === c.key
                 return (
                   <button key={c.key} onClick={() => setOpenCat(active ? null : c.key)} className={`${tile} text-left transition-all ${st.tile} ${active ? 'ring-2 ring-violet-400' : 'hover:shadow-md'}`}>
-                    <div className={`text-3xl font-black ${st.num}`}>{c.items.length}</div>
+                    <div className={`text-3xl font-black ${st.num}`}>{c.students}</div>
                     <div className="text-sm font-semibold text-neutral-800 mt-1">{c.label}</div>
-                    <div className={`text-[11px] ${st.label}`}>{c.sub}</div>
+                    <div className={`text-[11px] ${st.label}`}>{c.sub}{c.items.length !== c.students ? ` · ${c.items.length} day-misses` : ''}</div>
                   </button>
                 )
               })}
@@ -368,9 +378,9 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
                   <div className="px-5 py-3 border-b border-neutral-100 flex items-center gap-2">
                     <span className={`h-2.5 w-2.5 rounded-full ${st.pill}`} />
                     <h5 className="font-semibold text-neutral-950">{c.label}</h5>
-                    <span className="text-xs text-neutral-400">· {c.items.length} instance(s) in last {windowDays}d</span>
+                    <span className="text-xs text-neutral-400">· {c.students} student(s){c.items.length !== c.students ? `, ${c.items.length} day(s)` : ''} in last {windowDays}d</span>
                   </div>
-                  {c.items.length === 0 ? (
+                  {c.grouped.length === 0 ? (
                     <p className="p-6 text-sm text-neutral-400">None 🎉</p>
                   ) : (
                     <div className="overflow-x-auto">
@@ -379,17 +389,25 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
                           <tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider">
                             <th className="px-5 py-2 font-semibold">Student</th>
                             <th className="px-3 py-2 font-semibold">Reg no.</th>
-                            <th className="px-3 py-2 font-semibold">Date</th>
-                            {c.timed && <th className="px-3 py-2 font-semibold">Punch</th>}
+                            <th className="px-3 py-2 font-semibold">{c.key === 'absent' ? 'Days absent' : 'Days'}</th>
+                            <th className="px-3 py-2 font-semibold">{c.timed ? 'Dates & punches' : 'Dates'}</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-neutral-100">
-                          {c.items.map((it, i) => (
-                            <tr key={`${it.regno}|${it.date}|${i}`} className="hover:bg-neutral-50/60">
-                              <td className="px-5 py-2 font-medium text-neutral-900">{it.name || '—'}</td>
-                              <td className="px-3 py-2 font-mono text-xs text-neutral-500">{it.regno}</td>
-                              <td className="px-3 py-2 text-neutral-600">{fmtDate(it.date)}</td>
-                              {c.timed && <td className="px-3 py-2 text-neutral-500">{it.at ?? '—'}</td>}
+                          {c.grouped.map((g) => (
+                            <tr key={g.regno} className="hover:bg-neutral-50/60 align-top">
+                              <td className="px-5 py-2 font-medium text-neutral-900">{g.name || '—'}</td>
+                              <td className="px-3 py-2 font-mono text-xs text-neutral-500">{g.regno}</td>
+                              <td className="px-3 py-2 font-bold text-neutral-700">{g.items.length}</td>
+                              <td className="px-3 py-2 text-neutral-600">
+                                <div className="flex flex-wrap gap-1.5">
+                                  {g.items.map((it, i) => (
+                                    <span key={`${it.date}|${i}`} className="inline-flex items-center gap-1 bg-neutral-100 rounded px-2 py-0.5 text-xs">
+                                      {fmtDate(it.date)}{c.timed && it.at ? <span className="text-neutral-400">· {it.at}</span> : null}
+                                    </span>
+                                  ))}
+                                </div>
+                              </td>
                             </tr>
                           ))}
                         </tbody>

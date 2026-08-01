@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { cascadeCancel, addExtraLecture, preponeChapter } from '@/lib/planners'
-import { rescheduleTest, shiftSubjectForward } from '@/lib/tests'
+import { rescheduleTest, validateTestSlot } from '@/lib/tests'
 import { freeFacultyForSlot } from '@/lib/scheduling'
 import { notify } from '@/lib/notifications'
 import { toMinutes } from '@/lib/utils'
@@ -124,23 +124,14 @@ export default function RescheduleRequestsPage() {
     // Apply the change to the planner first (cascade), so we don't mark it
     // approved if the shift would create an overlap.
     if (req.planner_id) {
-      const needsConceptTags = isExtra(req) || isPrepone(req) || (!isCancellation(req) && !isTest(req))
-      if (needsConceptTags) {
-        const { data: context } = await supabase.from('batch_planners').select('subject_id').eq('id', req.planner_id).single<{ subject_id: string | null }>()
-        if (!context?.subject_id || !req.extra_chapter || (isPrepone(req) ? false : !req.extra_topic)) {
-          setReviewingId(null)
-          setMessage({ type: 'error', text: 'This request is missing its required Concept Tag chapter/topic.' })
-          return
-        }
-        const { data: chapter } = await supabase.from('chapters').select('id').eq('subject_id', context.subject_id).eq('name', req.extra_chapter).maybeSingle<{ id: string }>()
-        const topicResult = chapter && !isPrepone(req)
-          ? await supabase.from('topics').select('id').eq('chapter_id', chapter.id).eq('name', req.extra_topic!).maybeSingle<{ id: string }>()
-          : null
-        if (!chapter || (!isPrepone(req) && !topicResult?.data)) {
-          setReviewingId(null)
-          setMessage({ type: 'error', text: 'The selected chapter/topic is not in this subject’s Concept Tags. Ask the faculty to submit a fresh request.' })
-          return
-        }
+      // Light presence check only — topics are NOT validated against Concept Tags
+      // (they don't live there); prepone needs a chapter, reschedule/extra need a
+      // topic (chapter optional for demo/doubt classes).
+      if (isPrepone(req) && !req.extra_chapter) {
+        setReviewingId(null); setMessage({ type: 'error', text: 'This prepone request has no chapter.' }); return
+      }
+      if (!isPrepone(req) && !isCancellation(req) && !isTest(req) && !req.extra_topic) {
+        setReviewingId(null); setMessage({ type: 'error', text: 'This request is missing its topic.' }); return
       }
       let result: { ok: boolean; error?: string }
       if (isExtra(req)) {
@@ -151,29 +142,37 @@ export default function RescheduleRequestsPage() {
       } else if (isCancellation(req)) {
         result = await cascadeCancel(supabase, req.planner_id)
       } else if (isPrepone(req)) {
-        // Prepone the WHOLE chapter: its upcoming lectures move to the front of
-        // the subject's upcoming class-dates; other chapters slide after.
+        // Prepone the WHOLE chapter from the faculty's chosen start date: its
+        // classes move to the front of the subject's class-dates from there.
         const today = new Date().toISOString().split('T')[0]
+        const fromDate = req.requested_date || today
         const { data: lec } = await supabase.from('batch_planners').select('batch_id, subject_id, chapter').eq('id', req.planner_id).single<{ batch_id: string; subject_id: string | null; chapter: string }>()
         const chapter = req.extra_chapter || lec?.chapter || ''
         if (!lec?.batch_id || !lec?.subject_id || !chapter) {
           result = { ok: false, error: 'Could not find the chapter to prepone.' }
         } else {
-          const r = await preponeChapter(supabase, lec.batch_id, lec.subject_id, chapter, today)
+          const r = await preponeChapter(supabase, lec.batch_id, lec.subject_id, chapter, fromDate)
           result = r.ok ? { ok: true } : { ok: false, error: r.error }
         }
       } else {
-        // Reschedule = SHIFT the planner forward. This subject's lecture on the
-        // original date, and every later one, each slides to the subject's NEXT
-        // scheduled class-date (re-inheriting that slot's time & room). Because
-        // it rides the subject's own valid slots, it can NEVER overlap — the old
-        // "move to an arbitrary date" approach is what caused overlap failures.
-        const { data: lec } = await supabase.from('batch_planners').select('batch_id, subject_id, planned_date').eq('id', req.planner_id).single<{ batch_id: string; subject_id: string | null; planned_date: string }>()
-        if (!lec?.batch_id || !lec?.subject_id) {
-          result = { ok: false, error: 'Could not find the lecture to reschedule.' }
+        // Reschedule = move THIS class to the faculty's chosen slot (they picked
+        // an overlap-free slot). Re-validate batch/faculty/room, then move only
+        // this lecture (keeping its room), applying any edited topic/chapter.
+        const { data: lec } = await supabase.from('batch_planners').select('batch_id, subject_id, faculty_id, classroom_id, duration_minutes').eq('id', req.planner_id).single<{ batch_id: string; subject_id: string | null; faculty_id: string | null; classroom_id: string | null; duration_minutes: number }>()
+        if (!lec?.batch_id || !req.requested_date || !req.requested_start_time) {
+          result = { ok: false, error: 'Could not find the lecture or the requested slot.' }
         } else {
-          const moved = await shiftSubjectForward(supabase, lec.batch_id, lec.subject_id, lec.planned_date)
-          result = moved > 0 ? { ok: true } : { ok: false, error: 'Could not shift — this subject has no scheduled class-days. Add its weekly slot first.' }
+          const startTime = req.requested_start_time.slice(0, 5)
+          const clash = await validateTestSlot(supabase, { batchId: lec.batch_id, facultyId: lec.faculty_id, classroomId: lec.classroom_id, date: req.requested_date, startTime, durationMinutes: lec.duration_minutes })
+          if (clash) {
+            result = { ok: false, error: `That slot is no longer free: ${clash}` }
+          } else {
+            const patch: Record<string, unknown> = { planned_date: req.requested_date, start_time: req.requested_start_time }
+            if (req.extra_chapter?.trim()) patch.chapter = req.extra_chapter.trim()
+            if (req.extra_topic?.trim()) patch.topic_name = req.extra_topic.trim()
+            const { error } = await supabase.from('batch_planners').update(patch).eq('id', req.planner_id)
+            result = error ? { ok: false, error: error.message } : { ok: true }
+          }
         }
       }
       if (!result.ok) {
@@ -192,7 +191,7 @@ export default function RescheduleRequestsPage() {
     setReviewNotes('')
     if (error) { setMessage({ type: 'error', text: 'Failed to record approval: ' + error.message }); return }
     await notify(supabase, req.requested_by, { type: 'reschedule', title: 'Request approved', body: 'Your request was approved by Central.', link: isTest(req) ? '/faculty/tests' : '/faculty/calendar' })
-    setMessage({ type: 'success', text: isTest(req) ? 'Approved — test moved to the new slot.' : isExtra(req) ? 'Approved — extra class added to the faculty calendar.' : isPrepone(req) ? 'Approved — chapter preponed; other chapters slid after it.' : isCancellation(req) ? 'Cancelled — later lectures shifted up.' : 'Approved — planner updated and subsequent lectures shifted.' })
+    setMessage({ type: 'success', text: isTest(req) ? 'Approved — test moved to the new slot.' : isExtra(req) ? 'Approved — extra class added to the faculty calendar.' : isPrepone(req) ? 'Approved — chapter preponed; other chapters slid after it.' : isCancellation(req) ? 'Cancelled — later lectures shifted up.' : 'Approved — class moved to the requested slot.' })
     loadRequests()
   }
 

@@ -164,6 +164,23 @@ export default function FacultyPlannersPage() {
   const subjName = (v: MyLecture['subjects']) => one(v)?.name ?? '—'
   const inputCls = 'w-full h-8 px-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500'
 
+  // Group a batch's classes by (subject → chapter) so every topic of a chapter
+  // shows together, even if their dates differ. Chapters ordered by earliest date.
+  const groupsOf = (lectures: MyLecture[]) => {
+    const map = new Map<string, { subject: string; chapter: string; rows: MyLecture[] }>()
+    for (const l of lectures) {
+      const subject = subjName(l.subjects)
+      const chapter = (l.chapter ?? '').trim() || '—'
+      const key = `${subject}||${chapter}`
+      if (!map.has(key)) map.set(key, { subject, chapter, rows: [] })
+      map.get(key)!.rows.push(l)
+    }
+    const groups = Array.from(map.values())
+    for (const g of groups) g.rows.sort((a, b) => a.planned_date.localeCompare(b.planned_date))
+    groups.sort((a, b) => (a.rows[0]?.planned_date ?? '').localeCompare(b.rows[0]?.planned_date ?? ''))
+    return groups
+  }
+
   return (
     <div className="max-w-5xl mx-auto">
       <PageHeader title="My Planners" description="Your whole planner, batch by batch. For each class, confirm you taught that topic on that date — or edit the topic/chapter to what you actually taught, and the planner updates. Need an extra class or to move one? Raise a request from your Calendar; Central approves and the plan shifts." />
@@ -201,41 +218,50 @@ export default function FacultyPlannersPage() {
                   </div>
 
                   {open && (
-                    <div className="mt-3 border-t border-neutral-100 pt-3 overflow-x-auto">
-                      <table className="w-full text-left text-sm min-w-[760px]">
-                        <thead><tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider">
-                          <th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Subject</th>
-                          <th className="px-3 py-2 min-w-[180px]">Topic (taught)</th><th className="px-3 py-2 min-w-[150px]">Chapter</th><th className="px-3 py-2 text-right">Confirm</th>
-                        </tr></thead>
-                        <tbody className="divide-y divide-neutral-100">
-                          {bg.lectures.map((l) => {
-                            const e = edits[l.id] ?? { topic_name: l.topic_name, chapter: l.chapter }
-                            const past = l.planned_date <= todayISO
-                            return (
-                            <tr key={l.id} className={l.stage === 'Faculty Assigned' ? 'bg-amber-50/30' : ''}>
-                              <td className="px-3 py-2 whitespace-nowrap">
-                                {new Date(l.planned_date).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}
-                                {!past && <span className="ml-1 text-[10px] text-sky-600 font-semibold">upcoming</span>}
-                              </td>
-                              <td className="px-3 py-2 text-neutral-500 whitespace-nowrap">{formatTime(l.start_time)}</td>
-                              <td className="px-3 py-2 text-neutral-600 whitespace-nowrap">{subjName(l.subjects)}</td>
-                              <td className="px-3 py-2"><input value={e.topic_name} onChange={(ev) => setEdit(l.id, { topic_name: ev.target.value })} className={inputCls} placeholder="Topic taught" /></td>
-                              <td className="px-3 py-2"><input value={e.chapter} onChange={(ev) => setEdit(l.id, { chapter: ev.target.value })} className={inputCls} placeholder="Chapter" /></td>
-                              <td className="px-3 py-2 text-right whitespace-nowrap">
-                                {l.stage === 'Faculty Assigned' ? (
-                                  <button onClick={() => saveOne(l, true)} disabled={busy} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Confirm</button>
-                                ) : isDirty(l) ? (
-                                  <button onClick={() => saveOne(l, false)} disabled={busy} className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Save</button>
-                                ) : (
-                                  <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 ${stageBadgeClass(l.stage)}`}>{l.stage === 'Confirmed' ? 'Confirmed' : l.stage}</span>
-                                )}
-                              </td>
-                            </tr>
-                            )
-                          })}
-                        </tbody>
-                      </table>
-                      <p className="text-[11px] text-neutral-400 mt-2">Edit the topic/chapter to what you actually taught, then Confirm — the planner updates automatically. To add an extra class (uses the buffer) or move a class, raise a request from your <b>Calendar</b>; once Central approves, the plan shifts.</p>
+                    <div className="mt-3 border-t border-neutral-100 pt-3 space-y-4">
+                      {groupsOf(bg.lectures).map((g) => (
+                        <div key={`${g.subject}||${g.chapter}`} className="border border-neutral-200 rounded-xl overflow-hidden">
+                          <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 bg-neutral-50 border-b border-neutral-200">
+                            <span className="font-bold text-neutral-950">{g.chapter}</span>
+                            <span className="text-xs text-neutral-400">{g.subject} · {g.rows.length} topic{g.rows.length === 1 ? '' : 's'}</span>
+                          </div>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-left text-sm min-w-[620px]">
+                              <thead><tr className="bg-white text-neutral-500 text-xs uppercase tracking-wider">
+                                <th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th>
+                                <th className="px-3 py-2 min-w-[220px]">Topic (taught)</th><th className="px-3 py-2 text-right">Confirm</th>
+                              </tr></thead>
+                              <tbody className="divide-y divide-neutral-100">
+                                {g.rows.map((l) => {
+                                  const e = edits[l.id] ?? { topic_name: l.topic_name, chapter: l.chapter }
+                                  const past = l.planned_date <= todayISO
+                                  const conducted = l.planned_date < todayISO
+                                  return (
+                                    <tr key={l.id} className={l.stage === 'Faculty Assigned' ? 'bg-amber-50/30' : ''}>
+                                      <td className="px-3 py-2 whitespace-nowrap">
+                                        {new Date(l.planned_date).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}
+                                        {!past && <span className="ml-1 text-[10px] text-sky-600 font-semibold">upcoming</span>}
+                                      </td>
+                                      <td className="px-3 py-2 text-neutral-500 whitespace-nowrap">{formatTime(l.start_time)}</td>
+                                      <td className="px-3 py-2"><input value={e.topic_name} onChange={(ev) => setEdit(l.id, { topic_name: ev.target.value })} className={inputCls} placeholder="Topic taught" /></td>
+                                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                                        {l.stage === 'Faculty Assigned' ? (
+                                          <button onClick={() => saveOne(l, true)} disabled={busy} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Confirm</button>
+                                        ) : isDirty(l) ? (
+                                          <button onClick={() => saveOne(l, false)} disabled={busy} className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Save</button>
+                                        ) : (
+                                          <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 ${l.stage === 'Confirmed' && conducted ? 'bg-neutral-100 text-neutral-600 ring-neutral-300' : stageBadgeClass(l.stage)}`}>{l.stage === 'Confirmed' ? (conducted ? 'Conducted' : 'Confirmed') : l.stage}</span>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  )
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      ))}
+                      <p className="text-[11px] text-neutral-400">Classes are grouped by chapter (all its topics together, whatever their dates). Edit the topic to what you actually taught, then Confirm — the planner updates. To add an extra/demo class or move one, raise a request from your <b>Calendar</b>; once Central approves, the plan shifts.</p>
                     </div>
                   )}
                 </Card>

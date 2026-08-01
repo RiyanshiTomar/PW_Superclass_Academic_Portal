@@ -509,7 +509,6 @@ export default function ManageFacultyPage() {
           </div>
         </form>
       )}
-
       {message && (
         <div
           className={`mb-4 p-3 rounded-lg text-sm ${message.type === 'success'

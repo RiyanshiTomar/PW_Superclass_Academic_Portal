@@ -124,6 +124,12 @@ function conflictReason(
   durationMinutes: number,
   busy: { weekly: WeeklyBusy[]; dated: DatedBusy[] }
 ): string | null {
+  // Past dates are already-conducted history — never validated for overlaps.
+  // We only ever guard today onwards (the whole plan revolves around what's
+  // still to come; a clash on a finished class is meaningless).
+  const today = new Date().toISOString().split('T')[0]
+  if (date < today) return null
+
   const start = toMinutes(startTime.slice(0, 5))
   const end = start + durationMinutes
   const dow = new Date(date + 'T12:00:00').getDay()

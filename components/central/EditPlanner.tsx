@@ -56,6 +56,8 @@ export default function EditPlanner() {
   const [keptBuffers, setKeptBuffers] = useState<Keep[]>([])
   const [links, setLinks] = useState<LinkLite[]>([])
   const [loading, setLoading] = useState(true)
+  const [selecting, setSelecting] = useState(false)
+  const [liveSlotTotal, setLiveSlotTotal] = useState(0) // rows loaded in live mode (incl. buffers)
   const [saving, setSaving] = useState(false)
   const [master, setMaster] = useState<Master | null>(null)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
@@ -145,22 +147,27 @@ export default function EditPlanner() {
   }, [])
 
   const selectPlanner = async (id: string) => {
-    setSelectedId(id); setMessage(null); setSearch('')
-    if (!id) { setRows([]); setKeptBuffers([]); setLinks([]); setMaster(null); setActiveSubject(''); setLiveLinkId(''); setLiveStage(''); setLiveBatchLabel(''); return }
-    const prog = planners.find((p) => p.id === id)?.program_id ?? null
-    fetchMaster(supabase, prog ?? '').then(setMaster)
-    const linkRes = await supabase.from('batch_planner_links').select('id, stage, batch_id, batches(name)').eq('planner_id', id)
-    const linksData = (linkRes.data ?? []) as unknown as LinkLite[]
-    setLinks(linksData)
+    setSelectedId(id); setMessage(null); setSearch(''); setRows([]); setLiveSlotTotal(0)
+    if (!id) { setKeptBuffers([]); setLinks([]); setMaster(null); setActiveSubject(''); setLiveLinkId(''); setLiveStage(''); setLiveBatchLabel(''); return }
+    setSelecting(true)
+    try {
+      const prog = planners.find((p) => p.id === id)?.program_id ?? null
+      fetchMaster(supabase, prog ?? '').then(setMaster)
+      const linkRes = await supabase.from('batch_planner_links').select('id, stage, batch_id, batches(name)').eq('planner_id', id)
+      const linksData = (linkRes.data ?? []) as unknown as LinkLite[]
+      setLinks(linksData)
 
-    // If a specific batch is chosen and this planner is linked to it → LIVE mode.
-    const liveLink = filterBatch ? linksData.find((l) => l.batch_id === filterBatch) : undefined
-    if (liveLink) {
-      setLiveLinkId(liveLink.id); setLiveStage(liveLink.stage); setLiveBatchLabel(batchName(liveLink.batches))
-      await loadLiveRows(liveLink.id)
-    } else {
-      setLiveLinkId(''); setLiveStage(''); setLiveBatchLabel('')
-      await loadTemplateRows(id)
+      // If a specific batch is chosen and this planner is linked to it → LIVE mode.
+      const liveLink = filterBatch ? linksData.find((l) => l.batch_id === filterBatch) : undefined
+      if (liveLink) {
+        setLiveLinkId(liveLink.id); setLiveStage(liveLink.stage); setLiveBatchLabel(batchName(liveLink.batches))
+        await loadLiveRows(liveLink.id)
+      } else {
+        setLiveLinkId(''); setLiveStage(''); setLiveBatchLabel('')
+        await loadTemplateRows(id)
+      }
+    } finally {
+      setSelecting(false)
     }
   }
 
@@ -216,6 +223,7 @@ export default function EditPlanner() {
     const { rows: lecData, hasStatus, error } = await paginate('batch_planners', 'id, subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes, is_buffer, classroom_id, stage, status', 'id, subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes, is_buffer, classroom_id, stage', 'link_id', linkId)
     if (error) { setMessage({ type: 'error', text: `Could not load the batch schedule: ${error}` }); return }
     setLiveHasStatus(hasStatus)
+    setLiveSlotTotal(lecData.length)
     const real: EditRow[] = []
     const origIds = new Set<string>()
     for (const l of lecData) {
@@ -628,7 +636,24 @@ export default function EditPlanner() {
         </Alert>
       )}
 
-      {selected && subjectTabs.length > 0 && (
+      {selected && selecting && (
+        <Card className="p-8 text-center text-sm text-neutral-400">Loading planner…</Card>
+      )}
+
+      {selected && !selecting && subjectTabs.length === 0 && (
+        <Card className="p-8 text-center">
+          <p className="text-neutral-700 font-semibold mb-1">Nothing to edit for this planner</p>
+          <p className="text-sm text-neutral-500 max-w-xl mx-auto">
+            {liveLinkId
+              ? liveSlotTotal > 0
+                ? `This batch’s planner has ${liveSlotTotal} empty/buffer slot(s) but no classes with a chapter filled in yet — so there’s nothing to edit here. Fill it in Create Planner. Tip: batches with the same name exist at other centres — make sure you picked the right centre (the filled planner may be under a different one).`
+                : 'This batch has no materialised classes yet. Assign/send the planner to this batch first, or pick another centre — the same batch name may exist at another centre with the filled planner.'
+              : 'This planner has no lectures yet.'}
+          </p>
+        </Card>
+      )}
+
+      {selected && !selecting && subjectTabs.length > 0 && (
         <>
           {/* Subject tabs */}
           <div className="flex flex-wrap gap-2">

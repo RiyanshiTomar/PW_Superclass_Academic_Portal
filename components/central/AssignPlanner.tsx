@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { setLinkStage, cascadeReschedule, addExtraLecture } from '@/lib/planners'
+import { setLinkStage, cascadeReschedule, addExtraLecture, rematerialiseLink } from '@/lib/planners'
 import { computeBatchPacing, type BatchPacing } from '@/lib/pacing'
 import { notifyUsers } from '@/lib/notifications'
 import { stageBadgeClass, formatTime } from '@/lib/utils'
@@ -86,6 +86,20 @@ export default function AssignPlanner() {
     if (error) { setMessage({ type: 'error', text: error }); return }
     setMessage({ type: 'success', text: `Stage updated to ${stage}.` })
     await loadData()
+  }
+
+  // Rebuild a batch's materialised classes from the CURRENT planner template.
+  // Use when the planner was filled/edited but the batch still shows the old (or
+  // empty/buffer-only) schedule — i.e. the materialised copy is stale.
+  const rebuildLink = async (link: Link) => {
+    if (!confirm('Rebuild this batch’s schedule from the planner?\n\nThis deletes the batch’s current materialised classes and recreates them from the planner template. Use it when the planner has classes but the batch shows an old/empty schedule.')) return
+    setBusyId(link.id); setMessage(null)
+    const res = await rematerialiseLink(supabase, link.id)
+    setBusyId(null)
+    if (res.imported === 0) { setMessage({ type: 'error', text: `Nothing was materialised${res.errors.length ? `: ${res.errors.slice(0, 2).join('; ')}` : ' — the planner has no placeable lectures (check the batch’s weekly schedule).'}` }); return }
+    setMessage({ type: res.errors.length ? 'info' : 'success', text: `Rebuilt — ${res.imported} class(es) placed on ${one(link.batches)?.name ?? 'the batch'}${res.errors.length ? `; ${res.errors.length} skipped (e.g. ${res.errors.slice(0, 1).join('')})` : ''}.` })
+    setLecturesByLink((prev) => { const n = { ...prev }; delete n[link.id]; return n })
+    if (expanded === link.id) await reloadLectures(link.id)
   }
 
   const deleteLink = async (link: Link) => {
@@ -239,6 +253,9 @@ export default function AssignPlanner() {
                         <button onClick={() => changeStage(link, 'Rework')} disabled={busyId === link.id} className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Recall / Rework</button>
                       )}
                       <button onClick={() => toggleExpand(link)} className="px-3 py-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-semibold rounded-lg">{expanded === link.id ? 'Hide' : 'View'}</button>
+                      {(link.stage === 'Draft' || link.stage === 'Rework') && (
+                        <button onClick={() => rebuildLink(link)} disabled={busyId === link.id} className="px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 text-xs font-semibold rounded-lg" title="Rebuild this batch's classes from the current planner (fixes a stale / empty schedule)">Rebuild</button>
+                      )}
                       <button onClick={() => deleteLink(link)} disabled={busyId === link.id} className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-xs font-semibold rounded-lg">Remove</button>
                     </div>
                   </div>

@@ -72,6 +72,7 @@ export default function EditPlanner() {
   // Chapters that exist in the source planner but never landed on this batch's
   // live schedule (safety net for planners built before the auto-place fix).
   const [missingChapters, setMissingChapters] = useState<string[]>([])
+  const [restoring, setRestoring] = useState(false)
   const liveOrigIdsRef = useRef<Set<string>>(new Set())
   // For safe "+ add row" in live mode: the batch's weekly slots per subject,
   // its date bounds, and the dates/times tests occupy — so a new row lands on a
@@ -300,6 +301,64 @@ export default function EditPlanner() {
 
     setRows(real); setKeptBuffers([])
     setActiveSubject(real[0]?.subject_id ?? '')
+  }
+
+  // One-click restore (LIVE mode): materialise straight into this batch's
+  // schedule every source lecture that isn't here yet — each auto-placed on its
+  // subject's next free class-day (weekly slot present, not already used, no test
+  // clash), inheriting that slot's time/room. No template-mode juggling needed.
+  const restoreMissing = async () => {
+    if (!liveLinkId || !filterBatch || !selectedId) return
+    setRestoring(true); setMessage(null)
+    try {
+      const { data: bpRows } = await supabase.from('batch_planners').select('planner_lecture_id, subject_id, planned_date').eq('link_id', liveLinkId)
+      const present = new Set((bpRows ?? []).map((r) => (r as { planner_lecture_id: string | null }).planner_lecture_id).filter(Boolean))
+      const used = new Map<string, Set<string>>()
+      for (const r of (bpRows ?? []) as { subject_id: string | null; planned_date: string | null }[]) {
+        if (!r.subject_id || !r.planned_date) continue
+        if (!used.has(r.subject_id)) used.set(r.subject_id, new Set())
+        used.get(r.subject_id)!.add(r.planned_date)
+      }
+      const { data: pl } = await supabase.from('planner_lectures').select('id, subject_id, faculty_id, chapter, topic_name, planned_date, is_buffer, sequence_no').eq('planner_id', selectedId).order('sequence_no', { ascending: true })
+      const missing = (pl ?? []).filter((l) => !(l.is_buffer as boolean) && ((l.chapter as string) ?? '').trim() && ((l.topic_name as string) ?? '').trim() && !present.has(l.id as string))
+      if (!missing.length) { setRestoring(false); setMessage({ type: 'info', text: 'Nothing to restore — every chapter is already on this schedule.' }); return }
+
+      const bounds = liveBoundsRef.current
+      const endBound = new Date(bounds.end + 'T12:00:00'); endBound.setDate(endBound.getDate() + 365)
+      const inserts: Record<string, unknown>[] = []
+      let failed = 0
+      for (const l of missing) {
+        const sid = l.subject_id as string
+        const sched = liveSchedRef.current.get(sid)
+        if (!sched || !sched.size) { failed++; continue }
+        if (!used.has(sid)) used.set(sid, new Set())
+        const u = used.get(sid)!
+        const from = ((l.planned_date as string) && (l.planned_date as string) >= bounds.start) ? (l.planned_date as string) : bounds.start
+        const d = new Date(from + 'T12:00:00'); let placed: { iso: string; slot: { start: string; duration: number; classroom: string | null } } | null = null; let guard = 0
+        while (d <= endBound && guard++ < 5000) {
+          const iso = d.toISOString().split('T')[0]
+          const slot = sched.get(d.getDay())
+          if (slot && !u.has(iso)) {
+            const s = toMinutes(slot.start), e = s + slot.duration
+            const testBusy = (liveTestsRef.current.get(iso) ?? []).some(([ts, te]) => s < te && e > ts)
+            if (!testBusy) { placed = { iso, slot }; break }
+          }
+          d.setDate(d.getDate() + 1)
+        }
+        if (!placed) { failed++; continue }
+        u.add(placed.iso)
+        inserts.push({ batch_id: filterBatch, subject_id: sid, chapter: l.chapter, topic_name: l.topic_name, faculty_id: l.faculty_id, classroom_id: placed.slot.classroom, planned_date: placed.iso, start_time: placed.slot.start, duration_minutes: placed.slot.duration, is_buffer: false, stage: liveStage || 'Draft', link_id: liveLinkId, planner_lecture_id: l.id })
+      }
+      for (let i = 0; i < inserts.length; i += 200) {
+        const { error } = await supabase.from('batch_planners').insert(inserts.slice(i, i + 200))
+        if (error) { setRestoring(false); setMessage({ type: 'error', text: `Restore failed: ${error.message}` }); return }
+      }
+      setRestoring(false)
+      setMessage({ type: 'success', text: `Restored ${inserts.length} class(es) to ${liveBatchLabel}${failed ? `, ${failed} couldn’t be placed (that subject has no weekly slot)` : ''}. Each landed on its subject’s next free class-day.` })
+      await loadLiveRows(liveLinkId, selectedId)
+    } catch (e) {
+      setRestoring(false); setMessage({ type: 'error', text: e instanceof Error ? e.message : 'Restore failed.' })
+    }
   }
 
   // Subjects present in the planner (tabs).
@@ -657,8 +716,11 @@ export default function EditPlanner() {
       {selected && liveLinkId && missingChapters.length > 0 && (
         <Alert type="error">
           <b>{missingChapters.length} chapter{missingChapters.length === 1 ? '' : 's'} from this planner {missingChapters.length === 1 ? 'is' : 'are'} not on this batch&rsquo;s live schedule.</b>{' '}
-          This usually means those classes were dropped by an older upload because their dates fell on a weekday the subject has no class. To restore them, re-save the planner from <b>Create Planner</b> (it now auto-places such classes on the subject&rsquo;s next class-day), or add the missing weekly class slots and re-assign.
+          These classes were dropped by an older upload because their dates fell on a weekday the subject has no class. Click <b>Restore</b> below — each will be placed on its subject&rsquo;s next free class-day, right here in this schedule.
           <div className="mt-2 text-xs font-medium">Missing: {missingChapters.slice(0, 12).join(' · ')}{missingChapters.length > 12 ? ` · +${missingChapters.length - 12} more` : ''}</div>
+          <div className="mt-3">
+            <BtnPrimary onClick={restoreMissing} disabled={restoring}>{restoring ? 'Restoring…' : `Restore ${missingChapters.length} chapter${missingChapters.length === 1 ? '' : 's'} to this schedule`}</BtnPrimary>
+          </div>
         </Alert>
       )}
 

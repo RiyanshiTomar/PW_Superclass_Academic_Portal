@@ -69,6 +69,9 @@ export default function EditPlanner() {
   const [liveStage, setLiveStage] = useState('')
   const [liveBatchLabel, setLiveBatchLabel] = useState('')
   const [liveHasStatus, setLiveHasStatus] = useState(false)
+  // Chapters that exist in the source planner but never landed on this batch's
+  // live schedule (safety net for planners built before the auto-place fix).
+  const [missingChapters, setMissingChapters] = useState<string[]>([])
   const liveOrigIdsRef = useRef<Set<string>>(new Set())
   // For safe "+ add row" in live mode: the batch's weekly slots per subject,
   // its date bounds, and the dates/times tests occupy — so a new row lands on a
@@ -147,7 +150,7 @@ export default function EditPlanner() {
   }, [])
 
   const selectPlanner = async (id: string) => {
-    setSelectedId(id); setMessage(null); setSearch(''); setRows([]); setLiveSlotTotal(0)
+    setSelectedId(id); setMessage(null); setSearch(''); setRows([]); setLiveSlotTotal(0); setMissingChapters([])
     if (!id) { setKeptBuffers([]); setLinks([]); setMaster(null); setActiveSubject(''); setLiveLinkId(''); setLiveStage(''); setLiveBatchLabel(''); return }
     setSelecting(true)
     try {
@@ -161,7 +164,7 @@ export default function EditPlanner() {
       const liveLink = filterBatch ? linksData.find((l) => l.batch_id === filterBatch) : undefined
       if (liveLink) {
         setLiveLinkId(liveLink.id); setLiveStage(liveLink.stage); setLiveBatchLabel(batchName(liveLink.batches))
-        await loadLiveRows(liveLink.id)
+        await loadLiveRows(liveLink.id, id)
       } else {
         setLiveLinkId(''); setLiveStage(''); setLiveBatchLabel('')
         await loadTemplateRows(id)
@@ -219,7 +222,7 @@ export default function EditPlanner() {
 
   // LIVE mode — this batch's materialised planner (batch_planners), which
   // already reflects faculty-approved reschedules / prepones / cancellations.
-  const loadLiveRows = async (linkId: string) => {
+  const loadLiveRows = async (linkId: string, plannerId: string) => {
     const { rows: lecData, hasStatus, error } = await paginate('batch_planners', 'id, subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes, is_buffer, classroom_id, stage, status', 'id, subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes, is_buffer, classroom_id, stage', 'link_id', linkId)
     if (error) { setMessage({ type: 'error', text: `Could not load the batch schedule: ${error}` }); return }
     setLiveHasStatus(hasStatus)
@@ -256,6 +259,21 @@ export default function EditPlanner() {
       })
     }
     liveOrigIdsRef.current = origIds
+
+    // Safety net: flag chapters that exist in the SOURCE planner but never made
+    // it onto this batch's live schedule (e.g. dropped by an older upload before
+    // the auto-place fix). A whole-chapter gap is a strong signal — a
+    // cancellation removes single classes, not an entire chapter.
+    const liveChapKeys = new Set(real.map((r) => `${r.subject_id}|${norm(r.chapter)}`))
+    const { data: srcLec } = await supabase.from('planner_lectures').select('subject_id, chapter').eq('planner_id', plannerId)
+    const missing = new Map<string, string>()
+    for (const s of (srcLec ?? []) as { subject_id: string | null; chapter: string | null }[]) {
+      const chap = (s.chapter ?? '').trim()
+      if (!s.subject_id || !chap) continue
+      const key = `${s.subject_id}|${norm(chap)}`
+      if (!liveChapKeys.has(key) && !missing.has(key)) missing.set(key, `${subjName(s.subject_id)} · ${chap}`)
+    }
+    setMissingChapters(Array.from(missing.values()))
 
     // Extra context for safe "+ add row": weekly slots per subject, test-busy
     // dates, and the batch's date bounds.
@@ -558,7 +576,7 @@ export default function EditPlanner() {
       if (toDelete.length) { const { error } = await supabase.from('batch_planners').delete().in('id', toDelete); if (!error) deleted = toDelete.length }
       setSaving(false)
       setMessage({ type: 'success', text: `Batch schedule saved — ${updated} updated${inserted ? `, ${inserted} added` : ''}${deleted ? `, ${deleted} removed` : ''}. This is the live plan for ${liveBatchLabel}.` })
-      await loadLiveRows(liveLinkId)
+      await loadLiveRows(liveLinkId, selectedId)
       return
     }
 
@@ -633,6 +651,14 @@ export default function EditPlanner() {
       {selected && liveLinkId && (
         <Alert type="info">
           <b>Live batch schedule — {liveBatchLabel}.</b> This is the actual materialised plan for this batch and <b>includes every faculty-approved reschedule, prepone and cancellation</b>. Edits (topic, faculty, order) save straight to this batch only — the shared template and other batches are untouched.
+        </Alert>
+      )}
+
+      {selected && liveLinkId && missingChapters.length > 0 && (
+        <Alert type="error">
+          <b>{missingChapters.length} chapter{missingChapters.length === 1 ? '' : 's'} from this planner {missingChapters.length === 1 ? 'is' : 'are'} not on this batch&rsquo;s live schedule.</b>{' '}
+          This usually means those classes were dropped by an older upload because their dates fell on a weekday the subject has no class. To restore them, re-save the planner from <b>Create Planner</b> (it now auto-places such classes on the subject&rsquo;s next class-day), or add the missing weekly class slots and re-assign.
+          <div className="mt-2 text-xs font-medium">Missing: {missingChapters.slice(0, 12).join(' · ')}{missingChapters.length > 12 ? ` · +${missingChapters.length - 12} more` : ''}</div>
         </Alert>
       )}
 

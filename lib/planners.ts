@@ -25,7 +25,7 @@ export type PlannerLectureInput = {
 
 export type BatchLite = { id: string; centre_id: string; start_date: string; end_date: string }
 
-type RowResult = { imported: number; errors: string[] }
+type RowResult = { imported: number; errors: string[]; moved: string[] }
 
 // --- Faculty availability (for cascade re-validation) ---------------------
 
@@ -213,7 +213,7 @@ async function materialise(
     .order('sequence_no', { ascending: true })
 
   const errors: string[] = []
-  if (!lectures || lectures.length === 0) return { imported: 0, errors: ['Planner has no lectures.'] }
+  if (!lectures || lectures.length === 0) return { imported: 0, errors: ['Planner has no lectures.'], moved: [] }
 
   // Which faculty actually teach at this batch's centre.
   const { data: centreFac } = await supabase.rpc('list_active_faculty', { p_centre_id: batch.centre_id })
@@ -243,12 +243,57 @@ async function materialise(
   }
   const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
+  // Subject names (for clear error/relocation messages).
+  const subjIds = Array.from(new Set(lectures.map((l) => l.subject_id).filter(Boolean))) as string[]
+  const { data: subjRows } = subjIds.length
+    ? await supabase.from('subjects').select('id, name').in('id', subjIds)
+    : { data: [] as { id: string; name: string }[] }
+  const subjNameById = new Map(((subjRows ?? []) as { id: string; name: string }[]).map((s) => [s.id, s.name]))
+  const subjectLabel = (id: string | null) => (id ? subjNameById.get(id) ?? 'This subject' : 'This subject')
+
+  // Pick the weekly slot that governs a (subject, date): the date-segment whose
+  // active range contains the date, else the first slot for that weekday.
+  const slotForDate = (sid: string, date: string): WeeklySlot | null => {
+    const dow = new Date(date + 'T12:00:00').getDay()
+    const list = slotsBySubjectDay.get(`${sid}:${dow}`) ?? []
+    return list.find((sl) => (!sl.from || date >= sl.from) && (!sl.to || date <= sl.to)) ?? list[0] ?? null
+  }
+  const subjectHasAnySlot = (sid: string) => {
+    for (let d = 0; d < 7; d++) if (slotsBySubjectDay.has(`${sid}:${d}`)) return true
+    return false
+  }
+  // Dates already occupied per subject — so a RELOCATED lecture never lands on
+  // top of another class of the same subject (which would overlap its slot).
+  const usedBySubject = new Map<string, Set<string>>()
+  const useDate = (sid: string, iso: string) => { if (!usedBySubject.has(sid)) usedBySubject.set(sid, new Set()); usedBySubject.get(sid)!.add(iso) }
+  // The subject's next real class-date on/after `fromISO` not already taken.
+  const nextFreeClassDate = (sid: string, fromISO: string): string | null => {
+    const used = usedBySubject.get(sid) ?? new Set<string>()
+    const endBound = new Date(addDaysToDate(batch.end_date, 365) + 'T12:00:00')
+    const d = new Date(fromISO + 'T12:00:00')
+    let guard = 0
+    while (d <= endBound && guard++ < 4000) {
+      const iso = d.toISOString().split('T')[0]
+      if (!used.has(iso) && slotForDate(sid, iso)) return iso
+      d.setDate(d.getDate() + 1)
+    }
+    return null
+  }
+  // Pre-pass: reserve every lecture that already sits on a valid class-date, so
+  // relocations only fill genuinely free dates (never double-book a subject).
+  for (const l of lectures) {
+    if (!l.subject_id) continue
+    const d = l.planned_date as string
+    if (slotForDate(l.subject_id as string, d)) useDate(l.subject_id as string, d)
+  }
+  const moved: string[] = []
+
   const busyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
   const roomBusyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
   const toInsert: Record<string, unknown>[] = []
 
   for (const l of lectures) {
-    const date = l.planned_date as string
+    let date = l.planned_date as string
     const label = `${l.topic_name || 'Lecture'} (${date})`
     const facultyId = l.faculty_id as string | null
 
@@ -265,8 +310,7 @@ async function materialise(
     const dow = new Date(date + 'T12:00:00').getDay()
     // Pick the segment whose active range contains this date; fall back to the
     // first slot for that (subject, weekday) so legacy planners still work.
-    const slotList = l.subject_id ? slotsBySubjectDay.get(`${l.subject_id}:${dow}`) ?? [] : []
-    const slot = slotList.find((sl) => (!sl.from || date >= sl.from) && (!sl.to || date <= sl.to)) ?? slotList[0] ?? null
+    const slot = l.subject_id ? slotForDate(l.subject_id as string, date) : null
 
     let startTime: string | null
     let duration: number
@@ -299,9 +343,27 @@ async function materialise(
         if (rReason) { errors.push(`${label}: room ${rReason}`); continue }
         roomBusy.dated.push(reserve)
       }
+    } else if (l.subject_id && subjectHasAnySlot(l.subject_id as string)) {
+      // The date's weekday has no class for this subject — DON'T drop the
+      // lecture. Snap it forward to the subject's next real class-date (its own
+      // valid slots are never stolen — they were reserved in the pre-pass), and
+      // inherit that day's time & room. This is why a chapter can never silently
+      // vanish just because its uploaded date landed on a non-class weekday.
+      const newDate = nextFreeClassDate(l.subject_id as string, date)
+      if (!newDate) {
+        errors.push(`${label}: no free class-date left to place it (the schedule is full) — add more weekly slots or remove a class`)
+        continue
+      }
+      const newSlot = slotForDate(l.subject_id as string, newDate)!
+      moved.push(`“${l.topic_name || l.chapter || 'lecture'}”: ${WEEKDAYS[dow]} ${date} → ${WEEKDAYS[new Date(newDate + 'T12:00:00').getDay()]} ${newDate}`)
+      date = newDate
+      useDate(l.subject_id as string, newDate)
+      startTime = newSlot.start
+      duration = newSlot.durationMinutes
+      classroomId = newSlot.classroom_id
     } else {
-      // No weekly class for this subject on this weekday, and no explicit time.
-      errors.push(`${label}: no ${WEEKDAYS[dow]} class for this subject in the weekly schedule — add it or move the date`)
+      // The subject itself has NO weekly slot anywhere — genuinely unplaceable.
+      errors.push(`${label}: “${subjectLabel(l.subject_id as string | null)}” has no weekly class in this batch's timetable — add its slot, then re-assign`)
       continue
     }
 
@@ -324,16 +386,16 @@ async function materialise(
 
   if (toInsert.length > 0) {
     const { error } = await supabase.from('batch_planners').insert(toInsert)
-    if (error) return { imported: 0, errors: [error.message] }
+    if (error) return { imported: 0, errors: [error.message], moved: [] }
   }
-  return { imported: toInsert.length, errors }
+  return { imported: toInsert.length, errors, moved }
 }
 
 /** Link a planner to a batch and materialise its lectures (each with its own faculty). */
 export async function assignPlanner(
   supabase: SupabaseClient,
   args: { plannerId: string; batch: BatchLite; stage?: string }
-): Promise<{ ok: boolean; linkId?: string; imported: number; errors: string[] }> {
+): Promise<{ ok: boolean; linkId?: string; imported: number; errors: string[]; moved?: string[] }> {
   const stage = args.stage ?? 'Draft'
 
   // One planner can only be linked to a batch once (UNIQUE constraint).
@@ -370,14 +432,14 @@ export async function assignPlanner(
   // Guarantee no class sits on an existing test: tests take priority.
   await resolveTestConflicts(supabase, args.batch.id)
 
-  return { ok: true, linkId: link.id, imported: result.imported, errors: result.errors }
+  return { ok: true, linkId: link.id, imported: result.imported, errors: result.errors, moved: result.moved }
 }
 
 /** Re-materialise a link after its planner was edited (Draft/Rework only). */
 export async function rematerialiseLink(
   supabase: SupabaseClient,
   linkId: string
-): Promise<{ ok: boolean; imported: number; errors: string[] }> {
+): Promise<{ ok: boolean; imported: number; errors: string[]; moved?: string[] }> {
   const { data: link } = await supabase
     .from('batch_planner_links')
     .select('id, planner_id, batch_id, stage, batches(id, centre_id, start_date, end_date)')
@@ -399,7 +461,7 @@ export async function rematerialiseLink(
   // Re-materialise rebuilds the concrete rows from scratch — re-apply test
   // priority so nothing lands back on a test.
   await resolveTestConflicts(supabase, b.id)
-  return { ok: result.imported > 0, imported: result.imported, errors: result.errors }
+  return { ok: result.imported > 0, imported: result.imported, errors: result.errors, moved: result.moved }
 }
 
 // --- Stages ---------------------------------------------------------------

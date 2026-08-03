@@ -439,7 +439,14 @@ export default function CreatePlanner() {
     setBusy(false)
     if (!assign.ok) { setMessage({ type: 'error', text: `Planner saved but couldn’t assign: ${assign.errors.join(' · ')}` }); await loadData(); return }
     const bufferN = clean.filter((c) => c.is_buffer).length
-    setMessage({ type: assign.errors.length ? 'info' : 'success', text: `Planner created & assigned to ${batch.name} — ${assign.imported} slot(s) scheduled (${clean.length - bufferN} real, ${bufferN} buffer${skippedPast ? `, ${skippedPast} past class didn’t happen` : ''})${assign.errors.length ? `, ${assign.errors.length} couldn’t place` : ''}. Send it to faculty under "Send to Faculty".` })
+    const movedN = assign.moved?.length ?? 0
+    setMessage({
+      type: assign.errors.length ? 'info' : 'success',
+      text: `Planner created & assigned to ${batch.name} — ${assign.imported} class(es) scheduled (${clean.length - bufferN} real, ${bufferN} buffer${skippedPast ? `, ${skippedPast} past class didn’t happen` : ''}).`
+        + (movedN ? ` ${movedN} class(es) had a date on a day this subject has no class, so they were moved to the subject’s next class-day — nothing was dropped.` : '')
+        + (assign.errors.length ? ` ⚠ ${assign.errors.length} couldn’t be placed: ${assign.errors.slice(0, 3).join(' · ')}` : '')
+        + ` Send it to faculty under “Send to Faculty”.`,
+    })
     cancelReview()
     await loadData()
   }

@@ -257,10 +257,14 @@ export default function BatchScheduler() {
   const buildRows = (pid: string, flat: FlatSchedule[] = [], fbFrom = '', fbTo = ''): ScheduleRow[] => {
     const groups = new Map<string, ScheduleRow>()
     for (const f of flat) {
+      // Skip stray/orphan schedule entries with no subject — they can never be
+      // valid (a subject is required), and would otherwise create an invisible
+      // row (no card matches subject_id: '') that silently blocks saving.
+      if (!f.subject_id) continue
       const from = f.effective_from ?? fbFrom
       const to = f.effective_to ?? fbTo
-      const key = `${f.subject_id ?? ''}|${f.faculty_id ?? ''}|${f.classroom_id ?? ''}|${from}|${to}`
-      if (!groups.has(key)) groups.set(key, { subject_id: f.subject_id ?? '', faculty_id: f.faculty_id ?? '', classroom_id: f.classroom_id || '', from, to, days: emptyDays() })
+      const key = `${f.subject_id}|${f.faculty_id ?? ''}|${f.classroom_id ?? ''}|${from}|${to}`
+      if (!groups.has(key)) groups.set(key, { subject_id: f.subject_id, faculty_id: f.faculty_id ?? '', classroom_id: f.classroom_id || '', from, to, days: emptyDays() })
       groups.get(key)!.days[f.day_of_week] = { active: true, start: f.start_time.slice(0, 5), end: f.end_time.slice(0, 5) }
     }
     const rows = Array.from(groups.values())

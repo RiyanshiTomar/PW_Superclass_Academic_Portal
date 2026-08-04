@@ -7,6 +7,7 @@ const NAV = [
   { label: 'My Batches', href: '/faculty', icon: '📚' },
   { label: 'My Planners', href: '/faculty/planners', icon: '🗂️' },
   { label: 'My Tests', href: '/faculty/tests', icon: '📝' },
+  { label: 'Attendance', href: '/faculty/attendance', icon: '🕒' },
   { label: 'Results', href: '/faculty/results', icon: '📊' },
   { label: 'Calendar', href: '/faculty/calendar', icon: '📅' },
 ]

@@ -39,7 +39,7 @@ const CAT_STYLES: Record<string, { tile: string; num: string; label: string; pil
   missedOut: { tile: 'border-violet-100 bg-gradient-to-br from-violet-50 to-white',    num: 'text-violet-600', label: 'text-violet-900/60', pill: 'bg-violet-500' },
 }
 
-type Scope = 'central' | 'admin' | 'branch' | 'batch-manager'
+type Scope = 'central' | 'admin' | 'branch' | 'batch-manager' | 'faculty'
 
 export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }) {
   const supabase = createClient()
@@ -48,6 +48,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
   const [centres, setCentres] = useState<Centre[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
+  const [facultyBatchIds, setFacultyBatchIds] = useState<Set<string>>(new Set())
 
   const [centreId, setCentreId] = useState('')
   const [batchId, setBatchId] = useState('')
@@ -74,6 +75,12 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
       if (bRes.error) setErr(bRes.error.message)
       if (bRes.data) setBatches(bRes.data as Batch[])
       if (cRes.data) setCentres(cRes.data as Centre[])
+      // Faculty sees only batches they teach (a weekly slot with their id) — same
+      // source as their Results page, so both pages show the same batch list.
+      if (scope === 'faculty' && au) {
+        const { data: sch } = await supabase.from('batch_schedules').select('batch_id').eq('faculty_id', au.id)
+        setFacultyBatchIds(new Set((sch ?? []).map((r) => r.batch_id as string)))
+      }
       setLoading(false)
     }
     load()
@@ -83,6 +90,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
   const isPrivileged = scope === 'central' || scope === 'admin'
   const isBranch = scope === 'branch'
   const isBM = scope === 'batch-manager'
+  const isFaculty = scope === 'faculty'
 
   const allowedCentreIds = useMemo(() => {
     if (isPrivileged) return new Set(centres.map((c) => c.id))
@@ -93,14 +101,15 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
 
   const visibleBatches = useMemo(() => {
     if (isPrivileged) return batches
+    if (isFaculty) return batches.filter((b) => facultyBatchIds.has(b.id))
     if (isBM && appUser) return batches.filter((b) => b.batch_manager_id === appUser.id)
     return batches.filter((b) => allowedCentreIds.has(b.centre_id)) // branch head
-  }, [batches, isPrivileged, isBM, appUser, allowedCentreIds])
+  }, [batches, isPrivileged, isFaculty, facultyBatchIds, isBM, appUser, allowedCentreIds])
 
   const myCentres = useMemo(() => {
-    const ids = isBM ? new Set(visibleBatches.map((b) => b.centre_id)) : allowedCentreIds
+    const ids = (isBM || isFaculty) ? new Set(visibleBatches.map((b) => b.centre_id)) : allowedCentreIds
     return centres.filter((c) => ids.has(c.id))
-  }, [centres, isBM, visibleBatches, allowedCentreIds])
+  }, [centres, isBM, isFaculty, visibleBatches, allowedCentreIds])
 
   const batchOptions = useMemo(
     () => (isPrivileged ? visibleBatches.filter((b) => b.centre_id === centreId) : visibleBatches),

@@ -111,9 +111,16 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
     return centres.filter((c) => ids.has(c.id))
   }, [centres, isBM, isFaculty, visibleBatches, allowedCentreIds])
 
+  // Show a Centre → Batch flow whenever the user spans MORE THAN ONE centre
+  // (privileged always; a branch head / batch manager / faculty only when they
+  // actually belong to 2+ centres). A single-centre user skips straight to the
+  // batch list — no needless centre step, no confusion.
+  const showCentrePicker = isPrivileged || myCentres.length > 1
+  const centreChoices = isPrivileged ? centres : myCentres
+
   const batchOptions = useMemo(
-    () => (isPrivileged ? visibleBatches.filter((b) => b.centre_id === centreId) : visibleBatches),
-    [visibleBatches, centreId, isPrivileged]
+    () => (showCentrePicker ? visibleBatches.filter((b) => b.centre_id === centreId) : visibleBatches),
+    [visibleBatches, centreId, showCentrePicker]
   )
 
   const selectCentre = (id: string) => {
@@ -270,12 +277,11 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
     { key: 'missedOut', label: 'Missed Check-out', sub: 'In punched, no out', items: analysis.cat.missedOut, timed: true },
   ].map((c) => ({ ...c, grouped: groupByStudent(c.items), students: new Set(c.items.map((i) => i.regno)).size }))
 
-  const centreName = (id: string) => centres.find((c) => c.id === id)?.name ?? ''
   const chip = 'inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold'
   const tile = 'rounded-2xl p-4 border shadow-sm'
   const selectCls = 'h-11 px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500'
 
-  const roleNote = isPrivileged ? 'Pick a centre, then a batch.' : 'Choose a batch below.'
+  const roleNote = showCentrePicker ? 'Pick a centre, then a batch.' : 'Choose a batch below.'
   const myCentreNames = myCentres.map((c) => c.name).join(', ')
 
   return (
@@ -284,28 +290,28 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
 
       {err && <Alert type="error">{err}</Alert>}
 
-      {!isPrivileged && !loading && myCentres.length > 0 && (
+      {!isPrivileged && !showCentrePicker && !loading && myCentres.length > 0 && (
         <div className="mb-4 inline-flex items-center gap-2 rounded-xl border border-violet-100 bg-violet-50 px-4 py-2">
-          <span className="text-xs font-semibold uppercase tracking-wider text-violet-500">Your centre{myCentres.length > 1 ? 's' : ''}</span>
+          <span className="text-xs font-semibold uppercase tracking-wider text-violet-500">Your centre</span>
           <span className="text-sm font-bold text-violet-900">{myCentreNames}</span>
         </div>
       )}
 
       <div className="flex flex-wrap items-end gap-3 mb-6">
-        {isPrivileged && (
+        {showCentrePicker && (
           <div>
             <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Centre</label>
             <select value={centreId} onChange={(e) => selectCentre(e.target.value)} className={`${selectCls} min-w-[220px]`} disabled={loading}>
               <option value="">{loading ? 'Loading…' : 'Select a centre'}</option>
-              {centres.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {centreChoices.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
         )}
         <div>
           <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Batch</label>
-          <select value={batchId} onChange={(e) => selectBatch(e.target.value)} className={`${selectCls} min-w-[240px]`} disabled={loading || (isPrivileged && !centreId)}>
-            <option value="">{(isPrivileged && !centreId) ? 'Select a centre first' : batchOptions.length === 0 ? 'No batches' : 'Select a batch'}</option>
-            {batchOptions.map((b) => <option key={b.id} value={b.id}>{b.name}{!isPrivileged && myCentres.length > 1 && b.centre_id ? ` — ${centreName(b.centre_id)}` : ''}</option>)}
+          <select value={batchId} onChange={(e) => selectBatch(e.target.value)} className={`${selectCls} min-w-[240px]`} disabled={loading || (showCentrePicker && !centreId)}>
+            <option value="">{(showCentrePicker && !centreId) ? 'Select a centre first' : batchOptions.length === 0 ? 'No batches' : 'Select a batch'}</option>
+            {batchOptions.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         </div>
         {batchId && roster.length > 0 && (

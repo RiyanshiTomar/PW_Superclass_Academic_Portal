@@ -69,11 +69,11 @@ export default function EditPlanner() {
   const [liveStage, setLiveStage] = useState('')
   const [liveBatchLabel, setLiveBatchLabel] = useState('')
   const [liveHasStatus, setLiveHasStatus] = useState(false)
-  // Chapters that exist in the source planner but never landed on this batch's
-  // live schedule (safety net for planners built before the auto-place fix).
-  const [missingChapters, setMissingChapters] = useState<string[]>([])
-  const [restoring, setRestoring] = useState(false)
   const liveOrigIdsRef = useRef<Set<string>>(new Set())
+  // IDs the user EXPLICITLY removed (× button) this session — the ONLY rows a
+  // live save is ever allowed to delete. A row never leaves the schedule unless
+  // it was deliberately removed, so a save can't silently drop anyone's work.
+  const removedIdsRef = useRef<Set<string>>(new Set())
   // For safe "+ add row" in live mode: the batch's weekly slots per subject,
   // its date bounds, and the dates/times tests occupy — so a new row lands on a
   // genuinely free class-date (no lecture, no test) and never overlaps.
@@ -151,7 +151,7 @@ export default function EditPlanner() {
   }, [])
 
   const selectPlanner = async (id: string) => {
-    setSelectedId(id); setMessage(null); setSearch(''); setRows([]); setLiveSlotTotal(0); setMissingChapters([])
+    setSelectedId(id); setMessage(null); setSearch(''); setRows([]); setLiveSlotTotal(0)
     if (!id) { setKeptBuffers([]); setLinks([]); setMaster(null); setActiveSubject(''); setLiveLinkId(''); setLiveStage(''); setLiveBatchLabel(''); return }
     setSelecting(true)
     try {
@@ -165,7 +165,7 @@ export default function EditPlanner() {
       const liveLink = filterBatch ? linksData.find((l) => l.batch_id === filterBatch) : undefined
       if (liveLink) {
         setLiveLinkId(liveLink.id); setLiveStage(liveLink.stage); setLiveBatchLabel(batchName(liveLink.batches))
-        await loadLiveRows(liveLink.id, id)
+        await loadLiveRows(liveLink.id)
       } else {
         setLiveLinkId(''); setLiveStage(''); setLiveBatchLabel('')
         await loadTemplateRows(id)
@@ -223,7 +223,7 @@ export default function EditPlanner() {
 
   // LIVE mode — this batch's materialised planner (batch_planners), which
   // already reflects faculty-approved reschedules / prepones / cancellations.
-  const loadLiveRows = async (linkId: string, plannerId: string) => {
+  const loadLiveRows = async (linkId: string) => {
     const { rows: lecData, hasStatus, error } = await paginate('batch_planners', 'id, subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes, is_buffer, classroom_id, stage, status', 'id, subject_id, faculty_id, chapter, topic_name, planned_date, start_time, duration_minutes, is_buffer, classroom_id, stage', 'link_id', linkId)
     if (error) { setMessage({ type: 'error', text: `Could not load the batch schedule: ${error}` }); return }
     setLiveHasStatus(hasStatus)
@@ -260,21 +260,7 @@ export default function EditPlanner() {
       })
     }
     liveOrigIdsRef.current = origIds
-
-    // Safety net: flag chapters that exist in the SOURCE planner but never made
-    // it onto this batch's live schedule (e.g. dropped by an older upload before
-    // the auto-place fix). A whole-chapter gap is a strong signal — a
-    // cancellation removes single classes, not an entire chapter.
-    const liveChapKeys = new Set(real.map((r) => `${r.subject_id}|${norm(r.chapter)}`))
-    const { data: srcLec } = await supabase.from('planner_lectures').select('subject_id, chapter').eq('planner_id', plannerId)
-    const missing = new Map<string, string>()
-    for (const s of (srcLec ?? []) as { subject_id: string | null; chapter: string | null }[]) {
-      const chap = (s.chapter ?? '').trim()
-      if (!s.subject_id || !chap) continue
-      const key = `${s.subject_id}|${norm(chap)}`
-      if (!liveChapKeys.has(key) && !missing.has(key)) missing.set(key, `${subjName(s.subject_id)} · ${chap}`)
-    }
-    setMissingChapters(Array.from(missing.values()))
+    removedIdsRef.current = new Set()
 
     // Extra context for safe "+ add row": weekly slots per subject, test-busy
     // dates, and the batch's date bounds.
@@ -303,63 +289,6 @@ export default function EditPlanner() {
     setActiveSubject(real[0]?.subject_id ?? '')
   }
 
-  // One-click restore (LIVE mode): materialise straight into this batch's
-  // schedule every source lecture that isn't here yet — each auto-placed on its
-  // subject's next free class-day (weekly slot present, not already used, no test
-  // clash), inheriting that slot's time/room. No template-mode juggling needed.
-  const restoreMissing = async () => {
-    if (!liveLinkId || !filterBatch || !selectedId) return
-    setRestoring(true); setMessage(null)
-    try {
-      const { data: bpRows } = await supabase.from('batch_planners').select('planner_lecture_id, subject_id, planned_date').eq('link_id', liveLinkId)
-      const present = new Set((bpRows ?? []).map((r) => (r as { planner_lecture_id: string | null }).planner_lecture_id).filter(Boolean))
-      const used = new Map<string, Set<string>>()
-      for (const r of (bpRows ?? []) as { subject_id: string | null; planned_date: string | null }[]) {
-        if (!r.subject_id || !r.planned_date) continue
-        if (!used.has(r.subject_id)) used.set(r.subject_id, new Set())
-        used.get(r.subject_id)!.add(r.planned_date)
-      }
-      const { data: pl } = await supabase.from('planner_lectures').select('id, subject_id, faculty_id, chapter, topic_name, planned_date, is_buffer, sequence_no').eq('planner_id', selectedId).order('sequence_no', { ascending: true })
-      const missing = (pl ?? []).filter((l) => !(l.is_buffer as boolean) && ((l.chapter as string) ?? '').trim() && ((l.topic_name as string) ?? '').trim() && !present.has(l.id as string))
-      if (!missing.length) { setRestoring(false); setMessage({ type: 'info', text: 'Nothing to restore — every chapter is already on this schedule.' }); return }
-
-      const bounds = liveBoundsRef.current
-      const endBound = new Date(bounds.end + 'T12:00:00'); endBound.setDate(endBound.getDate() + 365)
-      const inserts: Record<string, unknown>[] = []
-      let failed = 0
-      for (const l of missing) {
-        const sid = l.subject_id as string
-        const sched = liveSchedRef.current.get(sid)
-        if (!sched || !sched.size) { failed++; continue }
-        if (!used.has(sid)) used.set(sid, new Set())
-        const u = used.get(sid)!
-        const from = ((l.planned_date as string) && (l.planned_date as string) >= bounds.start) ? (l.planned_date as string) : bounds.start
-        const d = new Date(from + 'T12:00:00'); let placed: { iso: string; slot: { start: string; duration: number; classroom: string | null } } | null = null; let guard = 0
-        while (d <= endBound && guard++ < 5000) {
-          const iso = d.toISOString().split('T')[0]
-          const slot = sched.get(d.getDay())
-          if (slot && !u.has(iso)) {
-            const s = toMinutes(slot.start), e = s + slot.duration
-            const testBusy = (liveTestsRef.current.get(iso) ?? []).some(([ts, te]) => s < te && e > ts)
-            if (!testBusy) { placed = { iso, slot }; break }
-          }
-          d.setDate(d.getDate() + 1)
-        }
-        if (!placed) { failed++; continue }
-        u.add(placed.iso)
-        inserts.push({ batch_id: filterBatch, subject_id: sid, chapter: l.chapter, topic_name: l.topic_name, faculty_id: l.faculty_id, classroom_id: placed.slot.classroom, planned_date: placed.iso, start_time: placed.slot.start, duration_minutes: placed.slot.duration, is_buffer: false, stage: liveStage || 'Draft', link_id: liveLinkId, planner_lecture_id: l.id })
-      }
-      for (let i = 0; i < inserts.length; i += 200) {
-        const { error } = await supabase.from('batch_planners').insert(inserts.slice(i, i + 200))
-        if (error) { setRestoring(false); setMessage({ type: 'error', text: `Restore failed: ${error.message}` }); return }
-      }
-      setRestoring(false)
-      setMessage({ type: 'success', text: `Restored ${inserts.length} class(es) to ${liveBatchLabel}${failed ? `, ${failed} couldn’t be placed (that subject has no weekly slot)` : ''}. Each landed on its subject’s next free class-day.` })
-      await loadLiveRows(liveLinkId, selectedId)
-    } catch (e) {
-      setRestoring(false); setMessage({ type: 'error', text: e instanceof Error ? e.message : 'Restore failed.' })
-    }
-  }
 
   // Subjects present in the planner (tabs).
   const subjectTabs = useMemo(() => {
@@ -464,7 +393,11 @@ export default function EditPlanner() {
     setMessage({ type: 'success', text: `Added a class on ${fmtDate(newDate)} — the next free slot for ${subjName(subjectId)} (no overlap).` })
   }
 
-  const removeRow = (key: string) => setRows((prev) => prev.filter((r) => r.key !== key))
+  const removeRow = (key: string) => setRows((prev) => {
+    const r = prev.find((x) => x.key === key)
+    if (r?.db_id) removedIdsRef.current.add(r.db_id) // only an explicit × can delete a live row
+    return prev.filter((x) => x.key !== key)
+  })
 
   const setStatus = (key: string, status: Status) => {
     if (status === 'conducted') {
@@ -629,13 +562,15 @@ export default function EditPlanner() {
           inserted++
         }
       }
-      // Rows the user removed → delete only those (buffers were never loaded).
-      const toDelete = [...liveOrigIdsRef.current].filter((id) => !keptIds.has(id))
+      // Delete ONLY the rows the user explicitly removed via × (and that weren't
+      // re-added). We never infer deletions from "what's missing from the board"
+      // — so a stale/partial board state can never silently wipe saved classes.
+      const toDelete = [...removedIdsRef.current].filter((id) => !keptIds.has(id) && liveOrigIdsRef.current.has(id))
       let deleted = 0
-      if (toDelete.length) { const { error } = await supabase.from('batch_planners').delete().in('id', toDelete); if (!error) deleted = toDelete.length }
+      if (toDelete.length) { const { error } = await supabase.from('batch_planners').delete().in('id', toDelete); if (!error) { deleted = toDelete.length; removedIdsRef.current = new Set() } }
       setSaving(false)
       setMessage({ type: 'success', text: `Batch schedule saved — ${updated} updated${inserted ? `, ${inserted} added` : ''}${deleted ? `, ${deleted} removed` : ''}. This is the live plan for ${liveBatchLabel}.` })
-      await loadLiveRows(liveLinkId, selectedId)
+      await loadLiveRows(liveLinkId)
       return
     }
 
@@ -710,17 +645,6 @@ export default function EditPlanner() {
       {selected && liveLinkId && (
         <Alert type="info">
           <b>Live batch schedule — {liveBatchLabel}.</b> This is the actual materialised plan for this batch and <b>includes every faculty-approved reschedule, prepone and cancellation</b>. Edits (topic, faculty, order) save straight to this batch only — the shared template and other batches are untouched.
-        </Alert>
-      )}
-
-      {selected && liveLinkId && missingChapters.length > 0 && (
-        <Alert type="error">
-          <b>{missingChapters.length} chapter{missingChapters.length === 1 ? '' : 's'} from this planner {missingChapters.length === 1 ? 'is' : 'are'} not on this batch&rsquo;s live schedule.</b>{' '}
-          These classes were dropped by an older upload because their dates fell on a weekday the subject has no class. Click <b>Restore</b> below — each will be placed on its subject&rsquo;s next free class-day, right here in this schedule.
-          <div className="mt-2 text-xs font-medium">Missing: {missingChapters.slice(0, 12).join(' · ')}{missingChapters.length > 12 ? ` · +${missingChapters.length - 12} more` : ''}</div>
-          <div className="mt-3">
-            <BtnPrimary onClick={restoreMissing} disabled={restoring}>{restoring ? 'Restoring…' : `Restore ${missingChapters.length} chapter${missingChapters.length === 1 ? '' : 's'} to this schedule`}</BtnPrimary>
-          </div>
         </Alert>
       )}
 

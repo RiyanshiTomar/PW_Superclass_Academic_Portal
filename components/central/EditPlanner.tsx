@@ -590,14 +590,24 @@ export default function EditPlanner() {
     const editable = links.filter((l) => l.stage === 'Draft' || l.stage === 'Rework')
     const skipped = links.filter((l) => l.stage === 'Faculty Assigned' || l.stage === 'Confirmed')
     const remErrors: string[] = []
+    const protectedLinks: string[] = []
+    let rebuilt = 0
     for (const l of editable) {
+      // NEVER rebuild a batch that already has real live progress — any class
+      // marked conducted means the team is actively running this batch, and a
+      // template rebuild would wipe their live edits (dates, conducted marks).
+      // Its LIVE schedule is the source of truth; leave it untouched.
+      const { count } = await supabase.from('batch_planners').select('id', { count: 'exact', head: true }).eq('link_id', l.id).eq('status', 'conducted')
+      if ((count ?? 0) > 0) { protectedLinks.push(batchName(l.batches)); continue }
       const res = await rematerialiseLink(supabase, l.id)
       if (res.errors.length) remErrors.push(`${batchName(l.batches)}: ${res.errors.slice(0, 1).join('')}`)
+      rebuilt++
     }
     setSaving(false)
 
     let msg = `Planner saved (${realClean.length} lecture(s)).`
-    if (editable.length) msg += ` Re-built ${editable.length} draft link(s).`
+    if (rebuilt) msg += ` Re-built ${rebuilt} draft link(s).`
+    if (protectedLinks.length) msg += ` Left ${protectedLinks.length} live batch(es) untouched (they have conducted classes — edit those in live mode): ${protectedLinks.slice(0, 2).join(', ')}.`
     if (skipped.length) msg += ` ${skipped.length} sent/confirmed link(s) left unchanged (recall to re-edit).`
     if (remErrors.length) msg += ` Warnings: ${remErrors.slice(0, 2).join('; ')}`
     setMessage({ type: remErrors.length ? 'info' : 'success', text: msg })

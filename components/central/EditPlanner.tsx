@@ -95,6 +95,8 @@ export default function EditPlanner() {
   // "Whole chapter conducted" — one past date for every topic of a chapter.
   const [conductChap, setConductChap] = useState<{ subjectId: string; chapter: string } | null>(null)
   const [conductChapDate, setConductChapDate] = useState('')
+  const [addChapterOpen, setAddChapterOpen] = useState(false)
+  const [addChapterName, setAddChapterName] = useState('')
 
   const selected = planners.find((p) => p.id === selectedId) ?? null
   const todayISO = new Date().toISOString().split('T')[0]
@@ -324,6 +326,15 @@ export default function EditPlanner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, activeSubject, search, faculty])
 
+  // Chapters from this subject's Concept Tags (GTT) that aren't already a
+  // group in the current planner — the pool "+ add chapter" can pick from.
+  const availableChaptersToAdd = useMemo(() => {
+    const subj = master?.subjects.find((s) => s.id === activeSubject)
+    if (!subj) return []
+    const used = new Set(rows.filter((r) => r.subject_id === activeSubject).map((r) => norm(r.chapter)))
+    return subj.chapters.map((c) => c.name).filter((name) => !used.has(norm(name)))
+  }, [master, activeSubject, rows])
+
   // Re-assign the subject's upcoming (non-conducted) dates in ascending order to
   // the rows in their current array order — so date always follows position.
   // Re-assign the subject's upcoming (non-conducted) dates in ascending order to
@@ -392,6 +403,17 @@ export default function EditPlanner() {
       const next = [...prev]; next.splice(idx + 1, 0, newRow); return next
     })
     setMessage({ type: 'success', text: `Added a class on ${fmtDate(newDate)} — the next free slot for ${subjName(subjectId)} (no overlap).` })
+  }
+  // Adds a brand-new chapter to the active subject, sourced ONLY from Concept
+  // Tags — reuses the exact same row-creation path as an existing chapter's
+  // "+ add row" (liveAddRow / addRowToChapter), so save, faculty-send, and
+  // everything else works identically — nothing new to break.
+  const addChapter = () => {
+    const chapter = addChapterName.trim()
+    if (!chapter) return
+    if (liveLinkId) liveAddRow(activeSubject, chapter)
+    else addRowToChapter(activeSubject, chapter)
+    setAddChapterOpen(false); setAddChapterName('')
   }
 
   const removeRow = (key: string) => setRows((prev) => {
@@ -709,6 +731,10 @@ export default function EditPlanner() {
                 <button onClick={() => setReorderMode('chapters')} className={`px-3 h-10 text-sm font-semibold ${reorderMode === 'chapters' ? 'bg-violet-600 text-white' : 'bg-white text-neutral-600'}`}>Chapters</button>
               </div>
             </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">&nbsp;</label>
+              <button onClick={() => { setAddChapterName(''); setAddChapterOpen(true) }} className="h-10 px-4 rounded-lg text-sm font-semibold bg-violet-50 text-violet-700 border border-violet-200 hover:bg-violet-100 whitespace-nowrap">+ add chapter</button>
+            </div>
           </div>
 
           {/* Chapter groups */}
@@ -816,6 +842,23 @@ export default function EditPlanner() {
             <div className="flex gap-3">
               <BtnPrimary className="flex-1" onClick={applyChapterConducted} disabled={!conductChapDate || conductChapDate > todayISO}>Mark all conducted</BtnPrimary>
               <BtnSecondary className="flex-1" onClick={() => setConductChap(null)}>Cancel</BtnSecondary>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Add a whole new chapter — sourced only from this subject's Concept Tags */}
+      {addChapterOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-950/50 backdrop-blur-sm" onClick={() => setAddChapterOpen(false)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl border border-neutral-200" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-neutral-950 mb-1">Add a chapter</h3>
+            <p className="text-sm text-neutral-500 mb-4">Only chapters already in <b>{subjName(activeSubject)}</b>&apos;s Concept Tags can be added here. If the chapter you need isn&apos;t listed, add it in Concept Tags first, then come back.</p>
+            <select value={addChapterName} onChange={(e) => setAddChapterName(e.target.value)} className="w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 mb-4" disabled={availableChaptersToAdd.length === 0}>
+              <option value="">{availableChaptersToAdd.length ? 'Select chapter' : 'All Concept Tag chapters are already in this planner'}</option>
+              {availableChaptersToAdd.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <div className="flex gap-3">
+              <BtnPrimary className="flex-1" onClick={addChapter} disabled={!addChapterName}>Add chapter</BtnPrimary>
+              <BtnSecondary className="flex-1" onClick={() => setAddChapterOpen(false)}>Cancel</BtnSecondary>
             </div>
           </div>
         </div>

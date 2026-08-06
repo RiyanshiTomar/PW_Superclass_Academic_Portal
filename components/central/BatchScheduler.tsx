@@ -434,7 +434,54 @@ export default function BatchScheduler() {
 
   const updateDayTime = (rowIndex: number, dayIndex: number, patch: Partial<DaySlot>) =>
     setScheduleRows((prev) => prev.map((r, i) => (i !== rowIndex ? r : { ...r, days: r.days.map((d, di) => (di === dayIndex ? { ...d, ...patch } : d)) })))
+  
+  // After a schedule change, existing materialised classes (batch_planners) keep
+// whatever time/room they inherited when created — they do NOT auto-follow a
+// later schedule edit. This re-syncs ONLY the time/duration/room of FUTURE,
+// non-conducted rows to match the new weekly slot for their subject+weekday.
+// Topic, chapter, faculty, and status are never touched — this can't scramble
+// a live plan, it only fixes stale times/rooms.
+async function syncMaterialisedTimes(
+  supabase: ReturnType<typeof createClient>,
+  batchId: string,
+  flat: FlatSchedule[]
+): Promise<{ updated: number; unmatchedCount: number }> {
+  const today = new Date().toISOString().split('T')[0]
+  const { data, error } = await supabase
+    .from('batch_planners')
+    .select('id, subject_id, planned_date, start_time, duration_minutes, classroom_id, status')
+    .eq('batch_id', batchId)
+    .eq('is_buffer', false)
+    .gte('planned_date', today)
+  if (error || !data) return { updated: 0, unmatchedCount: 0 }
 
+  const bySubjDay = new Map<string, { start: string; end: string; classroom: string | null; from: string | null; to: string | null }[]>()
+  for (const f of flat) {
+    if (!f.subject_id) continue
+    const key = `${f.subject_id}:${f.day_of_week}`
+    const arr = bySubjDay.get(key) ?? []
+    arr.push({ start: f.start_time, end: f.end_time, classroom: f.classroom_id, from: f.effective_from, to: f.effective_to })
+    bySubjDay.set(key, arr)
+  }
+
+  let updated = 0
+  let unmatchedCount = 0
+  for (const row of data as { id: string; subject_id: string | null; planned_date: string; start_time: string | null; duration_minutes: number; classroom_id: string | null; status?: string }[]) {
+    if (row.status === 'conducted' || !row.subject_id) continue
+    const dow = new Date(row.planned_date + 'T12:00:00').getDay()
+    const candidates = bySubjDay.get(`${row.subject_id}:${dow}`) ?? []
+    const slot = candidates.find((s) => (!s.from || row.planned_date >= s.from) && (!s.to || row.planned_date <= s.to)) ?? candidates[0]
+    if (!slot) { unmatchedCount++; continue }
+    const newStart = slot.start.slice(0, 5)
+    const newDur = Math.max(0, toMinutes(slot.end.slice(0, 5)) - toMinutes(slot.start.slice(0, 5)))
+    const curStart = row.start_time ? row.start_time.slice(0, 5) : null
+    if (curStart !== newStart || row.duration_minutes !== newDur || row.classroom_id !== slot.classroom) {
+      const { error: upErr } = await supabase.from('batch_planners').update({ start_time: slot.start, duration_minutes: newDur, classroom_id: slot.classroom }).eq('id', row.id)
+      if (!upErr) updated++
+    }
+  }
+  return { updated, unmatchedCount }
+}
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
     setMessage(null)
@@ -550,6 +597,7 @@ export default function BatchScheduler() {
       batchId = data.id
     }
 
+    let syncNote = ''
     if (batchId) {
       await supabase.from('batch_schedules').delete().eq('batch_id', batchId)
       if (flat.length > 0) {
@@ -563,9 +611,17 @@ export default function BatchScheduler() {
           return fail(msg)
         }
       }
+      // Existing planner classes keep the time/room they inherited when made —
+      // re-sync any future (non-conducted) ones to the new slot so a schedule
+      // edit doesn't leave a stale duplicate sitting at the old time.
+      if (editingBatch) {
+        const sync = await syncMaterialisedTimes(supabase, batchId, flat)
+        if (sync.updated) syncNote = ` ${sync.updated} already-scheduled class(es) were moved to the new time/room.`
+        if (sync.unmatchedCount) syncNote += ` ${sync.unmatchedCount} class(es) no longer have a matching weekly slot on their day — check them in Edit Planner.`
+      }
     }
 
-    setMessage({ type: 'success', text: editingBatch ? 'Batch updated.' : 'Batch created.' })
+    setMessage({ type: 'success', text: (editingBatch ? 'Batch updated.' : 'Batch created.') + syncNote })
     resetForm()
     await loadData()
     setSaving(false)

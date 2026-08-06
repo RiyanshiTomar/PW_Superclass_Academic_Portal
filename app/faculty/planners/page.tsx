@@ -12,6 +12,7 @@ type MyLecture = {
   id: string
   link_id: string
   stage: string
+  status: string | null
   topic_name: string
   chapter: string
   planned_date: string
@@ -60,46 +61,64 @@ export default function FacultyPlannersPage() {
     if (!appUser) { setLoading(false); return }
     setAppUserId(appUser.id)
 
-    const [mineRes, propRes] = await Promise.all([
-      supabase
-        .from('batch_planners')
-        .select('id, link_id, stage, topic_name, chapter, planned_date, start_time, duration_minutes, subjects(name), batches(name), classrooms(name)')
-        .eq('faculty_id', appUser.id)
-        .in('stage', ['Faculty Assigned', 'Confirmed', 'Rework'])
-        .order('planned_date', { ascending: true }),
-      supabase
-        .from('planner_lectures')
-        .select('planner_id, planners(name)')
-        .eq('faculty_id', appUser.id),
-    ])
-
-    const rows = (mineRes.data ?? []) as unknown as MyLecture[]
-    // Seed the editable fields from the current planner values.
-    const seed: Record<string, { topic_name: string; chapter: string }> = {}
-    for (const r of rows) seed[r.id] = { topic_name: r.topic_name ?? '', chapter: r.chapter ?? '' }
-    setEdits(seed)
-
-    // Group the whole planner by batch (all dates together).
-    const byBatch = new Map<string, MyLecture[]>()
-    for (const row of rows) {
-      const bn = one(row.batches)?.name ?? 'Batch'
-      if (!byBatch.has(bn)) byBatch.set(bn, [])
-      byBatch.get(bn)!.push(row)
+    // Paginate + exclude buffer slots (reserved/empty rows never meant to reach
+    // faculty). PostgREST caps a single select at ~1000 rows; without paging,
+    // prolific faculty silently lose classes past that cutoff.
+    async function fetchAllMine(facultyId: string): Promise<MyLecture[]> {
+      const out: MyLecture[] = []
+      const PAGE = 1000
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase
+          .from('batch_planners')
+          .select('id, link_id, stage, status, topic_name, chapter, planned_date, start_time, duration_minutes, subjects(name), batches(name), classrooms(name)')
+          .eq('faculty_id', facultyId)
+          .eq('is_buffer', false)
+          .order('planned_date', { ascending: true })
+          .range(from, from + PAGE - 1)
+        if (error) throw error
+        const chunk = (data ?? []) as unknown as MyLecture[]
+        out.push(...chunk)
+        if (chunk.length < PAGE) break
+      }
+      return out
     }
-    const groupList: BatchGroup[] = Array.from(byBatch.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([batchName, lectures]) => ({ batchName, lectures, pending: lectures.filter((l) => l.stage === 'Faculty Assigned').length }))
-    setGroups(groupList)
 
-    // Proposed = planners meant for me that aren't yet on my calendar.
-    const propCount = new Map<string, { name: string; count: number }>()
-    for (const r of (propRes.data ?? []) as unknown as { planner_id: string; planners: { name: string } | { name: string }[] | null }[]) {
-      const p = one(r.planners)
-      const cur = propCount.get(r.planner_id) ?? { name: p?.name ?? 'Planner', count: 0 }
-      cur.count += 1
-      propCount.set(r.planner_id, cur)
+    let rows: MyLecture[] = []
+    try {
+      const [mineRows, propRes] = await Promise.all([
+        fetchAllMine(appUser.id),
+        supabase.from('planner_lectures').select('planner_id, planners(name)').eq('faculty_id', appUser.id),
+      ])
+      rows = mineRows
+      // Seed the editable fields from the current planner values.
+      const seed: Record<string, { topic_name: string; chapter: string }> = {}
+      for (const r of rows) seed[r.id] = { topic_name: r.topic_name ?? '', chapter: r.chapter ?? '' }
+      setEdits(seed)
+
+      // Group the whole planner by batch (all dates together).
+      const byBatch = new Map<string, MyLecture[]>()
+      for (const row of rows) {
+        const bn = one(row.batches)?.name ?? 'Batch'
+        if (!byBatch.has(bn)) byBatch.set(bn, [])
+        byBatch.get(bn)!.push(row)
+      }
+      const groupList: BatchGroup[] = Array.from(byBatch.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([batchName, lectures]) => ({ batchName, lectures, pending: lectures.filter((l) => l.stage === 'Faculty Assigned' && l.status !== 'conducted').length }))
+      setGroups(groupList)
+
+      // Proposed = planners meant for me that aren't yet on my calendar.
+      const propCount = new Map<string, { name: string; count: number }>()
+      for (const r of (propRes.data ?? []) as unknown as { planner_id: string; planners: { name: string } | { name: string }[] | null }[]) {
+        const p = one(r.planners)
+        const cur = propCount.get(r.planner_id) ?? { name: p?.name ?? 'Planner', count: 0 }
+        cur.count += 1
+        propCount.set(r.planner_id, cur)
+      }
+      setProposed(rows.length > 0 ? [] : Array.from(propCount.entries()).map(([plannerId, v]) => ({ plannerId, name: v.name, count: v.count })))
+    } catch (err) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Could not load your planners.' })
     }
-    setProposed(rows.length > 0 ? [] : Array.from(propCount.entries()).map(([plannerId, v]) => ({ plannerId, name: v.name, count: v.count })))
     setLoading(false)
   }
 
@@ -122,7 +141,10 @@ export default function FacultyPlannersPage() {
     const e = edits[l.id] ?? { topic_name: l.topic_name, chapter: l.chapter }
     setBusy(true); setMessage(null)
     const patch: Record<string, unknown> = { topic_name: e.topic_name.trim(), chapter: e.chapter.trim() }
-    if (confirm) patch.stage = 'Confirmed'
+    if (confirm) {
+      patch.stage = 'Confirmed'
+      patch.status = 'confirmed'
+    }
     const { error } = await supabase.from('batch_planners').update(patch).eq('id', l.id).eq('faculty_id', appUserId)
     setBusy(false)
     if (error) { setMessage({ type: 'error', text: error.message }); return }
@@ -136,9 +158,9 @@ export default function FacultyPlannersPage() {
     if (!appUserId) return
     setBusy(true); setMessage(null)
     for (const l of bg.lectures) {
-      if (l.stage !== 'Faculty Assigned') continue
+      if (l.stage !== 'Faculty Assigned' || l.status === 'conducted') continue
       const e = edits[l.id] ?? { topic_name: l.topic_name, chapter: l.chapter }
-      const { error } = await supabase.from('batch_planners').update({ topic_name: e.topic_name.trim(), chapter: e.chapter.trim(), stage: 'Confirmed' }).eq('id', l.id).eq('faculty_id', appUserId)
+      const { error } = await supabase.from('batch_planners').update({ topic_name: e.topic_name.trim(), chapter: e.chapter.trim(), stage: 'Confirmed', status: 'confirmed' }).eq('id', l.id).eq('faculty_id', appUserId)
       if (error) { setBusy(false); setMessage({ type: 'error', text: error.message }); return }
     }
     setBusy(false)
@@ -234,23 +256,33 @@ export default function FacultyPlannersPage() {
                               <tbody className="divide-y divide-neutral-100">
                                 {g.rows.map((l) => {
                                   const e = edits[l.id] ?? { topic_name: l.topic_name, chapter: l.chapter }
-                                  const past = l.planned_date <= todayISO
-                                  const conducted = l.planned_date < todayISO
+                                  const conducted = l.status === 'conducted'
+                                  const label = conducted
+                                    ? 'Conducted'
+                                    : l.stage === 'Faculty Assigned'
+                                      ? 'Scheduled'
+                                      : l.stage === 'Confirmed'
+                                        ? 'Confirmed'
+                                        : l.stage || 'Scheduled'
+                                  const labelClass = conducted
+                                    ? 'bg-neutral-100 text-neutral-600 ring-neutral-300'
+                                    : stageBadgeClass(l.stage)
                                   return (
-                                    <tr key={l.id} className={l.stage === 'Faculty Assigned' ? 'bg-amber-50/30' : ''}>
+                                    <tr key={l.id} className={l.status === 'conducted' ? 'bg-neutral-100/70' : l.stage === 'Faculty Assigned' ? 'bg-amber-50/30' : ''}>
                                       <td className="px-3 py-2 whitespace-nowrap">
                                         {new Date(l.planned_date).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}
-                                        {!past && <span className="ml-1 text-[10px] text-sky-600 font-semibold">upcoming</span>}
                                       </td>
                                       <td className="px-3 py-2 text-neutral-500 whitespace-nowrap">{formatTime(l.start_time)}</td>
                                       <td className="px-3 py-2"><input value={e.topic_name} onChange={(ev) => setEdit(l.id, { topic_name: ev.target.value })} className={inputCls} placeholder="Topic taught" /></td>
                                       <td className="px-3 py-2 text-right whitespace-nowrap">
-                                        {l.stage === 'Faculty Assigned' ? (
+                                        {conducted ? (
+                                          <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 ${labelClass}`}>{label}</span>
+                                        ) : l.stage === 'Faculty Assigned' ? (
                                           <button onClick={() => saveOne(l, true)} disabled={busy} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Confirm</button>
                                         ) : isDirty(l) ? (
                                           <button onClick={() => saveOne(l, false)} disabled={busy} className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Save</button>
                                         ) : (
-                                          <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 ${l.stage === 'Confirmed' && conducted ? 'bg-neutral-100 text-neutral-600 ring-neutral-300' : stageBadgeClass(l.stage)}`}>{l.stage === 'Confirmed' ? (conducted ? 'Conducted' : 'Confirmed') : l.stage}</span>
+                                          <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 ${labelClass}`}>{label}</span>
                                         )}
                                       </td>
                                     </tr>

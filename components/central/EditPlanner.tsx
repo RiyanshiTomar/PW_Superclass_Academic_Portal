@@ -36,7 +36,7 @@ function batchName(v: LinkLite['batches']): string {
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim().replace(/s$/, '')
 const fmtDate = (d: string) => (d ? new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : '—')
 // Edit Planner shows the COMPLETE planner with its real dates (past + future);
-// central marks each class Confirmed / Already-conducted (with its final date).
+// central marks each class Scheduled / Already-conducted (with its final date).
 
 export default function EditPlanner() {
   const supabase = createClient()
@@ -249,11 +249,12 @@ export default function EditPlanner() {
         chapter, topic_name: topic,
         planned_date: date,
         duration_minutes: (l.duration_minutes as number) ?? 60,
-        // Prefer a stored status; otherwise infer from the date (past = already
-        // conducted) so the board reads correctly even without the status column.
-        status: (hasStatus && ['planned', 'confirmed', 'conducted'].includes(l.status as string)
-          ? l.status
-          : (date && date < todayISO ? 'conducted' : 'planned')) as Status,
+        // If the table has an explicit status column, use it and do not infer
+        // Conducted from the date. If the column is absent, fall back to date
+        // inference so older schemas still show past-history as conducted.
+        status: (hasStatus
+          ? (['planned', 'confirmed', 'conducted'].includes(l.status as string) ? l.status : 'planned')
+          : ((date && date < todayISO) ? 'conducted' : 'planned')) as Status,
         stage: (l.stage as string) ?? '',
         start_time: (l.start_time as string) ?? null,
         classroom_id: (l.classroom_id as string) ?? null,
@@ -453,7 +454,7 @@ export default function EditPlanner() {
   const applyConducted = () => {
     if (!conductKey || !conductDate) return
     // Conducted = already-happened history: it's logged as-is, never overlap-checked.
-    setRows((prev) => prev.map((row) => (row.key === conductKey ? { ...row, status: 'conducted' as Status, planned_date: conductDate } : row)))
+    setRows((prev) => prev.map((row) => (row.key === conductKey ? { ...row, status: 'conducted' as Status, planned_date: conductDate, stage: 'Confirmed' } : row)))
     setConductKey(null); setConductDate('')
   }
 
@@ -463,7 +464,7 @@ export default function EditPlanner() {
     if (!conductChap || !conductChapDate) return
     if (conductChapDate > todayISO) { setMessage({ type: 'error', text: 'A conducted date must be today or in the past.' }); return }
     setRows((prev) => prev.map((row) => (row.subject_id === conductChap.subjectId && row.chapter === conductChap.chapter
-      ? { ...row, status: 'conducted' as Status, planned_date: conductChapDate }
+      ? { ...row, status: 'conducted' as Status, planned_date: conductChapDate, stage: 'Confirmed' }
       : row)))
     setConductChap(null); setConductChapDate('')
   }
@@ -474,7 +475,7 @@ export default function EditPlanner() {
     const check = resolveLiveSlot(r?.subject_id ?? '', confirmDate, confirmKey)
     if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
     setRows((prev) => prev.map((row) => (row.key === confirmKey
-      ? { ...row, status: 'confirmed' as Status, planned_date: confirmDate, ...(check.slot ? { start_time: check.slot.start, classroom_id: check.slot.classroom, duration_minutes: check.slot.duration } : {}) }
+      ? { ...row, status: 'confirmed' as Status, stage: 'Faculty Assigned', planned_date: confirmDate, ...(check.slot ? { start_time: check.slot.start, classroom_id: check.slot.classroom, duration_minutes: check.slot.duration } : {}) }
       : row)))
     setConfirmKey(null); setConfirmDate('')
   }
@@ -547,6 +548,7 @@ export default function EditPlanner() {
           subject_id: r.subject_id || null, faculty_id: r.faculty_id, chapter: r.chapter.trim(), topic_name: r.topic_name.trim(),
           planned_date: r.planned_date, duration_minutes: r.duration_minutes ?? 60,
           start_time: r.start_time ?? null, classroom_id: r.classroom_id ?? null,
+          stage: (r.stage ?? liveStage) || 'Draft',
         }
         // Persist status only if batch_planners actually has the column (migration
         // optional — the tracking board still works on dates without it).
@@ -649,7 +651,7 @@ export default function EditPlanner() {
             </select>
           </div>
         </div>
-        <p className="text-xs text-neutral-400 mt-3">Filter by centre &amp; batch to find that batch&rsquo;s planner. Chapters are locked (concept tags); edit the <b>topic</b>{!liveLinkId && <>, mark each class <b>Confirmed</b> or <b>Already conducted</b> (with its final date)</>}, and drag to reorder. Dates always stay in order. {liveLinkId ? 'You are editing this batch’s LIVE schedule.' : 'Pick a Batch too to edit that batch’s live schedule; without a batch you edit the shared template (re-builds Draft/Rework links).'}</p>
+        <p className="text-xs text-neutral-400 mt-3">Filter by centre &amp; batch to find that batch&rsquo;s planner. Chapters are locked (concept tags); edit the <b>topic</b>{!liveLinkId && <>, mark each class <b>Scheduled</b> or <b>Already conducted</b> (with its final date)</>}, and drag to reorder. Dates always stay in order. {liveLinkId ? 'You are editing this batch’s LIVE schedule.' : 'Pick a Batch too to edit that batch’s live schedule; without a batch you edit the shared template (re-builds Draft/Rework links).'}</p>
       </Card>
 
       {selected && liveLinkId && (
@@ -759,7 +761,7 @@ export default function EditPlanner() {
                           updateRow(r.key, { planned_date: newDate, ...(check.slot ? { start_time: check.slot.start, classroom_id: check.slot.classroom, duration_minutes: check.slot.duration } : {}) })
                         }}
                         title={r.planned_date < todayISO && r.status !== 'conducted' ? 'This date is in the past' : ''}
-                        className={`w-[130px] shrink-0 h-9 px-2 border rounded-lg text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-violet-500 ${r.planned_date < todayISO && r.status !== 'conducted' ? 'border-rose-200 text-rose-600 bg-rose-50/40' : 'border-neutral-200 text-neutral-600 bg-white/70'}`}
+                        className="w-[130px] shrink-0 h-9 px-2 border border-neutral-200 rounded-lg text-xs font-semibold text-neutral-600 bg-white/70 focus:outline-none focus:ring-2 focus:ring-violet-500"
                       />
                       <input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(r.key, { topic_name: e.target.value })} placeholder="Topic taught" className="flex-1 min-w-[160px] h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
                       <select value={r.faculty_id} onChange={(e) => updateRow(r.key, { faculty_id: e.target.value })} className="w-[160px] shrink-0 h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
@@ -769,7 +771,7 @@ export default function EditPlanner() {
                       {(!liveLinkId || liveHasStatus) ? (
                         <select value={r.status} onChange={(e) => setStatus(r.key, e.target.value as Status)} className={`w-[150px] shrink-0 h-9 px-2 rounded-lg text-xs font-semibold border ${statusPill(r.status)}`}>
                           <option value="planned">Planned</option>
-                          <option value="confirmed">Confirmed ✓</option>
+                          <option value="confirmed">Scheduled ✓</option>
                           <option value="conducted">Already conducted</option>
                         </select>
                       ) : (
@@ -822,11 +824,11 @@ export default function EditPlanner() {
       {confirmKey && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-950/50 backdrop-blur-sm" onClick={() => setConfirmKey(null)}>
           <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl border border-neutral-200" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-bold text-neutral-950 mb-1">Confirm this class</h3>
-            <p className="text-sm text-neutral-500 mb-4">Keep the current date, or move it to a new one — either way it'll be marked Confirmed.</p>
+            <h3 className="text-lg font-bold text-neutral-950 mb-1">Schedule this class</h3>
+            <p className="text-sm text-neutral-500 mb-4">Keep the current date, or move it to a new one — either way it'll be marked Scheduled.</p>
             <input type="date" value={confirmDate} onChange={(e) => setConfirmDate(e.target.value)} className="w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 mb-4" />
             <div className="flex gap-3">
-              <BtnPrimary className="flex-1" onClick={applyConfirmed} disabled={!confirmDate}>Confirm</BtnPrimary>
+              <BtnPrimary className="flex-1" onClick={applyConfirmed} disabled={!confirmDate}>Schedule</BtnPrimary>
               <BtnSecondary className="flex-1" onClick={() => setConfirmKey(null)}>Cancel</BtnSecondary>
             </div>
           </div>

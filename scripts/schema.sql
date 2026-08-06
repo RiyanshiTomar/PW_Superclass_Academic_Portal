@@ -154,6 +154,7 @@ CREATE TABLE batch_planners (
   start_time TIME,
   duration_minutes INTEGER NOT NULL DEFAULT 60,
   stage TEXT NOT NULL DEFAULT 'Draft',
+  status TEXT NOT NULL DEFAULT 'planned',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

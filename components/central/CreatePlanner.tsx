@@ -15,7 +15,7 @@ type PlannerRow = { id: string; name: string; program_id: string | null; created
 type ScheduleSlot = { subject_id: string | null; day_of_week: number; faculty_id: string | null; effective_from: string | null; effective_to: string | null; start_time?: string | null; end_time?: string | null }
 type Status = 'planned' | 'confirmed' | 'conducted'
 // One planned lecture. status: planned (auto/floating), confirmed (central gave a
-// future date), conducted (its date is in the past → already taught).
+// future date — shown in the UI as scheduled), conducted (its date is in the past → already taught).
 type Draft = { subject_id: string; faculty_id: string; planned_date: string; day: number; chapter: string; topic_name: string; status: Status }
 
 // Match tolerantly against the concept tags (the source of truth): unify dash
@@ -249,7 +249,7 @@ export default function CreatePlanner() {
         id: s.id, name: s.name,
         lectures: rows.length,
         plannerMin, scheduledMin,
-        confirmed: rows.filter((r) => r.status === 'confirmed').length,
+        scheduled: rows.filter((r) => r.status === 'confirmed').length,
         conducted: rows.filter((r) => r.status === 'conducted').length,
         over: plannerMin > scheduledMin && scheduledMin > 0,
       }
@@ -339,7 +339,7 @@ export default function CreatePlanner() {
 
   // Upload the planner CSV/Excel = the CONTENT (one row per lecture). Date is
   // OPTIONAL per row: a date central puts LOCKS the class there (past → already
-  // conducted, future → confirmed); a blank date FLOATS onto the subject's next
+  // conducted, future → scheduled); a blank date FLOATS onto the subject's next
   // schedule class-dates in CSV order (status planned). The whole draft is rebuilt.
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -507,7 +507,7 @@ export default function CreatePlanner() {
           <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
             <div>
               <h3 className="font-bold text-neutral-950">Fill the planner — {batch?.name}</h3>
-              <p className="text-sm text-neutral-500">{draft.length} classes. Upload your CSV (Subject · Chapter · Topic · Date optional). A <b>date you set</b> locks the class (past → <span className="text-neutral-500 font-medium">already conducted</span>, future → <span className="text-emerald-600 font-medium">confirmed</span>); a <b>blank date</b> floats onto the schedule (<span className="text-sky-600 font-medium">planned</span>). Concept-tag checked; save when no red rows.</p>
+              <p className="text-sm text-neutral-500">{draft.length} classes. Upload your CSV (Subject · Chapter · Topic · Date optional). A <b>date you set</b> locks the class (past → <span className="text-neutral-500 font-medium">already conducted</span>, future → <span className="text-emerald-600 font-medium">scheduled</span>); a <b>blank date</b> floats onto the schedule (<span className="text-sky-600 font-medium">planned</span>). Concept-tag checked; save when there are no errors.</p>
             </div>
             <div className="flex flex-wrap gap-2">
               <BtnSecondary onClick={downloadXlsx}>Download Excel</BtnSecondary>
@@ -526,7 +526,7 @@ export default function CreatePlanner() {
           )}
           <div className="mb-4 border border-neutral-200 rounded-xl overflow-hidden">
             <div className="bg-neutral-50 px-4 py-2.5">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-600">Total hours per subject <span className="normal-case font-normal text-neutral-400">· planner vs scheduled · confirmed/conducted so far</span></h4>
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-600">Total hours per subject <span className="normal-case font-normal text-neutral-400">· planner vs scheduled · scheduled/conducted so far</span></h4>
             </div>
             <div className="divide-y divide-neutral-100">
               {subjectStats.map((s) => (
@@ -535,7 +535,7 @@ export default function CreatePlanner() {
                   <div className="flex items-center gap-3 text-xs">
                     <span className={s.over ? 'text-red-600 font-semibold' : 'text-neutral-700'}><b>{fmtHrs(s.plannerMin)}h</b> planned <span className="text-neutral-400">/ {fmtHrs(s.scheduledMin)}h scheduled</span></span>
                     <span className="text-neutral-400">·</span>
-                    <span className="text-emerald-700">{s.confirmed} confirmed</span>
+                    <span className="text-emerald-700">{s.scheduled} scheduled</span>
                     <span className="text-neutral-500">{s.conducted} conducted</span>
                     <span className="text-neutral-400">· {s.lectures} class{s.lectures === 1 ? '' : 'es'}</span>
                   </div>
@@ -562,9 +562,10 @@ export default function CreatePlanner() {
                   const err = rowError(r)
                   const eff: Status = r.planned_date && r.planned_date < todayISO ? 'conducted' : r.status
                   const stCls = eff === 'conducted' ? 'bg-neutral-200 text-neutral-700' : eff === 'confirmed' ? 'bg-emerald-100 text-emerald-800' : 'bg-sky-100 text-sky-800'
+                  const statusLabel = eff === 'conducted' ? 'Already conducted' : eff === 'confirmed' ? 'Scheduled' : 'Planned'
                   return (
                     <tr key={i} className={err ? 'bg-rose-50/50' : ''}>
-                      <td className="px-3 py-2 whitespace-nowrap text-neutral-700">{r.planned_date ? new Date(r.planned_date + 'T12:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : <span className="text-rose-500">no date</span>}</td>
+                      <td className="px-3 py-2 whitespace-nowrap text-neutral-700">{r.planned_date ? new Date(r.planned_date + 'T12:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : <span className="text-neutral-500">no date</span>}</td>
                       <td className="px-3 py-2 text-neutral-500">{r.planned_date ? DAYS[r.day] : '—'}</td>
                       <td className="px-3 py-2 text-neutral-700">{subjName(r.subject_id)}</td>
                       <td className="px-3 py-2">
@@ -575,7 +576,7 @@ export default function CreatePlanner() {
                       </td>
                       <td className="px-3 py-2"><input list={`cp-ch-${r.subject_id}`} value={r.chapter} onChange={(e) => updateDraft(i, { chapter: e.target.value })} className={cell} placeholder="Chapter" /></td>
                       <td className="px-3 py-2"><input list="cp-topics" value={r.topic_name} onChange={(e) => updateDraft(i, { topic_name: e.target.value })} className={cell} placeholder="Topic" /></td>
-                      <td className="px-3 py-2"><span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ${stCls}`}>{eff}</span></td>
+                      <td className="px-3 py-2"><span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ${stCls}`}>{statusLabel}</span></td>
                       <td className="px-3 py-2 text-xs">{err ? <span className="text-rose-600">{err}</span> : <span className={rowNote(r).startsWith('Buffer') ? 'text-sky-600' : 'text-neutral-400'}>{rowNote(r)}</span>}</td>
                     </tr>
                   )

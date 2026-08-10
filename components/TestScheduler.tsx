@@ -5,7 +5,8 @@ import { createClient } from '@/lib/supabase/client'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import {
   createTest, updateTest, setTestStage, getEligibleChapters, getTestCompletion, getBatchFreeWindows, validateTestSlot,
-  type EligibleChapter, type TestInput, type TestCompletion, type FreeWindow,
+  getFreeFacultyIds, getClashingClass, getFreeClassrooms, revertTestShift, type ClashingClass,
+  type EligibleChapter, type TestInput, type TestCompletion, type FreeWindow, type FreeClassroom,
 } from '@/lib/tests'
 import { stageBadgeClass, formatTime, toMinutes } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
@@ -61,6 +62,7 @@ type BulkRow = {
   chapterIds: string[]
   facultyId: string | null
   classroomId: string | null
+  roomAutoAssigned: boolean  // true if room was auto-picked (not in CSV)
   errors: string[]
   status: 'error' | 'free' | 'shift'  // shift = class/lecture clash (planner shifts); error also covers test-vs-test clash
   clashNote: string | null
@@ -72,7 +74,7 @@ type Batch = { id: string; name: string; centre_id: string; program_id: string; 
 type Centre = { id: string; name: string; branch_head_id: string | null }
 type Subject = { id: string; name: string; program_id: string | null }
 type Classroom = { id: string; name: string; room_no: string | null; centre_id: string; is_active: boolean }
-type Faculty = { id: string; full_name: string; centre_id: string | null }
+type Faculty = { id: string; full_name: string; centre_id: string | null; faculty_type: string | null }
 type UserCentre = { user_id: string; centre_id: string }
 type TestRow = {
   id: string; batch_id: string; subject_id: string | null; classroom_id: string | null; faculty_id: string | null
@@ -118,6 +120,16 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const [canShift, setCanShift] = useState(false)
   // Free windows suggested on the day when the picked slot clashes.
   const [freeWindows, setFreeWindows] = useState<FreeWindow[]>([])
+  const [freeFacultyIds, setFreeFacultyIds] = useState<Set<string> | null>(null)
+  const [clashDetail, setClashDetail] = useState<ClashingClass | null>(null)
+  const [wantDirect, setWantDirect] = useState(false)
+  // Free rooms when the selected room is busy
+  const [freeRooms, setFreeRooms] = useState<FreeClassroom[]>([])
+  const [roomClash, setRoomClash] = useState(false)
+// Filters for the test list
+const [filterCentre, setFilterCentre] = useState('')
+const [filterBatchId, setFilterBatchId] = useState('')
+const [testSearch, setTestSearch] = useState('')
   // Per-test aggregate syllabus completion (the ≥60% gate) — future tests only.
   const [completions, setCompletions] = useState<Record<string, TestCompletion>>({})
   // chapter ids per test (for the completion calc)
@@ -218,6 +230,43 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [partType, batchId, subjectId, testDate])
 
+  useEffect(() => {
+  if (!formBatch || !testDate || !startTime || formFaculty.length === 0) { setFreeFacultyIds(null); return }
+  let cancelled = false
+  const dur = parseInt(duration, 10) || 60
+  getFreeFacultyIds(supabase, {
+    candidateFacultyIds: formFaculty.map((f) => f.id),
+    date: testDate, startTime, durationMinutes: dur,
+    ignoreTestId: editingId ?? undefined,
+  }).then((set) => { if (!cancelled) setFreeFacultyIds(set) })
+  return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [formBatch, testDate, startTime, duration, formFaculty, editingId])
+
+useEffect(() => {
+  if (!batchId || !testDate) { setFreeWindows([]); return }
+  let cancelled = false
+  const dur = parseInt(duration, 10) || 60
+  getBatchFreeWindows(supabase, { batchId, date: testDate, durationMinutes: dur, ignoreTestId: editingId ?? undefined }).then((fw) => { if (!cancelled) setFreeWindows(fw) })
+  return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [batchId, testDate, duration, editingId])
+
+  // Recompute which faculty are actually free at the chosen date/time, so the
+// invigilator dropdown only offers real options.
+useEffect(() => {
+  if (!formBatch || !testDate || !startTime || formFaculty.length === 0) { setFreeFacultyIds(null); return }
+  let cancelled = false
+  const dur = parseInt(duration, 10) || 60
+  getFreeFacultyIds(supabase, {
+    candidateFacultyIds: formFaculty.map((f) => f.id),
+    date: testDate, startTime, durationMinutes: dur,
+    ignoreTestId: editingId ?? undefined,
+  }).then((set) => { if (!cancelled) setFreeFacultyIds(set) })
+  return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [formBatch, testDate, startTime, duration, formFaculty, editingId])
+
   // Compute the ≥60% syllabus gate for every upcoming test so we can warn on
   // the card. Only future tests matter (past ones already happened).
   useEffect(() => {
@@ -250,12 +299,13 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const roomLabel = (c: Classroom) => (c.room_no ? `${c.room_no} · ${c.name}` : c.name)
   const testChapterNames = (testId: string) =>
     testChapters.filter((tc) => tc.test_id === testId).map((tc) => one(tc.chapters)?.name).filter(Boolean) as string[]
-
+  
   const resetForm = () => {
     setShowForm(false); setEditingId(null)
     setBatchId(''); setName(''); setTestDate(''); setStartTime('10:00'); setDuration('60')
     setTestType('Objective'); setPartType('Full'); setSubjectId(''); setFacultyId(''); setClassroomId('')
     setEligible([]); setSelectedChapters(new Set()); setCanShift(false); setFreeWindows([])
+    setClashDetail(null); setFreeFacultyIds(null); setWantDirect(false); setFreeRooms([]); setRoomClash(false)
   }
 
   const startEdit = (t: TestRow) => {
@@ -275,14 +325,13 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
 
   const submit = (e: React.FormEvent) => { e.preventDefault(); doSubmit(false) }
 
-  const doSubmit = async (testPriority: boolean) => {
-    setMsg(null); setCanShift(false); setFreeWindows([])
+  const doSubmit = async (testPriority: boolean, scheduleDirect = false) => {
+    setMsg(null); setCanShift(false); setFreeRooms([]); setRoomClash(false)
     if (!batchId) return setMsg({ type: 'error', text: 'Pick a batch.' })
     if (!name.trim()) return setMsg({ type: 'error', text: 'Give the test a name.' })
     if (!testDate) return setMsg({ type: 'error', text: 'Pick a test date.' })
     const dur = parseInt(duration, 10)
     if (!dur || dur < 15 || dur > 480) return setMsg({ type: 'error', text: 'Duration must be 15–480 minutes.' })
-    // Invigilator is optional — can be assigned later.
     if (!classroomId) return setMsg({ type: 'error', text: 'Pick a room.' })
     let chapterIds: string[] = []
     if (partType === 'Part') {
@@ -292,35 +341,75 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     }
 
     setSaving(true)
-    const input: TestInput = {
-      batch_id: batchId,
-      subject_id: partType === 'Part' ? subjectId : null,
-      classroom_id: classroomId,
-      faculty_id: facultyId || null,
-      name: name.trim(),
-      test_date: testDate,
-      start_time: startTime,
-      duration_minutes: dur,
-      test_type: testType,
-      part_type: partType,
-      created_by: appUser?.id ?? null,
+    try {
+      const input: TestInput = {
+        batch_id: batchId,
+        subject_id: partType === 'Part' ? subjectId : null,
+        classroom_id: classroomId,
+        faculty_id: facultyId || null,
+        name: name.trim(),
+        test_date: testDate,
+        start_time: startTime,
+        duration_minutes: dur,
+        test_type: testType,
+        part_type: partType,
+        created_by: appUser?.id ?? null,
+      }
+      const res = editingId ? await updateTest(supabase, editingId, input, chapterIds, { testPriority }) : await createTest(supabase, input, chapterIds, { testPriority })
+      if (!res.ok) {
+        const errMsg = res.error ?? 'Could not save the test.'
+        setMsg({ type: 'error', text: errMsg })
+        const isClassClash = !testPriority && /class|planned lecture/i.test(errMsg)
+        const isRoomClash = !testPriority && /room/i.test(errMsg)
+        
+        setCanShift(isClassClash)
+        setRoomClash(isRoomClash)
+        
+        if (isClassClash) {
+          const cc = await getClashingClass(supabase, { batchId, date: testDate, startTime, durationMinutes: dur })
+          setClashDetail(cc)
+        } else {
+          setClashDetail(null)
+        }
+        
+        // Get free windows on same date
+        const fw = await getBatchFreeWindows(supabase, { batchId, date: testDate, durationMinutes: dur, ignoreTestId: editingId ?? undefined })
+        setFreeWindows(fw)
+        
+        // Get free rooms if room is the issue
+        if (isRoomClash && formBatch) {
+          const freeRms = await getFreeClassrooms(supabase, {
+            centreId: formBatch.centre_id,
+            date: testDate,
+            startTime,
+            durationMinutes: dur,
+            excludeRoomId: classroomId,
+            ignoreTestId: editingId ?? undefined,
+          })
+          setFreeRooms(freeRms)
+        }
+        
+        return
+      }
+      const shiftNote = res.shifted ? ` ${res.shifted} clashing lecture(s) shifted forward.` : ''
+      const unshiftNote = res.unshiftable ? ` ⚠ ${res.unshiftable} lecture(s) couldn't be shifted — no buffer/class-date left before the batch's end date. Check Edit Planner.` : ''
+      const bufferNote = res.shifted && res.shifted > 0 ? ` (${res.shifted} buffer slot${res.shifted > 1 ? 's' : ''} utilized)` : ''
+      let stageNote = ''
+      if (scheduleDirect) {
+        const testId = editingId ?? (res as { id?: string }).id
+        if (testId) {
+          const { error: stageErr } = await setTestStage(supabase, testId, 'Confirmed')
+          stageNote = stageErr ? ` (could not confirm: ${stageErr})` : ' Scheduled directly — no faculty confirmation needed.'
+        }
+      }
+      setMsg({ type: unshiftNote ? 'info' : 'success', text: (editingId ? 'Test updated.' : scheduleDirect ? 'Test created.' : 'Test saved as draft. Use “Send to Faculty” to assign.') + shiftNote + bufferNote + unshiftNote + stageNote })
+      resetForm()
+      await loadData()
+    } catch (err) {
+      setMsg({ type: 'error', text: err instanceof Error ? `Something went wrong: ${err.message}` : 'Something went wrong saving the test — please try again.' })
+    } finally {
+      setSaving(false)
     }
-    const res = editingId ? await updateTest(supabase, editingId, input, chapterIds, { testPriority }) : await createTest(supabase, input, chapterIds, { testPriority })
-    setSaving(false)
-    if (!res.ok) {
-      setMsg({ type: 'error', text: res.error ?? 'Could not save the test.' })
-      // A class/lecture clash can be resolved by giving the test priority; a
-      // clash with another TEST cannot, so only offer the shift for the former.
-      setCanShift(!testPriority && /class|planned lecture/i.test(res.error ?? ''))
-      // Whatever the clash, show the day's free windows so central can move it.
-      const fw = await getBatchFreeWindows(supabase, { batchId, date: testDate, durationMinutes: dur, ignoreTestId: editingId ?? undefined })
-      setFreeWindows(fw)
-      return
-    }
-    const shiftNote = res.shifted ? ` ${res.shifted} clashing lecture(s) shifted forward.` : ''
-    setMsg({ type: 'success', text: (editingId ? 'Test updated (saved as draft).' : 'Test saved as draft. Use “Send to Faculty” to assign.') + shiftNote })
-    resetForm()
-    await loadData()
   }
 
   const changeStage = async (t: TestRow, stage: string) => {
@@ -335,9 +424,14 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const deleteTest = async (t: TestRow) => {
     if (!confirm(`Delete test "${t.name}"? This cannot be undone.`)) return
     setBusyId(t.id)
+    const revert = await revertTestShift(supabase, t.id)
     const { error } = await supabase.from('test_schedules').delete().eq('id', t.id)
     setBusyId(null)
     if (error) return setMsg({ type: 'error', text: error.message })
+    let note = ''
+    if (revert.reverted) note += ` ${revert.reverted} lecture(s) moved back to their original date.`
+    if (revert.skipped) note += ` ${revert.skipped} lecture(s) couldn't auto-revert (their original slot is now used) — check Edit Planner.`
+    setMsg({ type: 'success', text: `Test deleted.${note}` })
     await loadData()
   }
 
@@ -365,16 +459,16 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     chapterCache.set(sid, rows)
     return rows
   }
-  const pickFreeRoom = async (rooms: Classroom[], date: string, time: string, dur: number): Promise<string | null> => {
+  const pickFreeRoom = async (rooms: Classroom[], centreId: string, date: string, time: string, dur: number): Promise<string | null> => {
     if (!rooms.length) return null
-    const s = toMinutes(time), e = s + dur
-    const { data } = await supabase.from('test_schedules').select('classroom_id, start_time, duration_minutes').eq('test_date', date).in('classroom_id', rooms.map((r) => r.id))
-    const busy = new Set<string>()
-    for (const r of (data ?? []) as { classroom_id: string | null; start_time: string; duration_minutes: number }[]) {
-      const rs = toMinutes(r.start_time.slice(0, 5))
-      if (r.classroom_id && rs < e && rs + r.duration_minutes > s) busy.add(r.classroom_id)
+    // Use getFreeClassrooms which checks everything (weekly, planner, tests)
+    const freeRooms = await getFreeClassrooms(supabase, { centreId, date, startTime: time, durationMinutes: dur })
+    // Return first free room from our candidate list
+    for (const room of rooms) {
+      if (freeRooms.some(fr => fr.id === room.id)) return room.id
     }
-    return rooms.find((r) => !busy.has(r.id))?.id ?? rooms[0]?.id ?? null
+    // Fallback: return first room from candidate list (best effort)
+    return rooms[0]?.id ?? null
   }
 
   const parseBulk = async (text: string) => {
@@ -459,15 +553,17 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
 
       // Room (explicit or auto-pick a free one at the centre)
       let classroomId: string | null = null
+      let roomAutoAssigned = false
       if (batch && date) {
         const centreRooms = classrooms.filter((c) => c.centre_id === batch.centre_id && c.is_active)
         const roomCell = get(r, ci.room)
         if (roomCell && !/^\(/.test(roomCell)) {
           const rm = centreRooms.filter((c) => norm(c.room_no ?? '') === norm(roomCell) || norm(c.name) === norm(roomCell))
           if (rm.length >= 1) classroomId = rm[0].id
-          else errors.push(`Room "${roomCell}" not found at the batch’s centre.`)
+          else errors.push(`Room "${roomCell}" not found at the batch's centre.`)
         } else {
-          classroomId = await pickFreeRoom(centreRooms, date, time, dur)
+          classroomId = await pickFreeRoom(centreRooms, batch.centre_id, date, time, dur)
+          roomAutoAssigned = !!classroomId
         }
       }
 
@@ -490,13 +586,15 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
 
       out.push({
         line: idx + 2, raw: r, batchId: batch?.id ?? null, batchLabel: batch ? batchLabel(batch) : get(r, ci.batch),
-        subjectId, scope, name, date, time, duration: dur, testType, chapterIds, facultyId, classroomId, errors, status, clashNote, completion,
+        subjectId, scope, name, date, time, duration: dur, testType, chapterIds, facultyId, classroomId, roomAutoAssigned, errors, status, clashNote, completion,
       })
     }
     setBulkRows(out)
     setBulkBusy(false)
     const ok = out.filter((x) => x.status !== 'error').length
-    setBulkMsg({ type: ok ? 'info' : 'error', text: `${out.length} row(s) read · ${ok} ready to import · ${out.length - ok} need fixing.` })
+    const autoRooms = out.filter((x) => x.roomAutoAssigned).length
+    const autoNote = autoRooms > 0 ? ` ${autoRooms} room(s) auto-assigned (🤖).` : ''
+    setBulkMsg({ type: ok ? 'info' : 'error', text: `${out.length} row(s) read · ${ok} ready to import · ${out.length - ok} need fixing.${autoNote}` })
   }
 
   const onBulkFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -525,9 +623,10 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     setBulkBusy(false)
     setBulkRows([])
     const warns = rows.filter((r) => r.completion?.warn).length
+    const bufferNote = shifted > 0 ? ` (${shifted} buffer slot${shifted > 1 ? 's' : ''} utilized)` : ''
     setBulkMsg({
       type: failures.length ? 'error' : 'success',
-      text: `Imported ${ok} test(s) as draft${shifted ? `, ${shifted} clashing lecture(s) shifted forward` : ''}.` +
+      text: `Imported ${ok} test(s) as draft${shifted ? `, ${shifted} clashing lecture(s) shifted forward${bufferNote}` : ''}.` +
         (warns ? ` ${warns} have <60% syllabus taught — see the warnings in the list.` : '') +
         (failures.length ? ` Failed: ${failures.join('; ')}` : ''),
     })
@@ -573,10 +672,84 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
             {bulkBusy ? 'Reading…' : 'Choose CSV file'}
             <input type="file" accept=".csv,text/csv" onChange={onBulkFile} disabled={bulkBusy} className="hidden" />
           </label>
+          
+          {/* CSV Help */}
+          <details className="mt-3">
+            <summary className="cursor-pointer text-xs text-neutral-600 hover:text-neutral-800">
+              💡 Common CSV errors and solutions
+            </summary>
+            <div className="mt-2 p-3 bg-neutral-50 rounded-lg text-xs text-neutral-600">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <h5 className="font-semibold text-neutral-800 mb-1">Batch Issues:</h5>
+                  <ul className="space-y-1">
+                    <li>• <strong>Batch not found:</strong> Use exact batch name</li>
+                    <li>• <strong>Ambiguous batch:</strong> Write as "Name — Centre"</li>
+                  </ul>
+                </div>
+                <div>
+                  <h5 className="font-semibold text-neutral-800 mb-1">Date/Time Issues:</h5>
+                  <ul className="space-y-1">
+                    <li>• <strong>Bad date:</strong> Use YYYY-MM-DD format</li>
+                    <li>• <strong>Duration:</strong> Must be 15-480 minutes</li>
+                  </ul>
+                </div>
+                <div>
+                  <h5 className="font-semibold text-neutral-800 mb-1">Room Issues:</h5>
+                  <ul className="space-y-1">
+                    <li>• <strong>Room not found:</strong> Use exact room number/name</li>
+                    <li>• <strong>Auto-assign:</strong> Leave room column blank</li>
+                  </ul>
+                </div>
+                <div>
+                  <h5 className="font-semibold text-neutral-800 mb-1">Subject/Chapters:</h5>
+                  <ul className="space-y-1">
+                    <li>• <strong>Subject not found:</strong> Match program subjects</li>
+                    <li>• <strong>Chapters:</strong> Separate with semicolons (;)</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </details>
           {bulkMsg && <div className="mt-3"><Alert type={bulkMsg.type === 'info' ? 'info' : bulkMsg.type}>{bulkMsg.text}</Alert></div>}
 
           {bulkRows.length > 0 && (
             <div className="mt-4">
+              {/* Error Summary */}
+              {(() => {
+                const errorRows = bulkRows.filter(r => r.status === 'error')
+                const shiftRows = bulkRows.filter(r => r.status === 'shift')
+                const freeRows = bulkRows.filter(r => r.status === 'free')
+                
+                if (errorRows.length === 0) return null
+                
+                const errorTypes = new Map<string, number>()
+                errorRows.forEach(r => {
+                  r.errors.forEach(err => {
+                    const key = err.replace(/"/g, '').substring(0, 50) // Normalize error message
+                    errorTypes.set(key, (errorTypes.get(key) || 0) + 1)
+                  })
+                })
+                
+                return (
+                  <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+                    <h4 className="text-sm font-semibold text-red-800 mb-2">
+                      ⚠️ {errorRows.length} row{errorRows.length > 1 ? 's' : ''} need fixing before import:
+                    </h4>
+                    <ul className="text-xs text-red-700 space-y-1">
+                      {Array.from(errorTypes.entries()).map(([error, count]) => (
+                        <li key={error}>
+                          <span className="font-medium">{count}×</span> {error}{error.length >= 50 ? '...' : ''}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-xs text-red-600 mt-2">
+                      💡 <strong>Tip:</strong> Fix issues in your CSV file and re-upload, or click on individual error rows below for details.
+                    </p>
+                  </div>
+                )
+              })()}
+              
               <div className="overflow-x-auto border border-neutral-200 rounded-xl">
                 <table className="w-full text-xs">
                   <thead className="bg-neutral-50 text-neutral-500 uppercase tracking-wider">
@@ -585,6 +758,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                       <th className="text-left px-3 py-2 font-semibold">Test</th>
                       <th className="text-left px-3 py-2 font-semibold">Batch</th>
                       <th className="text-left px-3 py-2 font-semibold">When</th>
+                      <th className="text-left px-3 py-2 font-semibold">Room</th>
                       <th className="text-left px-3 py-2 font-semibold">Scope</th>
                       <th className="text-left px-3 py-2 font-semibold">Syllabus</th>
                       <th className="text-left px-3 py-2 font-semibold">Status</th>
@@ -597,6 +771,15 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                         <td className="px-3 py-2 font-medium text-neutral-800">{r.name || <span className="text-neutral-400">—</span>}<span className="ml-1 text-neutral-400">{r.testType}</span></td>
                         <td className="px-3 py-2 text-neutral-600">{r.batchLabel}</td>
                         <td className="px-3 py-2 text-neutral-600">{r.date ? `${r.date} ${r.time}` : <span className="text-red-500">no date</span>} · {r.duration}m</td>
+                        <td className="px-3 py-2 text-neutral-600">
+                          {r.classroomId ? (
+                            <span className={r.roomAutoAssigned ? 'text-sky-700' : ''}>
+                              {roomName(r.classroomId)}{r.roomAutoAssigned && ' 🤖'}
+                            </span>
+                          ) : (
+                            <span className="text-neutral-400">—</span>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-neutral-600">{r.scope}{r.scope === 'Part' && r.chapterIds.length ? ` · ${r.chapterIds.length} ch` : ''}</td>
                         <td className="px-3 py-2">
                           {r.completion?.hasData
@@ -604,11 +787,35 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                             : <span className="text-neutral-300">—</span>}
                         </td>
                         <td className="px-3 py-2">
-                          {r.status === 'error'
-                            ? <span className="text-red-600 font-semibold">✕ {r.errors[0] ?? r.clashNote}</span>
-                            : r.status === 'shift'
-                              ? <span className="text-amber-600 font-semibold" title={r.clashNote ?? ''}>⚠ will shift planner</span>
-                              : <span className="text-emerald-600 font-semibold">✓ free</span>}
+                          {r.status === 'error' ? (
+                            <div className="space-y-1">
+                              <span className="text-red-600 font-semibold">✕ Error</span>
+                              {r.errors.length > 0 && (
+                                <details className="text-xs">
+                                  <summary className="cursor-pointer text-red-600 hover:text-red-700">
+                                    {r.errors.length} issue{r.errors.length > 1 ? 's' : ''} - click to expand
+                                  </summary>
+                                  <ul className="mt-1 ml-4 space-y-1">
+                                    {r.errors.map((err, idx) => (
+                                      <li key={idx} className="text-red-600">• {err}</li>
+                                    ))}
+                                  </ul>
+                                </details>
+                              )}
+                              {r.clashNote && (
+                                <div className="text-xs text-red-600 mt-1">{r.clashNote}</div>
+                              )}
+                            </div>
+                          ) : r.status === 'shift' ? (
+                            <div className="space-y-1">
+                              <span className="text-amber-600 font-semibold">⚠ will shift planner</span>
+                              {r.clashNote && (
+                                <div className="text-xs text-amber-600">{r.clashNote}</div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-emerald-600 font-semibold">✓ free</span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -670,12 +877,20 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium text-neutral-500 mb-1">Faculty (invigilator)</label>
-                <select value={facultyId} onChange={(e) => setFacultyId(e.target.value)} className={input} disabled={!formBatch}>
-                  <option value="">{formBatch ? 'Unassigned (optional)' : 'Pick batch first'}</option>
-                  {formFaculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
-                </select>
-              </div>
+  <label className="block text-xs font-medium text-neutral-500 mb-1">Faculty (invigilator) {testDate && startTime && <span className="font-normal text-neutral-400">— only free at this time</span>}</label>
+  <select value={facultyId} onChange={(e) => setFacultyId(e.target.value)} className={input} disabled={!formBatch}>
+    <option value="">{formBatch ? 'Unassigned (optional)' : 'Pick batch first'}</option>
+    {formFaculty
+      .filter((f) => !freeFacultyIds || freeFacultyIds.has(f.id))
+      .map((f) => {
+        const typeLabel = f.faculty_type ? ` (${f.faculty_type})` : ''
+        return <option key={f.id} value={f.id}>{f.full_name}{typeLabel}</option>
+      })}
+  </select>
+  {testDate && startTime && freeFacultyIds && freeFacultyIds.size === 0 && formFaculty.length > 0 && (
+    <p className="text-[11px] text-amber-600 mt-1">No faculty at this centre is free at that exact time — you can still leave it unassigned.</p>
+  )}
+</div>
               <div>
                 <label className="block text-xs font-medium text-neutral-500 mb-1">Room *</label>
                 <select value={classroomId} onChange={(e) => setClassroomId(e.target.value)} className={input} disabled={!formBatch}>
@@ -717,30 +932,81 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
               </div>
             )}
 
-            <div className="flex flex-wrap gap-3">
+       <div className="flex flex-wrap gap-3">
               <BtnPrimary type="submit" disabled={saving}>{saving ? 'Saving…' : editingId ? 'Save Changes' : 'Save as Draft'}</BtnPrimary>
-              {canShift && (
-                <button type="button" onClick={() => doSubmit(true)} disabled={saving} className="h-10 px-5 bg-amber-500 hover:bg-amber-600 disabled:bg-neutral-300 text-white rounded-xl text-sm font-semibold">
-                  {saving ? 'Working…' : 'Give test priority → shift planner forward'}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => { setWantDirect(true); doSubmit(false, true) }}
+                disabled={saving}
+                className="h-10 px-5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-300 text-white rounded-xl text-sm font-semibold"
+                title="Schedules the test directly — skips faculty confirmation entirely."
+              >
+                {saving ? 'Working…' : 'Schedule directly (skip faculty confirmation)'}
+              </button>
               <BtnSecondary type="button" onClick={resetForm}>Cancel</BtnSecondary>
             </div>
-            {canShift && <p className="mt-2 text-xs text-amber-700">There&rsquo;s a class at this time. This will push that class (and its subject&rsquo;s later lectures) one class-date forward and place the test here.</p>}
-            {freeWindows.length > 0 && (
-              <div className="mt-3 p-3 bg-emerald-50 border border-emerald-200 rounded-xl">
-                <p className="text-xs font-semibold text-emerald-800 mb-2">Free slots for this batch on {testDate ? new Date(testDate + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }) : 'that day'} — click to use one:</p>
-                <div className="flex flex-wrap gap-2">
-                  {freeWindows.map((w) => (
-                    <button key={w.start} type="button" onClick={() => { setStartTime(w.start); setMsg(null); setCanShift(false); setFreeWindows([]) }}
-                      className="px-3 py-1.5 bg-white border border-emerald-300 text-emerald-800 text-xs font-semibold rounded-lg hover:bg-emerald-100">
-                      {formatTime(w.start)} – {formatTime(w.end)}
+
+            {canShift && (
+              <div className="mt-4">
+                <p className="text-sm font-semibold text-neutral-700 mb-2">This batch already has a class at that time. Choose how to resolve it:</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                    <p className="text-xs font-bold text-amber-800 uppercase tracking-wide mb-1">Replace the class</p>
+                    {clashDetail ? (
+                      <p className="text-xs text-amber-800 mb-2"><b>{clashDetail.subject_name ?? 'A class'}</b> — &ldquo;{clashDetail.topic_name}&rdquo;{clashDetail.faculty_name ? ` with ${clashDetail.faculty_name}` : ''} is here ({formatTime(clashDetail.start_time.slice(0, 5))}, {clashDetail.duration_minutes}m).</p>
+                    ) : (
+                      <p className="text-xs text-amber-800 mb-2">There&rsquo;s a class at this time.</p>
+                    )}
+                    <p className="text-[11px] text-amber-700 mb-2">That class — and every later lecture of its subject — moves one class-date forward, filling an existing buffer slot. The batch&rsquo;s <b>end date stays the same</b>; if there isn&rsquo;t enough buffer left, you&rsquo;ll be told exactly how many couldn&rsquo;t move.</p>
+                    <button type="button" onClick={() => doSubmit(true, wantDirect)} disabled={saving} className="h-9 w-full px-4 bg-amber-500 hover:bg-amber-600 disabled:bg-neutral-300 text-white rounded-lg text-xs font-semibold">
+                      {saving ? 'Working…' : 'Replace class & schedule test here'}
                     </button>
-                  ))}
+                  </div>
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl">
+                    <p className="text-xs font-bold text-emerald-800 uppercase tracking-wide mb-1">Keep the class — pick another time</p>
+                    {freeWindows.length === 0 ? (
+                      <p className="text-xs text-emerald-800">No free window long enough on this date. Try another date.</p>
+                    ) : (
+                      <>
+                        <p className="text-[11px] text-emerald-700 mb-2">Free slots for this batch on {testDate ? new Date(testDate + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }) : 'that day'}:</p>
+                        <div className="flex flex-wrap gap-2">
+                          {freeWindows.map((w) => (
+                            <button key={w.start} type="button" onClick={() => { setStartTime(w.start); setMsg(null); setCanShift(false); setClashDetail(null) }}
+                              className="px-2.5 py-1.5 bg-white border border-emerald-300 text-emerald-800 text-xs font-semibold rounded-lg hover:bg-emerald-100">
+                              {formatTime(w.start)} – {formatTime(w.end)}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="text-[11px] text-emerald-600 mt-2">Pick a slot, then click &ldquo;Save as Draft&rdquo; or &ldquo;Schedule directly&rdquo; again.</p>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
-            {canShift && freeWindows.length === 0 && <p className="mt-2 text-xs text-neutral-500">No free window long enough on this day — either shift the planner (above) or pick another date.</p>}
+
+            {!canShift && batchId && testDate && freeWindows.length > 0 && (
+              <p className="mt-3 text-[11px] text-neutral-400">{freeWindows.length} free window(s) available for this batch on this date.</p>
+            )}
+
+            {roomClash && freeRooms.length > 0 && (
+              <div className="mt-4 p-3 bg-sky-50 border border-sky-200 rounded-xl">
+                <p className="text-sm font-semibold text-sky-800 mb-2">🚪 The selected room is busy. Here are free rooms at the same time:</p>
+                <div className="flex flex-wrap gap-2">
+                  {freeRooms.map((rm) => (
+                    <button
+                      key={rm.id}
+                      type="button"
+                      onClick={() => { setClassroomId(rm.id); setMsg(null); setRoomClash(false); setFreeRooms([]) }}
+                      className="px-3 py-2 bg-white border border-sky-300 text-sky-900 text-xs font-semibold rounded-lg hover:bg-sky-100"
+                    >
+                      {rm.room_no ? `${rm.room_no} · ${rm.name}` : rm.name}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-sky-600 mt-2">Pick a free room, then click "Save as Draft" or "Schedule directly" again.</p>
+              </div>
+            )}
           </form>
         </Card>
       )}
@@ -750,16 +1016,47 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       ) : visibleTests.length === 0 ? (
         <Card className="p-10 text-center text-neutral-400">No tests scheduled yet.</Card>
       ) : (
-        <div className="space-y-3">
+        <>
+          <div className="flex flex-wrap items-end gap-3 mb-4">
+            <div className="flex-1 min-w-[200px]">
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Search test / batch</label>
+              <input value={testSearch} onChange={(e) => setTestSearch(e.target.value)} placeholder="Type a test or batch name…" className="w-full h-10 px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Centre</label>
+              <select value={filterCentre} onChange={(e) => { setFilterCentre(e.target.value); setFilterBatchId('') }} className="h-10 min-w-[180px] px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                <option value="">All centres</option>
+                {centres.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Batch</label>
+              <select value={filterBatchId} onChange={(e) => setFilterBatchId(e.target.value)} className="h-10 min-w-[180px] px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                <option value="">All batches</option>
+                {(filterCentre ? visibleBatches.filter((b) => b.centre_id === filterCentre) : visibleBatches).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
+            </div>
+          </div>
           {(() => {
-            const warns = visibleTests.filter((t) => completions[t.id]?.warn)
+            const shownTests = visibleTests.filter((t) => {
+              if (filterBatchId && t.batch_id !== filterBatchId) return false
+              if (filterCentre && !filterBatchId) { const b = batches.find((x) => x.id === t.batch_id); if (!b || b.centre_id !== filterCentre) return false }
+              const q = testSearch.toLowerCase().trim()
+              if (q && !t.name.toLowerCase().includes(q) && !batchName(t.batch_id).toLowerCase().includes(q)) return false
+              return true
+            })
+            if (shownTests.length === 0) return <Card className="p-10 text-center text-neutral-400">No tests match your search/filters.</Card>
+            return (
+          <div className="space-y-3">
+          {(() => {
+           const warns = visibleTests.filter((t) => completions[t.id]?.warn)
             return warns.length > 0 ? (
               <Alert type="error">
                 {warns.length} upcoming test{warns.length > 1 ? 's have' : ' has'} less than 60% of the syllabus taught by the test date. Edit the test (chapters/date) or push the planner so the syllabus catches up.
               </Alert>
             ) : null
           })()}
-          {visibleTests.map((t) => {
+          {shownTests.map((t) => {
             const chNames = testChapterNames(t.id)
             const comp = completions[t.id]
             return (
@@ -803,11 +1100,18 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                     </div>
                   )}
                 </div>
-              </Card>
+             </Card>
             )
           })}
         </div>
+            )
+          })()}
+        </>
       )}
     </div>
   )
 }
+
+      
+
+

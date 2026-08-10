@@ -3,16 +3,27 @@
 import { useState } from 'react'
 import BatchScheduler from '@/components/central/BatchScheduler'
 import BatchPlannerPanel from '@/components/central/BatchPlannerPanel'
+import BatchProgress from '@/components/central/BatchProgress'
 
-type View = 'scheduler' | 'planner'
+type View = 'scheduler' | 'planner' | 'progress'
 
 const CLICKERS: { key: View; label: string; desc: string }[] = [
   { key: 'scheduler', label: 'Batch Scheduler', desc: 'Batches & weekly faculty timetable' },
   { key: 'planner', label: 'Batch Planner', desc: 'Create · Assign · Edit planners' },
+  { key: 'progress', label: 'Progress Tracking', desc: 'Monitor schedule adherence & buffer usage' },
 ]
 
 export default function CentralHub() {
   const [view, setView] = useState<View>('scheduler')
+
+  const renderView = () => {
+    switch (view) {
+      case 'scheduler': return <BatchScheduler />
+      case 'planner': return <BatchPlannerPanel />
+      case 'progress': return <BatchProgress />
+      default: return <BatchScheduler />
+    }
+  }
 
   return (
     <div className="max-w-6xl mx-auto">
@@ -45,7 +56,7 @@ export default function CentralHub() {
         </div>
       </div>
 
-      {view === 'scheduler' ? <BatchScheduler /> : <BatchPlannerPanel />}
+      {renderView()}
     </div>
   )
 }

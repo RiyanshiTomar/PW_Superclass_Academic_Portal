@@ -7,6 +7,7 @@ import { assignPlanner } from '@/lib/planners'
 import { computeBatchPacing, type BatchPacing } from '@/lib/pacing'
 import { mergeBatch } from '@/lib/merge'
 import { validateBatchDates, validateTimeRange } from '@/lib/validation'
+import { getBatchProgress, type BatchProgressData } from '@/lib/tests'
 import { DAYS, timesOverlap, daysBetween, toMinutes, addDaysToDate } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
@@ -130,6 +131,8 @@ export default function BatchScheduler() {
   const [lastLectureByBatch, setLastLectureByBatch] = useState<Map<string, string>>(new Map())
   // batch_id -> live pacing (per-subject done/planned vs end date) for suggestions
   const [pacingByBatch, setPacingByBatch] = useState<Record<string, BatchPacing>>({})
+  // batch_id -> comprehensive progress tracking with buffer analysis
+  const [progressByBatch, setProgressByBatch] = useState<Record<string, BatchProgressData>>({})
   const [scheduleRows, setScheduleRows] = useState<ScheduleRow[]>([])
   const [userCentres, setUserCentres] = useState<UserCentre[]>([])
   const [facultySubjects, setFacultySubjects] = useState<FacultySubject[]>([])
@@ -353,6 +356,24 @@ export default function BatchScheduler() {
     } else {
       setPacingByBatch({})
     }
+
+    // Load batch progress data for all batches
+    if (batchesRes.data && batchesRes.data.length > 0) {
+      const progressPromises = batchesRes.data.map(batch => 
+        getBatchProgress(supabase, batch.id).catch(() => null)
+      )
+      const progressResults = await Promise.all(progressPromises)
+      const progressMap: Record<string, BatchProgressData> = {}
+      batchesRes.data.forEach((batch, index) => {
+        if (progressResults[index]) {
+          progressMap[batch.id] = progressResults[index]!
+        }
+      })
+      setProgressByBatch(progressMap)
+    } else {
+      setProgressByBatch({})
+    }
+
     setLoading(false)
   }
 
@@ -942,6 +963,123 @@ async function syncMaterialisedTimes(
                           <p className="mt-1.5 text-[11px] text-emerald-700">Ahead: {ahead.map((s) => s.name).join(', ')} — slack available; you can ease off or bring a lagging subject&apos;s topics sooner.</p>
                         ) : (
                           <p className="mt-1.5 text-[11px] text-neutral-400">On track for the end date.</p>
+                        )}
+                      </div>
+                    )
+                  })()}
+                  {progressByBatch[b.id] && (() => {
+                    const progress = progressByBatch[b.id]
+                    const statusColors = {
+                      on_track: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                      behind: 'bg-red-50 text-red-700 border-red-200', 
+                      critically_behind: 'bg-red-100 text-red-800 border-red-300',
+                      ahead: 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                    }
+                    const statusIcons = {
+                      on_track: '✅',
+                      behind: '⚠️',
+                      critically_behind: '🔴', 
+                      ahead: '🚀'
+                    }
+                    const statusLabels = {
+                      on_track: 'ON TRACK',
+                      behind: 'BEHIND',
+                      critically_behind: 'CRITICALLY BEHIND',
+                      ahead: 'AHEAD'
+                    }
+                    
+                    return (
+                      <div className="mb-4 rounded-lg border border-neutral-200 bg-neutral-50/60 p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">Progress Tracking</p>
+                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${statusColors[progress.status]}`}>
+                            {statusIcons[progress.status]} {statusLabels[progress.status]}
+                          </span>
+                        </div>
+                        
+                        <div className="grid grid-cols-1 gap-2 mb-3 text-xs">
+                          <div className="bg-white rounded-lg p-2 border">
+                            <div className="flex justify-between items-center mb-1">
+                              <span className="text-neutral-600 font-medium">Time Progress:</span>
+                              <span className="font-bold text-neutral-900">{progress.progressPercentage}%</span>
+                            </div>
+                            <div className="text-[11px] text-neutral-500">
+                              {progress.elapsedDays}/{progress.totalDays} days completed
+                            </div>
+                          </div>
+                          
+                          <div className="bg-white rounded-lg p-2 border">
+                            <div className="flex justify-between items-center mb-1">
+                              <span className="text-neutral-600 font-medium">Lectures Status:</span>
+                              <span className="font-bold text-neutral-900">
+                                {progress.lecturesCompleted}/{progress.lecturesExpected}
+                              </span>
+                            </div>
+                            <div className="text-[11px] space-y-0.5">
+                              <div className="flex justify-between">
+                                <span className="text-neutral-500">Expected by now:</span>
+                                <span className="font-medium">{progress.lecturesExpected}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-neutral-500">Actually conducted:</span>
+                                <span className="font-medium">{progress.lecturesCompleted}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-neutral-500">Total planned:</span>
+                                <span className="font-medium">{progress.totalLecturesPlanned}</span>
+                              </div>
+                            </div>
+                          </div>
+                          
+                          <div className="bg-white rounded-lg p-2 border">
+                            <div className="flex justify-between items-center mb-1">
+                              <span className="text-neutral-600 font-medium">Buffer Slots:</span>
+                              <span className="font-bold text-neutral-900">
+                                {progress.bufferSlotsRemaining}/{progress.totalBufferSlots}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-neutral-500">
+                              {progress.bufferSlotsUsed} used • {progress.bufferSlotsRemaining} available
+                            </div>
+                          </div>
+                        </div>
+
+                        {(() => {
+                          const lectureGap = progress.lecturesExpected - progress.lecturesCompleted
+                          if (lectureGap === 0) return null
+                          
+                          return (
+                            <div className={`text-xs p-2.5 rounded-lg border font-medium ${lectureGap > 0 ? 'bg-red-50 border-red-200 text-red-800' : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
+                              <div className="flex items-center justify-between">
+                                <span>
+                                  {lectureGap > 0 ? '📉 Behind Schedule:' : '📈 Ahead of Schedule:'}
+                                </span>
+                                <span className="text-lg font-bold">
+                                  {Math.abs(lectureGap)} lecture{Math.abs(lectureGap) > 1 ? 's' : ''}
+                                </span>
+                              </div>
+                              <div className="text-[11px] mt-1 opacity-90">
+                                {lectureGap > 0 
+                                  ? `Need to catch up on ${lectureGap} lecture${lectureGap > 1 ? 's' : ''}`
+                                  : `${Math.abs(lectureGap)} lecture${Math.abs(lectureGap) > 1 ? 's' : ''} ahead of expected pace`
+                                }
+                              </div>
+                            </div>
+                          )
+                        })()}
+
+                        {progress.recommendations.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            {progress.recommendations.slice(0, 2).map((rec, idx) => (
+                              <p key={idx} className="text-[11px] text-neutral-600">💡 {rec}</p>
+                            ))}
+                          </div>
+                        )}
+
+                        {progress.bufferUtilizationPercentage > 70 && (
+                          <div className="mt-2 text-[11px] text-amber-700 bg-amber-50 p-1.5 rounded border border-amber-200">
+                            ⚠️ High buffer usage ({progress.bufferUtilizationPercentage}%) - monitor closely
+                          </div>
                         )}
                       </div>
                     )

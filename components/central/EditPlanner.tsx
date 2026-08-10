@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { rematerialiseLink } from '@/lib/planners'
 import { fetchMaster, type Master } from '@/lib/syllabus'
 import { toMinutes, DAYS } from '@/lib/utils'
+import { getTestsForBatch, type PlannerTest } from '@/lib/tests'
 import { Alert, BtnPrimary, BtnSecondary, Card } from '@/components/PortalShell'
 
 type Planner = { id: string; name: string; program_id: string | null }
@@ -61,6 +62,7 @@ export default function EditPlanner() {
   const [saving, setSaving] = useState(false)
   const [master, setMaster] = useState<Master | null>(null)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
+  const [tests, setTests] = useState<PlannerTest[]>([])  // Tests for the selected batch
 
   // LIVE (per-batch) mode: when a batch is picked, we edit that batch's
   // materialised planner (batch_planners) — which reflects faculty-approved
@@ -288,6 +290,10 @@ export default function EditPlanner() {
     liveTestsRef.current = testsByDate
     liveBoundsRef.current = { start: batchRes.data?.start_date ?? todayISO, end: batchRes.data?.end_date ?? todayISO }
 
+    // Load tests for this batch
+    const batchTests = await getTestsForBatch(supabase, filterBatch)
+    setTests(batchTests)
+
     setRows(real); setKeptBuffers([])
     setActiveSubject(real[0]?.subject_id ?? '')
   }
@@ -315,16 +321,26 @@ export default function EditPlanner() {
 
   // Rows for the active subject, filtered by search (teacher / topic / chapter),
   // grouped by chapter; chapters ordered by their earliest date, rows by date.
+  // Tests are shown inline with lectures on their scheduled dates.
   const chapterGroups = useMemo(() => {
     const q = search.toLowerCase().trim()
     const list = rows.filter((r) => r.subject_id === activeSubject && (!q || facName(r.faculty_id).toLowerCase().includes(q) || r.topic_name.toLowerCase().includes(q) || r.chapter.toLowerCase().includes(q)))
+    
+    // Filter tests by active subject (or show all if Full test, or if no subject filter needed in live mode)
+    const relevantTests = tests.filter(t => {
+      if (!liveLinkId) return false  // Only show tests in live/batch mode
+      if (t.part_type === 'Full') return true  // Full tests apply to all subjects
+      return t.subject_id === activeSubject  // Part tests filter by subject
+    })
+    
     const byChap = new Map<string, EditRow[]>()
     for (const r of list) { if (!byChap.has(r.chapter)) byChap.set(r.chapter, []); byChap.get(r.chapter)!.push(r) }
     const groups = Array.from(byChap.entries()).map(([chapter, rs]) => ({ chapter, rows: [...rs].sort((a, b) => a.planned_date.localeCompare(b.planned_date)) }))
     groups.sort((a, b) => (a.rows[0]?.planned_date ?? '').localeCompare(b.rows[0]?.planned_date ?? ''))
-    return groups
+    
+    return { groups, tests: relevantTests }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, activeSubject, search, faculty])
+  }, [rows, activeSubject, search, faculty, tests, liveLinkId])
 
   // Chapters from this subject's Concept Tags (GTT) that aren't already a
   // group in the current planner — the pool "+ add chapter" can pick from.
@@ -739,9 +755,9 @@ export default function EditPlanner() {
 
           {/* Chapter groups */}
           <div className="space-y-4">
-            {chapterGroups.length === 0 ? (
+            {chapterGroups.groups.length === 0 ? (
               <Card className="p-8 text-center text-sm text-neutral-400">No classes match.</Card>
-            ) : chapterGroups.map((g) => (
+            ) : chapterGroups.groups.map((g) => (
               <div
                 key={g.chapter}
                 draggable={reorderMode === 'chapters'}
@@ -764,50 +780,108 @@ export default function EditPlanner() {
                   </div>
                 </div>
                 <div className="divide-y divide-neutral-100">
-                  {g.rows.map((r) => (
-                    <div
-                      key={r.key}
-                      draggable={reorderMode === 'rows' && r.status !== 'conducted'}
-                      onDragStart={() => { if (reorderMode === 'rows') dragKeyRef.current = r.key }}
-                      onDragOver={(e) => { if (reorderMode === 'rows') e.preventDefault() }}
-                      onDrop={() => reorderMode === 'rows' && onRowDrop(r.key)}
-                      className={`flex flex-wrap md:flex-nowrap items-center gap-2 px-3 py-2.5 border-l-4 ${rowTint(r.status)} ${reorderMode === 'rows' && r.status !== 'conducted' ? 'cursor-grab' : ''}`}
-                    >
-                      {reorderMode === 'rows' && <span className="text-neutral-300 text-lg leading-none w-4 shrink-0">{r.status !== 'conducted' ? '⠿' : ''}</span>}
-                      <input
-                        type="date"
-                        value={r.planned_date}
-                        disabled={r.status === 'conducted'}
-                        onChange={(e) => {
-                          const newDate = e.target.value
-                          if (!newDate) return
-                          const check = resolveLiveSlot(r.subject_id, newDate, r.key)
-                          if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
-                          setMessage(null)
-                          updateRow(r.key, { planned_date: newDate, ...(check.slot ? { start_time: check.slot.start, classroom_id: check.slot.classroom, duration_minutes: check.slot.duration } : {}) })
-                        }}
-                        title={r.planned_date < todayISO && r.status !== 'conducted' ? 'This date is in the past' : ''}
-                        className="w-[130px] shrink-0 h-9 px-2 border border-neutral-200 rounded-lg text-xs font-semibold text-neutral-600 bg-white/70 focus:outline-none focus:ring-2 focus:ring-violet-500"
-                      />
-                      <input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(r.key, { topic_name: e.target.value })} placeholder="Topic taught" className="flex-1 min-w-[160px] h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
-                      <select value={r.faculty_id} onChange={(e) => updateRow(r.key, { faculty_id: e.target.value })} className="w-[160px] shrink-0 h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
-                        <option value="">Faculty…</option>
-                        {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
-                      </select>
-                      {(!liveLinkId || liveHasStatus) ? (
-                        <select value={r.status} onChange={(e) => setStatus(r.key, e.target.value as Status)} className={`w-[150px] shrink-0 h-9 px-2 rounded-lg text-xs font-semibold border ${statusPill(r.status)}`}>
-                          <option value="planned">Planned</option>
-                          <option value="confirmed">Scheduled ✓</option>
-                          <option value="conducted">Already conducted</option>
-                        </select>
-                      ) : (
-                        <span className={`w-[150px] shrink-0 h-9 px-2 flex items-center rounded-lg text-[11px] font-semibold border ${statusPill(r.status)}`} title="Status is inferred from the date (past = conducted). Run the batch-status migration to edit it here.">
-                          {r.status === 'conducted' ? 'Conducted' : r.stage || 'Planned'}
-                        </span>
-                      )}
-                      <button onClick={() => removeRow(r.key)} title="Remove" className="shrink-0 text-neutral-300 hover:text-red-600 text-lg leading-none">×</button>
-                    </div>
-                  ))}
+                  {/* Merge lectures and tests by date for chronological display */}
+                  {(() => {
+                    // Get all unique dates from this chapter's rows
+                    const dates = [...new Set(g.rows.map(r => r.planned_date))].sort()
+                    const items: Array<{ type: 'lecture' | 'test'; date: string; data: EditRow | PlannerTest }> = []
+                    
+                    // Add all lectures
+                    g.rows.forEach(r => items.push({ type: 'lecture', date: r.planned_date, data: r }))
+                    
+                    // Add relevant tests (tests scheduled on dates that overlap with this chapter's date range)
+                    if (dates.length > 0) {
+                      const firstDate = dates[0]
+                      const lastDate = dates[dates.length - 1]
+                      chapterGroups.tests.forEach(t => {
+                        if (t.test_date >= firstDate && t.test_date <= lastDate) {
+                          items.push({ type: 'test', date: t.test_date, data: t })
+                        }
+                      })
+                    }
+                    
+                    // Sort by date, then by type (lectures before tests on same date)
+                    items.sort((a, b) => {
+                      const dateComp = a.date.localeCompare(b.date)
+                      if (dateComp !== 0) return dateComp
+                      return a.type === 'lecture' ? -1 : 1
+                    })
+                    
+                    return items.map((item, idx) => {
+                      if (item.type === 'lecture') {
+                        const r = item.data as EditRow
+                        return (
+                          <div
+                            key={r.key}
+                            draggable={reorderMode === 'rows' && r.status !== 'conducted'}
+                            onDragStart={() => { if (reorderMode === 'rows') dragKeyRef.current = r.key }}
+                            onDragOver={(e) => { if (reorderMode === 'rows') e.preventDefault() }}
+                            onDrop={() => reorderMode === 'rows' && onRowDrop(r.key)}
+                            className={`flex flex-wrap md:flex-nowrap items-center gap-2 px-3 py-2.5 border-l-4 ${rowTint(r.status)} ${reorderMode === 'rows' && r.status !== 'conducted' ? 'cursor-grab' : ''}`}
+                          >
+                            {reorderMode === 'rows' && <span className="text-neutral-300 text-lg leading-none w-4 shrink-0">{r.status !== 'conducted' ? '⠿' : ''}</span>}
+                            <input
+                              type="date"
+                              value={r.planned_date}
+                              disabled={r.status === 'conducted'}
+                              onChange={(e) => {
+                                const newDate = e.target.value
+                                if (!newDate) return
+                                const check = resolveLiveSlot(r.subject_id, newDate, r.key)
+                                if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
+                                setMessage(null)
+                                updateRow(r.key, { planned_date: newDate, ...(check.slot ? { start_time: check.slot.start, classroom_id: check.slot.classroom, duration_minutes: check.slot.duration } : {}) })
+                              }}
+                              title={r.planned_date < todayISO && r.status !== 'conducted' ? 'This date is in the past' : ''}
+                              className="w-[130px] shrink-0 h-9 px-2 border border-neutral-200 rounded-lg text-xs font-semibold text-neutral-600 bg-white/70 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                            />
+                            <input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(r.key, { topic_name: e.target.value })} placeholder="Topic taught" className="flex-1 min-w-[160px] h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                            <select value={r.faculty_id} onChange={(e) => updateRow(r.key, { faculty_id: e.target.value })} className="w-[160px] shrink-0 h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                              <option value="">Faculty…</option>
+                              {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
+                            </select>
+                            {(!liveLinkId || liveHasStatus) ? (
+                              <select value={r.status} onChange={(e) => setStatus(r.key, e.target.value as Status)} className={`w-[150px] shrink-0 h-9 px-2 rounded-lg text-xs font-semibold border ${statusPill(r.status)}`}>
+                                <option value="planned">Planned</option>
+                                <option value="confirmed">Scheduled ✓</option>
+                                <option value="conducted">Already conducted</option>
+                              </select>
+                            ) : (
+                              <span className={`w-[150px] shrink-0 h-9 px-2 flex items-center rounded-lg text-[11px] font-semibold border ${statusPill(r.status)}`} title="Status is inferred from the date (past = conducted). Run the batch-status migration to edit it here.">
+                                {r.status === 'conducted' ? 'Conducted' : r.stage || 'Planned'}
+                              </span>
+                            )}
+                            <button onClick={() => removeRow(r.key)} title="Remove" className="shrink-0 text-neutral-300 hover:text-red-600 text-lg leading-none">×</button>
+                          </div>
+                        )
+                      } else {
+                        // Test row - read-only, visually distinct
+                        const t = item.data as PlannerTest
+                        const testStageColor = t.stage === 'Confirmed' ? 'bg-emerald-50 border-l-emerald-400' : t.stage === 'Completed' ? 'bg-neutral-100 border-l-neutral-400' : 'bg-amber-50 border-l-amber-400'
+                        return (
+                          <div
+                            key={`test-${t.id}`}
+                            className={`flex flex-wrap md:flex-nowrap items-center gap-2 px-3 py-2.5 border-l-4 ${testStageColor}`}
+                          >
+                            <span className="w-4 shrink-0 text-lg">📝</span>
+                            <div className="w-[130px] shrink-0 h-9 px-2 flex items-center border border-neutral-200 rounded-lg text-xs font-semibold text-neutral-600 bg-neutral-50">
+                              {fmtDate(t.test_date)}
+                            </div>
+                            <div className="flex-1 min-w-[160px] h-9 px-2 flex items-center bg-neutral-50 border border-neutral-200 rounded-lg text-sm font-semibold text-violet-700">
+                              🧪 TEST: {t.name}
+                            </div>
+                            <div className="w-[160px] shrink-0 h-9 px-2 flex items-center bg-neutral-50 border border-neutral-200 rounded-lg text-xs text-neutral-600">
+                              {t.start_time.slice(0,5)} · {t.duration_minutes}m
+                            </div>
+                            <div className={`w-[150px] shrink-0 h-9 px-2 flex items-center rounded-lg text-xs font-semibold border ${t.stage === 'Confirmed' ? 'bg-emerald-100 border-emerald-300 text-emerald-800' : t.stage === 'Completed' ? 'bg-neutral-200 border-neutral-300 text-neutral-700' : 'bg-amber-100 border-amber-300 text-amber-800'}`}>
+                              {t.stage}
+                            </div>
+                            <div className="shrink-0 w-4"></div>
+                          </div>
+                        )
+                      }
+                    })
+                  })()}
                 </div>
               </div>
             ))}
@@ -880,3 +954,5 @@ export default function EditPlanner() {
     </div>
   )
 }
+
+

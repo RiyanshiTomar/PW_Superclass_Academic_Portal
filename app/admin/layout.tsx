@@ -10,6 +10,7 @@ const NAV = [
   { label: 'Programs', href: '/admin/programs' },
   { label: 'Syllabus', href: '/admin/syllabus' },
   { label: 'Faculty', href: '/admin/faculty' },
+  { label: 'Faculty Schedule View', href: '/faculty-schedule' },
   { label: 'Central Team', href: '/admin/central-team' },
   { label: 'Batch Managers', href: '/admin/batch-managers' },
   { label: 'Branch Heads', href: '/admin/branch-heads' },

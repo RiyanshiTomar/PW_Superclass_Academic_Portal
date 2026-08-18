@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
@@ -82,6 +82,10 @@ export default function EditPlanner() {
   const liveSchedRef = useRef<Map<string, Map<number, { start: string; duration: number; classroom: string | null }>>>(new Map())
   const liveTestsRef = useRef<Map<string, [number, number][]>>(new Map())
   const liveBoundsRef = useRef<{ start: string; end: string }>({ start: '', end: '' })
+  // Buffer slots per subject (sorted by date) — used by liveAddRow to consume
+  // the next available buffer when central team adds a new class.
+  type LiveBuffer = { id: string; planned_date: string; start_time: string | null; duration_minutes: number; classroom_id: string | null; subject_id: string | null }
+  const liveBuffersRef = useRef<LiveBuffer[]>([])
 
   const [activeSubject, setActiveSubject] = useState('')
   const [search, setSearch] = useState('')
@@ -294,6 +298,17 @@ export default function EditPlanner() {
     const batchTests = await getTestsForBatch(supabase, filterBatch)
     setTests(batchTests)
 
+    // Load buffer slots for this batch — sorted by date so liveAddRow always
+    // picks the nearest future buffer first.
+    const { data: bufferData } = await supabase
+      .from('batch_planners')
+      .select('id, subject_id, planned_date, start_time, duration_minutes, classroom_id')
+      .eq('link_id', linkId)
+      .eq('is_buffer', true)
+      .gte('planned_date', todayISO)
+      .order('planned_date', { ascending: true })
+    liveBuffersRef.current = (bufferData ?? []) as LiveBuffer[]
+
     setRows(real); setKeptBuffers([])
     setActiveSubject(real[0]?.subject_id ?? '')
   }
@@ -388,37 +403,60 @@ export default function EditPlanner() {
     })
   }
 
-  // LIVE mode add: land the new class on the subject's NEXT free class-date —
-  // one with no existing lecture and no test — so it can never overlap.
+  // LIVE mode add: convert the NEXT available buffer slot for this subject into
+  // a real lecture. Buffer slots are pre-allocated class times built into the
+  // batch schedule exactly for this purpose — adding a class consumes one buffer.
+  // Error is shown only when ALL buffer slots for this subject are already used.
   const liveAddRow = (subjectId: string, chapter: string) => {
-    const sched = liveSchedRef.current.get(subjectId)
-    const used = new Set(rows.filter((r) => r.subject_id === subjectId).map((r) => r.planned_date))
-    let newDate = ''
-    let slotInfo = { start_time: null as string | null, classroom_id: null as string | null, duration: 60 }
-    if (sched && sched.size) {
-      const testFree = (date: string, slot: { start: string; duration: number }) => {
-        const s = toMinutes(slot.start), e = s + slot.duration
-        return !(liveTestsRef.current.get(date) ?? []).some(([ts, te]) => s < te && e > ts)
-      }
-      const from = liveBoundsRef.current.start > todayISO ? liveBoundsRef.current.start : todayISO
-      const d = new Date(from + 'T12:00:00')
-      const end = new Date(liveBoundsRef.current.end + 'T12:00:00'); end.setDate(end.getDate() + 180)
-      while (d <= end) {
-        const dateStr = d.toISOString().split('T')[0]
-        const slot = sched.get(d.getDay())
-        if (slot && !used.has(dateStr) && testFree(dateStr, slot)) { newDate = dateStr; slotInfo = { start_time: slot.start, classroom_id: slot.classroom, duration: slot.duration }; break }
-        d.setDate(d.getDate() + 1)
-      }
+    // Find the earliest future buffer slot for this subject.
+    // Buffer rows may have subject_id = null (subject-agnostic) or a specific
+    // subject — prefer subject-specific first, then fall back to untagged ones.
+    const allBuffers = liveBuffersRef.current
+    const usedBufferIds = new Set(rows.filter((r) => r.db_id && r.status !== 'conducted').map((r) => r.db_id!))
+
+    const subjectBuffer = allBuffers.find(
+      (b) => b.subject_id === subjectId && !usedBufferIds.has(b.id)
+    )
+    const anyBuffer = subjectBuffer ?? allBuffers.find(
+      (b) => (!b.subject_id || b.subject_id === subjectId) && !usedBufferIds.has(b.id)
+    )
+
+    if (!anyBuffer) {
+      setMessage({
+        type: 'info',
+        text: `No buffer slots left for ${subjName(subjectId)}. All available slots are used up. Ask the batch scheduler to add more buffer slots, or reschedule an existing lecture.`,
+      })
+      return
     }
-    if (!newDate) { setMessage({ type: 'info', text: 'No free class-date to add this class without an overlap. Reschedule an existing lecture instead, or add the subject’s weekly slot first.' }); return }
+
+    // Convert the buffer slot into a new real lecture row.
     setRows((prev) => {
       const sample = prev.find((r) => r.subject_id === subjectId && r.chapter === chapter)
-      const newRow: EditRow = { key: nextKey(), subject_id: subjectId, faculty_id: sample?.faculty_id ?? '', chapter, topic_name: '', planned_date: newDate, duration_minutes: slotInfo.duration, status: 'planned', start_time: slotInfo.start_time, classroom_id: slotInfo.classroom_id }
+      const newRow: EditRow = {
+        key: nextKey(),
+        db_id: anyBuffer.id,   // same DB row — save will UPDATE it from buffer → real
+        subject_id: subjectId,
+        faculty_id: sample?.faculty_id ?? '',
+        chapter,
+        topic_name: '',
+        planned_date: anyBuffer.planned_date,
+        duration_minutes: anyBuffer.duration_minutes || sample?.duration_minutes || 60,
+        status: 'planned',
+        start_time: anyBuffer.start_time,
+        classroom_id: anyBuffer.classroom_id,
+      }
+      // Insert after the chapter's last row so the chapter stays grouped.
       let idx = -1
       prev.forEach((r, i) => { if (r.subject_id === subjectId && r.chapter === chapter) idx = i })
-      const next = [...prev]; next.splice(idx + 1, 0, newRow); return next
+      const next = [...prev]
+      next.splice(idx + 1, 0, newRow)
+      return next
     })
-    setMessage({ type: 'success', text: `Added a class on ${fmtDate(newDate)} — the next free slot for ${subjName(subjectId)} (no overlap).` })
+
+    setMessage({
+      type: 'success',
+      text: `Added a class on ${fmtDate(anyBuffer.planned_date)}${anyBuffer.start_time ? ` at ${anyBuffer.start_time.slice(0, 5)}` : ''} — buffer slot converted to a real lecture.`,
+    })
   }
   // Adds a brand-new chapter to the active subject, sourced ONLY from Concept
   // Tags — reuses the exact same row-creation path as an existing chapter's
@@ -593,6 +631,10 @@ export default function EditPlanner() {
         if (liveHasStatus) patch.status = r.status
         if (r.db_id) {
           keptIds.add(r.db_id)
+          // If this db_id came from a buffer slot (liveBuffersRef), mark it as
+          // a real lecture now — the buffer is being consumed.
+          const wasBuffer = liveBuffersRef.current.some((b) => b.id === r.db_id)
+          if (wasBuffer) patch.is_buffer = false
           const { error } = await supabase.from('batch_planners').update(patch).eq('id', r.db_id)
           if (error) { setSaving(false); setMessage({ type: 'error', text: `Save failed: ${error.message}` }); return }
           updated++

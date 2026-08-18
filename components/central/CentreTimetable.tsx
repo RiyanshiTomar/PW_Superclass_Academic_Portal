@@ -74,26 +74,49 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
     ;(async () => {
       setLoadingDay(true); setErr(null)
       const weekday = new Date(date + 'T12:00:00').getDay()
+
+      // First get all batch_ids at this centre — PostgREST doesn't reliably
+      // filter nested join columns on all versions, so we resolve the centre's
+      // batches explicitly and use .in() for safety.
+      const { data: centreBatches } = await supabase
+        .from('batches')
+        .select('id, name')
+        .eq('centre_id', centreId)
+        .neq('status', 'Merged')
+      const batchIds = (centreBatches ?? []).map((b: { id: string }) => b.id)
+      const batchNameById = new Map((centreBatches ?? []).map((b: { id: string; name: string }) => [b.id, b.name]))
+
+      if (batchIds.length === 0) {
+        if (!cancelled) { setBlocks([]); setLoadingDay(false) }
+        return
+      }
+
       const [schedRes, planRes, testRes] = await Promise.all([
         supabase.from('batch_schedules')
-          .select('start_time, end_time, classroom_id, batches!inner(name, centre_id), subjects(name), app_users(full_name)')
-          .eq('batches.centre_id', centreId).eq('day_of_week', weekday),
+          .select('start_time, end_time, classroom_id, batch_id, subjects(name), app_users(full_name)')
+          .in('batch_id', batchIds)
+          .eq('day_of_week', weekday),
         supabase.from('batch_planners')
-          .select('start_time, duration_minutes, classroom_id, topic_name, batches!inner(name, centre_id), subjects(name), app_users(full_name)')
-          .eq('batches.centre_id', centreId).eq('planned_date', date).not('start_time', 'is', null),
+          .select('start_time, duration_minutes, classroom_id, topic_name, batch_id, subjects(name), app_users!batch_planners_faculty_id_fkey(full_name)')
+          .in('batch_id', batchIds)
+          .eq('planned_date', date)
+          .eq('is_buffer', false)
+          .not('start_time', 'is', null),
         supabase.from('test_schedules')
-          .select('start_time, duration_minutes, classroom_id, name, test_type, batches!inner(name, centre_id), subjects(name), app_users(full_name)')
-          .eq('batches.centre_id', centreId).eq('test_date', date),
+          .select('start_time, duration_minutes, classroom_id, name, test_type, batch_id, subjects(name), app_users(full_name)')
+          .in('batch_id', batchIds)
+          .eq('test_date', date)
+          .not('start_time', 'is', null),
       ])
       if (cancelled) return
-      if (schedRes.error) setErr(schedRes.error.message)
+      if (schedRes.error) { setErr(schedRes.error.message); setLoadingDay(false); return }
 
       // The planner drives what topic a class covers on a given day. Build a
       // batch+subject → topic(s) lookup from that day's planner lectures so each
       // recurring class block can show the day's topic alongside its subject.
       const planTopics = new Map<string, string[]>()
       ;(planRes.data ?? []).forEach((p) => {
-        const bn = one(p.batches as never)?.['name'] as string | undefined
+        const bn = batchNameById.get(p.batch_id as string)
         const sn = one(p.subjects as never)?.['name'] as string | undefined
         const t = ((p.topic_name as string) || '').trim()
         if (!bn || !sn || !t) return
@@ -106,24 +129,34 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
       const out: Block[] = []
       ;(schedRes.data ?? []).forEach((s, i) => {
         const st = toMinutes((s.start_time as string).slice(0, 5))
-        const batch = one(s.batches as never)?.['name'] ?? 'Batch'
+        const batch = batchNameById.get(s.batch_id as string) ?? 'Batch'
         const subject = one(s.subjects as never)?.['name'] ?? '—'
         out.push({ key: `c${i}`, roomId: (s.classroom_id as string) ?? '∅', startMin: st, endMin: toMinutes((s.end_time as string).slice(0, 5)), kind: 'class', batch, subject, topic: (planTopics.get(`${batch}||${subject}`) ?? []).join(', '), faculty: one(s.app_users as never)?.['full_name'] ?? '—' })
       })
       ;(planRes.data ?? []).forEach((p, i) => {
         const st = toMinutes((p.start_time as string).slice(0, 5))
-        out.push({ key: `p${i}`, roomId: (p.classroom_id as string) ?? '∅', startMin: st, endMin: st + (p.duration_minutes as number), kind: 'lecture', batch: one(p.batches as never)?.['name'] ?? 'Batch', subject: one(p.subjects as never)?.['name'] ?? 'Lecture', topic: (p.topic_name as string) || '', faculty: one(p.app_users as never)?.['full_name'] ?? '—', tag: 'Planner' })
+        const batch = batchNameById.get(p.batch_id as string) ?? 'Batch'
+        out.push({ key: `p${i}`, roomId: (p.classroom_id as string) ?? '∅', startMin: st, endMin: st + (p.duration_minutes as number), kind: 'lecture', batch, subject: one(p.subjects as never)?.['name'] ?? 'Lecture', topic: (p.topic_name as string) || '', faculty: one(p.app_users as never)?.['full_name'] ?? '—', tag: 'Planner' })
       })
       ;(testRes.data ?? []).forEach((t, i) => {
         const st = toMinutes((t.start_time as string).slice(0, 5))
-        out.push({ key: `t${i}`, roomId: (t.classroom_id as string) ?? '∅', startMin: st, endMin: st + (t.duration_minutes as number), kind: 'test', batch: one(t.batches as never)?.['name'] ?? 'Batch', subject: (t.name as string) || 'Test', topic: '', faculty: one(t.app_users as never)?.['full_name'] ?? '—', tag: (t.test_type as string) })
+        const batch = batchNameById.get(t.batch_id as string) ?? 'Batch'
+        out.push({ key: `t${i}`, roomId: (t.classroom_id as string) ?? '∅', startMin: st, endMin: st + (t.duration_minutes as number), kind: 'test', batch, subject: (t.name as string) || 'Test', topic: '', faculty: one(t.app_users as never)?.['full_name'] ?? '—', tag: (t.test_type as string) })
       })
-      // A planner lecture now rides its subject's weekly class slot, so it shares
-      // the class block's time & room — the topic is already shown on that class
-      // block. Drop the duplicate lecture block; keep only off-schedule ones
-      // (extra classes at a time with no matching class).
+
+      // A planner lecture block is a duplicate of its recurring class block when
+      // they share the same batch + subject + overlapping time — regardless of room
+      // (schedule changes move the class to a new room, but the planner row keeps
+      // the old room until a live-mode save, so we must match by batch+subject+time,
+      // NOT by room). Drop these duplicates; keep only genuinely off-schedule ones.
       const classBlocks = out.filter((b) => b.kind === 'class')
-      const deduped = out.filter((b) => b.kind !== 'lecture' || !classBlocks.some((c) => c.roomId === b.roomId && b.startMin < c.endMin && b.endMin > c.startMin))
+      const deduped = out.filter(
+        (b) => b.kind !== 'lecture' ||
+        !classBlocks.some(
+          (c) => c.batch === b.batch && c.subject === b.subject &&
+          b.startMin < c.endMin && b.endMin > c.startMin
+        )
+      )
       setBlocks(deduped)
       setLoadingDay(false)
     })()

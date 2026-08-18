@@ -29,7 +29,8 @@ type Batch = {
   centre_id: string
   start_date: string
   end_date: string
-  batch_manager_id: string
+  batch_manager_id: string | null  // Keep existing batch managers
+  batch_owner_id: string | null    // Add new batch owner field
   status: string
 }
 
@@ -112,6 +113,7 @@ export default function BatchScheduler() {
   const [classrooms, setClassrooms] = useState<Classroom[]>([])
   const [faculty, setFaculty] = useState<Faculty[]>([])
   const [managers, setManagers] = useState<Manager[]>([])
+  const [centralTeam, setCentralTeam] = useState<Manager[]>([])
   const [planners, setPlanners] = useState<Planner[]>([])
   const [links, setLinks] = useState<Link[]>([])
 
@@ -126,7 +128,8 @@ export default function BatchScheduler() {
   const [centreId, setCentreId] = useState('')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
-  const [managerId, setManagerId] = useState('')
+  const [managerId, setManagerId] = useState('')     // Keep batch manager
+  const [ownerId, setOwnerId] = useState('')         // Add batch owner
   // batch_id -> its last planned lecture date (for lateness vs end_date)
   const [lastLectureByBatch, setLastLectureByBatch] = useState<Map<string, string>>(new Map())
   // batch_id -> live pacing (per-subject done/planned vs end date) for suggestions
@@ -148,13 +151,20 @@ export default function BatchScheduler() {
   const [absorbedId, setAbsorbedId] = useState('')
   const [merging, setMerging] = useState(false)
 
-  // Batch list search + centre filter (to find a batch quickly).
+  // Batch list search + centre filter + manager filter + owner filter (to find a batch quickly).
   const [gridSearch, setGridSearch] = useState('')
   const [gridCentre, setGridCentre] = useState('')
+  const [gridManager, setGridManager] = useState('')  // Filter by batch manager
+  const [gridOwner, setGridOwner] = useState('')      // Filter by batch owner
   const shownBatches = useMemo(() => {
     const q = gridSearch.toLowerCase().trim()
-    return batches.filter((b) => (!gridCentre || b.centre_id === gridCentre) && (!q || b.name.toLowerCase().includes(q)))
-  }, [batches, gridSearch, gridCentre])
+    return batches.filter((b) => 
+      (!gridCentre || b.centre_id === gridCentre) && 
+      (!gridManager || b.batch_manager_id === gridManager) &&
+      (!gridOwner || b.batch_owner_id === gridOwner) &&
+      (!q || b.name.toLowerCase().includes(q))
+    )
+  }, [batches, gridSearch, gridCentre, gridManager, gridOwner])
 
   const centreFaculty = useMemo(() => {
     if (!centreId) return []
@@ -190,15 +200,6 @@ export default function BatchScheduler() {
     const filtered = centreFaculty.filter((f) => allowed.has(f.id))
     return filtered.length ? filtered : centreFaculty
   }
-
-  const centreManagers = useMemo(() => {
-    if (!centreId) return []
-    const ids = new Set(userCentres.filter((uc) => uc.centre_id === centreId).map((uc) => uc.user_id))
-    return managers.filter((m) => {
-      const isBM = m.role === 'batch_manager' || (m.roles || []).includes('batch_manager')
-      return isBM && (ids.has(m.id) || m.centre_id === centreId)
-    })
-  }, [managers, centreId, userCentres])
 
   const programSubjects = useMemo(
     () => subjects.filter((s) => s.program_id === programId),
@@ -299,7 +300,7 @@ export default function BatchScheduler() {
   const loadData = async () => {
     setLoading(true)
     setMessage(null)
-    const [batchesRes, progRes, centRes, subjRes, classRes, facRes, manRes, ucRes, planRes, linkRes, fsRes, bpRes] = await Promise.all([
+    const [batchesRes, progRes, centRes, subjRes, classRes, facRes, manRes, centralRes, ucRes, planRes, linkRes, fsRes, bpRes] = await Promise.all([
       supabase.from('batches').select('*').order('created_at', { ascending: false }),
       supabase.from('programs').select('*').order('name'),
       supabase.from('centres').select('id, name').order('name'),
@@ -307,6 +308,7 @@ export default function BatchScheduler() {
       supabase.from('classrooms').select('id, name, room_no, centre_id, is_active').order('room_no'),
       supabase.rpc('list_active_faculty', { p_centre_id: null }),
       supabase.from('app_users').select('id, full_name, email, role, roles, centre_id').or('role.eq.batch_manager,roles.cs.{batch_manager}').eq('status', 'active').order('full_name'),
+      supabase.rpc('get_central_team_members'),
       supabase.from('user_centres').select('user_id, centre_id'),
       supabase.from('planners').select('id, name').order('created_at', { ascending: false }),
       supabase.from('batch_planner_links').select('id, batch_id, planner_id, faculty_id, stage, planners(name)'),
@@ -329,6 +331,7 @@ export default function BatchScheduler() {
     }
 
     if (manRes.data) setManagers(manRes.data as Manager[])
+    if (centralRes.data) setCentralTeam(centralRes.data as Manager[])
     if (ucRes.data) setUserCentres(ucRes.data as UserCentre[])
     if (planRes.data) setPlanners(planRes.data as Planner[])
     if (linkRes.data) setLinks(linkRes.data as unknown as Link[])
@@ -383,12 +386,9 @@ export default function BatchScheduler() {
 
   const handleCentreChange = (newCentreId: string) => {
     setCentreId(newCentreId)
-    setManagerId((prev) => {
+    setOwnerId((prev) => {
       const ids = new Set(userCentres.filter((uc) => uc.centre_id === newCentreId).map((uc) => uc.user_id))
-      const valid = managers.some((m) => {
-        const isBM = m.role === 'batch_manager' || (m.roles || []).includes('batch_manager')
-        return m.id === prev && isBM && (ids.has(m.id) || m.centre_id === newCentreId)
-      })
+      const valid = centralTeam.some((m) => m.id === prev && (ids.has(m.id) || m.centre_id === newCentreId))
       return valid ? prev : ''
     })
     setScheduleRows((rows) =>
@@ -411,7 +411,8 @@ export default function BatchScheduler() {
     setCentreId(b.centre_id)
     setStartDate(b.start_date)
     setEndDate(b.end_date)
-    setManagerId(b.batch_manager_id)
+    setManagerId(b.batch_manager_id || '')  // Batch Manager
+    setOwnerId(b.batch_owner_id || '')      // Batch Owner
     const { data } = await supabase.from('batch_schedules').select('*').eq('batch_id', b.id)
     setScheduleRows(buildRows(b.program_id, (data || []) as FlatSchedule[], b.start_date, b.end_date))
     setShowForm(true)
@@ -420,7 +421,8 @@ export default function BatchScheduler() {
 
   const resetForm = () => {
     setEditingBatch(null)
-    setName(''); setProgramId(''); setCentreId(''); setStartDate(''); setEndDate(''); setManagerId('')
+    setName(''); setProgramId(''); setCentreId(''); setStartDate(''); setEndDate(''); 
+    setManagerId(''); setOwnerId('')  // Reset both manager and owner
     setScheduleRows([])
     setShowForm(false)
     setMessage(null)
@@ -608,11 +610,11 @@ async function syncMaterialisedTimes(
       // .select() so we can tell if the row actually existed — a stale UI entry
       // (batch deleted/merged elsewhere) would update 0 rows and then blow up on
       // the schedule insert with a foreign-key error.
-      const { data, error } = await supabase.from('batches').update({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId }).eq('id', editingBatch.id).select('id')
+      const { data, error } = await supabase.from('batches').update({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId || null, batch_owner_id: ownerId || null }).eq('id', editingBatch.id).select('id')
       if (error) return fail(error.message)
       if (!data || data.length === 0) { await loadData(); return fail('This batch no longer exists (it may have been deleted or merged). The list has been refreshed — please create it again or pick another batch.') }
     } else {
-      const { data, error } = await supabase.from('batches').insert({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId }).select('id').single()
+      const { data, error } = await supabase.from('batches').insert({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId || null, batch_owner_id: ownerId || null }).select('id').single()
       if (error) return fail(error.message)
       if (!data?.id) return fail('Could not create the batch (no id returned). Check your access/permissions and try again.')
       batchId = data.id
@@ -752,13 +754,23 @@ async function syncMaterialisedTimes(
                 <input required type="date" value={endDate} min={startDate || undefined} onChange={(e) => handleEndDate(e.target.value)} className={inputClass} />
               </div>
               <div>
-                <label className="block text-xs font-medium text-neutral-500 mb-1">Batch Manager *</label>
-                <select required value={managerId} onChange={(e) => setManagerId(e.target.value)} className={inputClass} disabled={!centreId}>
-                  <option value="">{centreId ? 'Select manager' : 'Select centre first'}</option>
-                  {centreManagers.map((m) => {
-                    const role = m.role || m.roles?.[0] || 'staff'
-                    return <option key={m.id} value={m.id}>{m.full_name} ({role.replace('_', ' ')})</option>
-                  })}
+                <label className="block text-xs font-medium text-neutral-500 mb-1">Batch Manager</label>
+                <select value={managerId} onChange={(e) => setManagerId(e.target.value)} className={inputClass} disabled={!centreId}>
+                  <option value="">Select batch manager (optional)</option>
+                  {managers
+                    .filter((m) => !centreId || m.centre_id === centreId || !m.centre_id)
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>{m.full_name} (Manager)</option>
+                    ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-neutral-500 mb-1">Batch Owner *</label>
+                <select required value={ownerId} onChange={(e) => setOwnerId(e.target.value)} className={inputClass} disabled={!centreId}>
+                  <option value="">{centreId ? 'Select batch owner' : 'Select centre first'}</option>
+                  {centralTeam.map((m) => (
+                    <option key={m.id} value={m.id}>{m.full_name} (Central Team)</option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -904,6 +916,20 @@ async function syncMaterialisedTimes(
                 {centres.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Manager</label>
+              <select value={gridManager} onChange={(e) => setGridManager(e.target.value)} className="h-11 min-w-[200px] px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                <option value="">All managers</option>
+                {managers.map((m) => <option key={m.id} value={m.id}>{m.full_name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Owner</label>
+              <select value={gridOwner} onChange={(e) => setGridOwner(e.target.value)} className="h-11 min-w-[200px] px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                <option value="">All owners</option>
+                {centralTeam.map((m) => <option key={m.id} value={m.id}>{m.full_name}</option>)}
+              </select>
+            </div>
             {!loading && <span className="pb-2 text-sm text-neutral-400">{shownBatches.length} batch{shownBatches.length === 1 ? '' : 'es'}</span>}
           </div>
           {!loading && (() => {
@@ -934,6 +960,24 @@ async function syncMaterialisedTimes(
                   <div className="space-y-1.5 text-sm text-neutral-600 mb-4">
                     <p>{programs.find((p) => p.id === b.program_id)?.name}</p>
                     <p>{centres.find((c) => c.id === b.centre_id)?.name}</p>
+                    <p className="text-xs">
+                      <span className="text-neutral-500">Manager:</span>{' '}
+                      <span className="font-medium text-purple-700">
+                        {b.batch_manager_id ? 
+                          (managers.find((m) => m.id === b.batch_manager_id)?.full_name || 'Unknown') : 
+                          'Not assigned'
+                        }
+                      </span>
+                    </p>
+                    <p className="text-xs">
+                      <span className="text-neutral-500">Owner:</span>{' '}
+                      <span className="font-medium text-blue-700">
+                        {b.batch_owner_id ? 
+                          (centralTeam.find((m) => m.id === b.batch_owner_id)?.full_name || 'Unknown') : 
+                          'Not assigned'
+                        }
+                      </span>
+                    </p>
                     <p className="text-xs text-neutral-400">{new Date(b.start_date).toLocaleDateString()} – {new Date(b.end_date).toLocaleDateString()}</p>
                     {(() => {
                       const last = lastLectureByBatch.get(b.id)

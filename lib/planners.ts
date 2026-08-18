@@ -542,13 +542,16 @@ type TargetRow = {
   planned_date: string
   start_time: string | null
   duration_minutes: number
+  batch_id?: string
+  subject_id?: string | null
 }
 
 const NO_BUSY = (): { weekly: WeeklyBusy[]; dated: DatedBusy[] } => ({ weekly: [], dated: [] })
 
-/** Reschedule one materialised lecture to a new date/time and slide every
- *  later lecture of the same planner-link by the same day delta, re-checking
- *  overlaps for the whole moved set. No partial writes: validate, then apply. */
+/** Reschedule one materialised lecture to a new date/time. All later lectures
+ *  of the same subject in this planner-link are shifted onto the NEXT available
+ *  class-date within the batch's end_date — consuming buffer slots rather than
+ *  pushing the batch past its planned finish. No partial writes: validate first. */
 export async function cascadeReschedule(
   supabase: SupabaseClient,
   rowId: string,
@@ -558,70 +561,93 @@ export async function cascadeReschedule(
 ): Promise<{ ok: boolean; shifted: number; error?: string }> {
   const { data: target } = await supabase
     .from('batch_planners')
-    .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes')
+    .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes, batch_id, subject_id')
     .eq('id', rowId)
-    .single<TargetRow>()
+    .single<TargetRow & { batch_id: string; subject_id: string | null }>()
   if (!target) return { ok: false, shifted: 0, error: 'Lecture not found.' }
 
-  const delta = daysBetween(target.planned_date, newDate)
   const targetTime = newTime || target.start_time
 
-  // Subsequent lectures of the SAME teacher in this planner-link (a planner can
-  // span many teachers — only the requesting teacher's later lectures slide).
-  // A TBD (no-faculty) lecture has no "same teacher" chain, so only it moves.
-  let subsequent: TargetRow[] = []
-  if (target.link_id && target.faculty_id) {
-    const { data } = await supabase
-      .from('batch_planners')
-      .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes')
-      .eq('link_id', target.link_id)
-      .eq('faculty_id', target.faculty_id)
-      .gt('planned_date', target.planned_date)
-    subsequent = (data ?? []) as TargetRow[]
-  }
-
-  const moving = [target, ...subsequent]
-  const movingIds = moving.map((m) => m.id)
+  // Validate the target's new slot (faculty + room free).
+  const movingIds = [target.id]
   const busy = target.faculty_id ? await facultyBusyExcluding(supabase, target.faculty_id, movingIds) : NO_BUSY()
-  const roomBusyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
-
-  const updates: { id: string; planned_date: string; start_time: string | null }[] = []
-  for (const row of moving) {
-    const isTarget = row.id === target.id
-    const propDate = isTarget ? newDate : addDaysToDate(row.planned_date, delta)
-    const propTime = isTarget ? targetTime : row.start_time
-    if (propTime) {
-      const reason = conflictReason(propDate, propTime, row.duration_minutes, busy)
-      if (reason) return { ok: false, shifted: 0, error: `Cannot reschedule: ${reason}.` }
-
-      let roomBusy: { weekly: WeeklyBusy[]; dated: DatedBusy[] } | null = null
-      if (row.classroom_id) {
-        if (!roomBusyCache[row.classroom_id]) roomBusyCache[row.classroom_id] = await classroomBusyExcluding(supabase, row.classroom_id, movingIds)
-        roomBusy = roomBusyCache[row.classroom_id]
-        const rReason = conflictReason(propDate, propTime, row.duration_minutes, roomBusy)
-        if (rReason) return { ok: false, shifted: 0, error: `Cannot reschedule: room ${rReason}.` }
-      }
-
-      const slot = { date: propDate, start: toMinutes(propTime.slice(0, 5)), end: toMinutes(propTime.slice(0, 5)) + row.duration_minutes }
-      busy.dated.push(slot)
-      if (roomBusy) roomBusy.dated.push(slot)
+  if (targetTime) {
+    const reason = conflictReason(newDate, targetTime, target.duration_minutes, busy)
+    if (reason) return { ok: false, shifted: 0, error: `Cannot reschedule: ${reason}.` }
+    if (target.classroom_id) {
+      const roomBusy = await classroomBusyExcluding(supabase, target.classroom_id, movingIds)
+      const rReason = conflictReason(newDate, targetTime, target.duration_minutes, roomBusy)
+      if (rReason) return { ok: false, shifted: 0, error: `Cannot reschedule: room ${rReason}.` }
     }
-    updates.push({ id: row.id, planned_date: propDate, start_time: propTime })
   }
 
-  for (const u of updates) {
-    const patch: { planned_date: string; start_time: string | null; topic_name?: string; chapter?: string } = { planned_date: u.planned_date, start_time: u.start_time }
-    // Only the requested class changes its teaching content. Later lectures
-    // shift dates but keep their own GTT tags.
-    if (u.id === target.id && override?.topic_name?.trim() && override?.chapter?.trim()) {
-      patch.topic_name = override.topic_name.trim()
-      patch.chapter = override.chapter.trim()
-    }
-    const { error } = await supabase.from('batch_planners').update(patch).eq('id', u.id)
-    if (error) return { ok: false, shifted: 0, error: error.message }
+  // Move the target lecture first.
+  const targetPatch: Record<string, unknown> = { planned_date: newDate, start_time: targetTime }
+  if (override?.topic_name?.trim()) targetPatch.topic_name = override.topic_name.trim()
+  if (override?.chapter?.trim()) targetPatch.chapter = override.chapter.trim()
+  const { error: tErr } = await supabase.from('batch_planners').update(targetPatch).eq('id', target.id)
+  if (tErr) return { ok: false, shifted: 0, error: tErr.message }
+
+  // Now re-pack all SUBSEQUENT real (non-buffer) lectures of the same subject
+  // onto the next available class-dates within the batch's end_date.
+  // This is identical to what shiftSubjectForward does for tests — buffers
+  // absorb the displaced lecture, end_date never moves.
+  if (!target.batch_id || !target.subject_id) return { ok: true, shifted: 0 }
+
+  const { data: b } = await supabase.from('batches').select('end_date').eq('id', target.batch_id).single<{ end_date: string }>()
+  const endDate = b?.end_date ?? newDate
+
+  // Build ordered class-dates for this subject within the batch (today → end_date).
+  const { data: sched } = await supabase
+    .from('batch_schedules')
+    .select('day_of_week, start_time, end_time, classroom_id')
+    .eq('batch_id', target.batch_id)
+    .eq('subject_id', target.subject_id)
+  const slotByDay = new Map<number, { start: string; duration: number; classroom: string | null }>()
+  for (const s of (sched ?? []) as { day_of_week: number; start_time: string; end_time: string; classroom_id: string | null }[]) {
+    if (!slotByDay.has(s.day_of_week))
+      slotByDay.set(s.day_of_week, { start: s.start_time.slice(0, 5), duration: toMinutes(s.end_time.slice(0, 5)) - toMinutes(s.start_time.slice(0, 5)), classroom: s.classroom_id ?? null })
+  }
+  if (slotByDay.size === 0) return { ok: true, shifted: 0 } // no weekly slot — nothing to re-pack
+
+  const classDates: string[] = []
+  const fromDate = newDate < (new Date().toISOString().split('T')[0]) ? new Date().toISOString().split('T')[0] : newDate
+  { const d = new Date(fromDate + 'T12:00:00'); const e = new Date(endDate + 'T12:00:00'); while (d <= e) { if (slotByDay.has(d.getDay())) classDates.push(d.toISOString().split('T')[0]); d.setDate(d.getDate() + 1) } }
+
+  // Load all upcoming real lectures for this subject AFTER the target's new date.
+  const { data: lecs } = await supabase
+    .from('batch_planners')
+    .select('id, planned_date')
+    .eq('batch_id', target.batch_id)
+    .eq('subject_id', target.subject_id)
+    .eq('is_buffer', false)
+    .neq('id', target.id) // target already moved
+    .gt('planned_date', newDate)
+    .order('planned_date', { ascending: true })
+  const lectures = (lecs ?? []) as { id: string; planned_date: string }[]
+  if (lectures.length === 0) return { ok: true, shifted: 0 }
+
+  // Re-assign each to the next free class-date (same logic as shiftSubjectForward).
+  let moved = 0
+  let prevIdx = -1
+  for (const l of lectures) {
+    // Find next class-date strictly after both prevIdx and the lecture's own current date.
+    let j = prevIdx + 1
+    while (j < classDates.length && classDates[j] <= l.planned_date) j++
+    if (j >= classDates.length) break // no buffer/class-date left within end_date
+    const nd = classDates[j]
+    prevIdx = j
+    const slot = slotByDay.get(new Date(nd + 'T12:00:00').getDay())
+    await supabase.from('batch_planners').update({
+      planned_date: nd,
+      start_time: slot?.start ?? null,
+      duration_minutes: slot?.duration ?? 60,
+      classroom_id: slot?.classroom ?? null,
+    }).eq('id', l.id)
+    moved++
   }
 
-  return { ok: true, shifted: subsequent.length }
+  return { ok: true, shifted: moved }
 }
 
 /** Add ONE extra lecture, cloning an existing (anchor) lecture's batch, link,

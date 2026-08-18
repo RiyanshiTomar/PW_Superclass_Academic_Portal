@@ -58,23 +58,35 @@ export async function getEligibleChapters(
     .eq('batch_id', args.batchId)
   const lectures = ((lecs ?? []) as { chapter: string | null; topic_name: string | null; subject_id: string | null; planned_date: string }[])
     .filter((l) => !l.subject_id || l.subject_id === args.subjectId) // this subject (or untagged)
-  const taughtTopics = new Set<string>()
-  for (const l of lectures) if (l.planned_date <= args.byDate && l.topic_name) taughtTopics.add(norm(l.topic_name))
+
+  // Key taught topics by chapter name + topic name to avoid cross-chapter inflation.
+  // e.g. "Introduction" in Chapter A should NOT count as taught for Chapter B.
+  const taughtByChapter = new Map<string, Set<string>>()
+  // Also keep a flat set for chapters with no master topics (lecture-count fallback).
+  for (const l of lectures) {
+    if (l.planned_date <= args.byDate && l.topic_name) {
+      const chapKey = norm(l.chapter)
+      if (!taughtByChapter.has(chapKey)) taughtByChapter.set(chapKey, new Set())
+      taughtByChapter.get(chapKey)!.add(norm(l.topic_name))
+    }
+  }
 
   return chapters.map((ch) => {
     const tps = topicsByChapter.get(ch.id) ?? []
+    const chKey = norm(ch.name)
+    const taughtForChap = taughtByChapter.get(chKey) ?? new Set<string>()
     let pct = 0
     let covered = 0
     if (tps.length > 0) {
-      // Topic-level: taught topics / total topics.
-      covered = tps.filter((t) => taughtTopics.has(norm(t))).length
-      pct = Math.round((covered / tps.length) * 100)
+      // Topic-level: only count topics taught under this specific chapter.
+      covered = tps.filter((t) => taughtForChap.has(norm(t))).length
+      pct = Math.min(100, Math.round((covered / tps.length) * 100))
     } else {
       // No topics in the master — measure from the batch's own planner:
       // lectures of this chapter taught by the test date / total planned for it.
-      const chapLecs = lectures.filter((l) => norm(l.chapter) === norm(ch.name))
+      const chapLecs = lectures.filter((l) => norm(l.chapter) === chKey)
       const taught = chapLecs.filter((l) => l.planned_date <= args.byDate).length
-      pct = chapLecs.length > 0 ? Math.round((taught / chapLecs.length) * 100) : 0
+      pct = chapLecs.length > 0 ? Math.min(100, Math.round((taught / chapLecs.length) * 100)) : 0
       covered = taught
     }
     return { chapter_id: ch.id, name: ch.name, pct, topics_total: tps.length, topics_covered: covered, eligible: pct >= threshold }
@@ -99,9 +111,9 @@ function aggregateCompletion(rows: EligibleChapter[], threshold: number): TestCo
   const topics_covered = rows.reduce((a, c) => a + c.topics_covered, 0)
   // Prefer a true topic-level ratio; fall back to averaging per-chapter % when
   // the master has no topics for these chapters (lecture-count basis).
-  const pct = topics_total > 0
+  const pct = Math.min(100, topics_total > 0
     ? Math.round((topics_covered / topics_total) * 100)
-    : Math.round(rows.reduce((a, c) => a + c.pct, 0) / rows.length)
+    : Math.round(rows.reduce((a, c) => a + c.pct, 0) / rows.length))
   return { pct, topics_total, topics_covered, chapters: rows.length, warn: pct < threshold, threshold, hasData: true }
 }
 

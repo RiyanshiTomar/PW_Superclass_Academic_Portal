@@ -7,7 +7,6 @@ import { stageBadgeClass, formatTime } from '@/lib/utils'
 import { notifyRoles } from '@/lib/notifications'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
 
-// A materialised lecture that belongs to me, with its batch/subject context.
 type MyLecture = {
   id: string
   link_id: string
@@ -23,11 +22,10 @@ type MyLecture = {
   classrooms: { name: string } | { name: string }[] | null
 }
 
-// My lectures for one batch (the whole planner, all dates).
 type BatchGroup = {
   batchName: string
   lectures: MyLecture[]
-  pending: number // how many still awaiting my confirmation
+  pending: number
 }
 
 type Proposed = { plannerId: string; name: string; count: number }
@@ -46,8 +44,6 @@ export default function FacultyPlannersPage() {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [expandedProposed, setExpandedProposed] = useState<string | null>(null)
   const [proposedLectures, setProposedLectures] = useState<Record<string, PlannerLecture[]>>({})
-  // Editable topic/chapter per lecture (what was ACTUALLY taught).
-  const [edits, setEdits] = useState<Record<string, { topic_name: string; chapter: string }>>({})
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
@@ -61,9 +57,6 @@ export default function FacultyPlannersPage() {
     if (!appUser) { setLoading(false); return }
     setAppUserId(appUser.id)
 
-    // Paginate + exclude buffer slots (reserved/empty rows never meant to reach
-    // faculty). PostgREST caps a single select at ~1000 rows; without paging,
-    // prolific faculty silently lose classes past that cutoff.
     async function fetchAllMine(facultyId: string): Promise<MyLecture[]> {
       const out: MyLecture[] = []
       const PAGE = 1000
@@ -83,31 +76,27 @@ export default function FacultyPlannersPage() {
       return out
     }
 
-    let rows: MyLecture[] = []
     try {
       const [mineRows, propRes] = await Promise.all([
         fetchAllMine(appUser.id),
         supabase.from('planner_lectures').select('planner_id, planners(name)').eq('faculty_id', appUser.id),
       ])
-      rows = mineRows
-      // Seed the editable fields from the current planner values.
-      const seed: Record<string, { topic_name: string; chapter: string }> = {}
-      for (const r of rows) seed[r.id] = { topic_name: r.topic_name ?? '', chapter: r.chapter ?? '' }
-      setEdits(seed)
 
-      // Group the whole planner by batch (all dates together).
       const byBatch = new Map<string, MyLecture[]>()
-      for (const row of rows) {
+      for (const row of mineRows) {
         const bn = one(row.batches)?.name ?? 'Batch'
         if (!byBatch.has(bn)) byBatch.set(bn, [])
         byBatch.get(bn)!.push(row)
       }
       const groupList: BatchGroup[] = Array.from(byBatch.entries())
         .sort((a, b) => a[0].localeCompare(b[0]))
-        .map(([batchName, lectures]) => ({ batchName, lectures, pending: lectures.filter((l) => l.stage === 'Faculty Assigned' && l.status !== 'conducted').length }))
+        .map(([batchName, lectures]) => ({
+          batchName,
+          lectures,
+          pending: lectures.filter((l) => l.stage === 'Faculty Assigned' && l.status !== 'conducted').length,
+        }))
       setGroups(groupList)
 
-      // Proposed = planners meant for me that aren't yet on my calendar.
       const propCount = new Map<string, { name: string; count: number }>()
       for (const r of (propRes.data ?? []) as unknown as { planner_id: string; planners: { name: string } | { name: string }[] | null }[]) {
         const p = one(r.planners)
@@ -115,7 +104,7 @@ export default function FacultyPlannersPage() {
         cur.count += 1
         propCount.set(r.planner_id, cur)
       }
-      setProposed(rows.length > 0 ? [] : Array.from(propCount.entries()).map(([plannerId, v]) => ({ plannerId, name: v.name, count: v.count })))
+      setProposed(mineRows.length > 0 ? [] : Array.from(propCount.entries()).map(([plannerId, v]) => ({ plannerId, name: v.name, count: v.count })))
     } catch (err) {
       setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Could not load your planners.' })
     }
@@ -127,45 +116,48 @@ export default function FacultyPlannersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const setEdit = (id: string, patch: Partial<{ topic_name: string; chapter: string }>) =>
-    setEdits((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
-
-  const isDirty = (l: MyLecture) => {
-    const e = edits[l.id]
-    return e && (e.topic_name !== (l.topic_name ?? '') || e.chapter !== (l.chapter ?? ''))
-  }
-
-  // Save one lecture's edited topic/chapter; optionally mark it Confirmed.
-  const saveOne = async (l: MyLecture, confirm: boolean) => {
+  // Faculty can ONLY confirm — no topic/chapter editing allowed.
+  // Central Team is the sole authority on what the planner contains.
+  const confirmOne = async (l: MyLecture) => {
     if (!appUserId) return
-    const e = edits[l.id] ?? { topic_name: l.topic_name, chapter: l.chapter }
     setBusy(true); setMessage(null)
-    const patch: Record<string, unknown> = { topic_name: e.topic_name.trim(), chapter: e.chapter.trim() }
-    if (confirm) {
-      patch.stage = 'Confirmed'
-      patch.status = 'confirmed'
-    }
-    const { error } = await supabase.from('batch_planners').update(patch).eq('id', l.id).eq('faculty_id', appUserId)
+    const { error } = await supabase
+      .from('batch_planners')
+      .update({ stage: 'Confirmed', status: 'confirmed' })
+      .eq('id', l.id)
+      .eq('faculty_id', appUserId)
     setBusy(false)
     if (error) { setMessage({ type: 'error', text: error.message }); return }
-    if (confirm) await notifyRoles(supabase, ['central_team'], { type: 'planner', title: 'Class confirmed', body: `Faculty confirmed ${e.topic_name || 'a class'} (${new Date(l.planned_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}).`, link: '/central' })
-    setMessage({ type: 'success', text: confirm ? 'Class confirmed — the planner is updated with what you taught.' : 'Saved — planner updated.' })
+    await notifyRoles(supabase, ['central_team'], {
+      type: 'planner',
+      title: 'Class confirmed',
+      body: `Faculty confirmed ${l.topic_name || 'a class'} (${new Date(l.planned_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}).`,
+      link: '/central',
+    })
+    setMessage({ type: 'success', text: 'Class confirmed.' })
     await loadData()
   }
 
-  // Confirm every still-pending (Faculty Assigned) class in a batch, saving any edits.
   const confirmBatch = async (bg: BatchGroup) => {
     if (!appUserId) return
     setBusy(true); setMessage(null)
     for (const l of bg.lectures) {
       if (l.stage !== 'Faculty Assigned' || l.status === 'conducted') continue
-      const e = edits[l.id] ?? { topic_name: l.topic_name, chapter: l.chapter }
-      const { error } = await supabase.from('batch_planners').update({ topic_name: e.topic_name.trim(), chapter: e.chapter.trim(), stage: 'Confirmed', status: 'confirmed' }).eq('id', l.id).eq('faculty_id', appUserId)
+      const { error } = await supabase
+        .from('batch_planners')
+        .update({ stage: 'Confirmed', status: 'confirmed' })
+        .eq('id', l.id)
+        .eq('faculty_id', appUserId)
       if (error) { setBusy(false); setMessage({ type: 'error', text: error.message }); return }
     }
     setBusy(false)
-    await notifyRoles(supabase, ['central_team'], { type: 'planner', title: 'Planner confirmed', body: `Faculty confirmed classes for ${bg.batchName}.`, link: '/central' })
-    setMessage({ type: 'success', text: `Confirmed all pending classes for ${bg.batchName}.` })
+    await notifyRoles(supabase, ['central_team'], {
+      type: 'planner',
+      title: 'Planner confirmed',
+      body: `Faculty confirmed all classes for ${bg.batchName}.`,
+      link: '/central',
+    })
+    setMessage({ type: 'success', text: `All pending classes confirmed for ${bg.batchName}.` })
     await loadData()
   }
 
@@ -184,10 +176,8 @@ export default function FacultyPlannersPage() {
   }
 
   const subjName = (v: MyLecture['subjects']) => one(v)?.name ?? '—'
-  const inputCls = 'w-full h-8 px-2 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500'
 
-  // Group a batch's classes by (subject → chapter) so every topic of a chapter
-  // shows together, even if their dates differ. Chapters ordered by earliest date.
+  // Group by subject → chapter, chapters ordered by earliest date.
   const groupsOf = (lectures: MyLecture[]) => {
     const map = new Map<string, { subject: string; chapter: string; rows: MyLecture[] }>()
     for (const l of lectures) {
@@ -205,7 +195,10 @@ export default function FacultyPlannersPage() {
 
   return (
     <div className="max-w-5xl mx-auto">
-      <PageHeader title="My Planners" description="Your whole planner, batch by batch. For each class, confirm you taught that topic on that date — or edit the topic/chapter to what you actually taught, and the planner updates. Need an extra class or to move one? Raise a request from your Calendar; Central approves and the plan shifts." />
+      <PageHeader
+        title="My Planners"
+        description="Your full class schedule set by the Central Team. Review your upcoming classes and confirm each one after it is conducted. The schedule, chapters, and topics are managed by Central Team only."
+      />
 
       {message && <Alert type={message.type === 'info' ? 'info' : message.type}>{message.text}</Alert>}
 
@@ -224,79 +217,94 @@ export default function FacultyPlannersPage() {
               {groups.map((bg) => {
                 const open = expanded === bg.batchName
                 return (
-                <Card key={bg.batchName} className="p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-neutral-950">{bg.batchName}</span>
-                      <span className="text-xs text-neutral-500">{bg.lectures.length} class(es)</span>
-                      {bg.pending > 0
-                        ? <span className="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 bg-amber-50 text-amber-700 ring-amber-200">{bg.pending} to confirm</span>
-                        : <span className="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 bg-emerald-50 text-emerald-700 ring-emerald-200">All confirmed</span>}
+                  <Card key={bg.batchName} className="p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-neutral-950">{bg.batchName}</span>
+                        <span className="text-xs text-neutral-500">{bg.lectures.length} class(es)</span>
+                        {bg.pending > 0
+                          ? <span className="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 bg-amber-50 text-amber-700 ring-amber-200">{bg.pending} to confirm</span>
+                          : <span className="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 bg-emerald-50 text-emerald-700 ring-emerald-200">All confirmed</span>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {bg.pending > 0 && (
+                          <button onClick={() => confirmBatch(bg)} disabled={busy} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">
+                            Confirm all ({bg.pending})
+                          </button>
+                        )}
+                        <button onClick={() => setExpanded(open ? null : bg.batchName)} className="px-3 py-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-semibold rounded-lg">
+                          {open ? 'Hide' : 'View classes'}
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      {bg.pending > 0 && <button onClick={() => confirmBatch(bg)} disabled={busy} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Confirm all pending ({bg.pending})</button>}
-                      <button onClick={() => setExpanded(open ? null : bg.batchName)} className="px-3 py-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-semibold rounded-lg">{open ? 'Hide' : 'View classes'}</button>
-                    </div>
-                  </div>
 
-                  {open && (
-                    <div className="mt-3 border-t border-neutral-100 pt-3 space-y-4">
-                      {groupsOf(bg.lectures).map((g) => (
-                        <div key={`${g.subject}||${g.chapter}`} className="border border-neutral-200 rounded-xl overflow-hidden">
-                          <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 bg-neutral-50 border-b border-neutral-200">
-                            <span className="font-bold text-neutral-950">{g.chapter}</span>
-                            <span className="text-xs text-neutral-400">{g.subject} · {g.rows.length} topic{g.rows.length === 1 ? '' : 's'}</span>
+                    {open && (
+                      <div className="mt-3 border-t border-neutral-100 pt-3 space-y-4">
+                        {groupsOf(bg.lectures).map((g) => (
+                          <div key={`${g.subject}||${g.chapter}`} className="border border-neutral-200 rounded-xl overflow-hidden">
+                            <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 bg-neutral-50 border-b border-neutral-200">
+                              <span className="font-bold text-neutral-950">{g.chapter}</span>
+                              <span className="text-xs text-neutral-400">{g.subject} · {g.rows.length} class{g.rows.length === 1 ? '' : 'es'}</span>
+                            </div>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left text-sm min-w-[580px]">
+                                <thead>
+                                  <tr className="bg-white text-neutral-500 text-xs uppercase tracking-wider">
+                                    <th className="px-3 py-2">Date</th>
+                                    <th className="px-3 py-2">Time</th>
+                                    <th className="px-3 py-2">Topic</th>
+                                    <th className="px-3 py-2">Room</th>
+                                    <th className="px-3 py-2 text-right">Status</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-neutral-100">
+                                  {g.rows.map((l) => {
+                                    const conducted = l.status === 'conducted'
+                                    const awaitingConfirm = l.stage === 'Faculty Assigned' && !conducted
+                                    const label = conducted ? 'Conducted'
+                                      : l.stage === 'Confirmed' ? 'Confirmed'
+                                      : l.stage === 'Faculty Assigned' ? 'To confirm'
+                                      : l.stage || 'Scheduled'
+                                    const labelClass = conducted
+                                      ? 'bg-neutral-100 text-neutral-600 ring-neutral-300'
+                                      : stageBadgeClass(l.stage)
+                                    return (
+                                      <tr key={l.id} className={conducted ? 'bg-neutral-100/70' : awaitingConfirm ? 'bg-amber-50/30' : ''}>
+                                        <td className="px-3 py-2 whitespace-nowrap text-neutral-800">
+                                          {new Date(l.planned_date).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}
+                                        </td>
+                                        <td className="px-3 py-2 text-neutral-500 whitespace-nowrap">{formatTime(l.start_time)}</td>
+                                        <td className="px-3 py-2 text-neutral-800">{l.topic_name || <span className="text-neutral-400 italic">Not set</span>}</td>
+                                        <td className="px-3 py-2 text-neutral-500 whitespace-nowrap">{one(l.classrooms)?.name ?? '—'}</td>
+                                        <td className="px-3 py-2 text-right whitespace-nowrap">
+                                          {awaitingConfirm ? (
+                                            <button
+                                              onClick={() => confirmOne(l)}
+                                              disabled={busy}
+                                              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg"
+                                            >
+                                              Confirm
+                                            </button>
+                                          ) : (
+                                            <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 ${labelClass}`}>
+                                              {label}
+                                            </span>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    )
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
                           </div>
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-left text-sm min-w-[620px]">
-                              <thead><tr className="bg-white text-neutral-500 text-xs uppercase tracking-wider">
-                                <th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th>
-                                <th className="px-3 py-2 min-w-[220px]">Topic (taught)</th><th className="px-3 py-2 text-right">Confirm</th>
-                              </tr></thead>
-                              <tbody className="divide-y divide-neutral-100">
-                                {g.rows.map((l) => {
-                                  const e = edits[l.id] ?? { topic_name: l.topic_name, chapter: l.chapter }
-                                  const conducted = l.status === 'conducted'
-                                  const label = conducted
-                                    ? 'Conducted'
-                                    : l.stage === 'Faculty Assigned'
-                                      ? 'Scheduled'
-                                      : l.stage === 'Confirmed'
-                                        ? 'Confirmed'
-                                        : l.stage || 'Scheduled'
-                                  const labelClass = conducted
-                                    ? 'bg-neutral-100 text-neutral-600 ring-neutral-300'
-                                    : stageBadgeClass(l.stage)
-                                  return (
-                                    <tr key={l.id} className={l.status === 'conducted' ? 'bg-neutral-100/70' : l.stage === 'Faculty Assigned' ? 'bg-amber-50/30' : ''}>
-                                      <td className="px-3 py-2 whitespace-nowrap">
-                                        {new Date(l.planned_date).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}
-                                      </td>
-                                      <td className="px-3 py-2 text-neutral-500 whitespace-nowrap">{formatTime(l.start_time)}</td>
-                                      <td className="px-3 py-2"><input value={e.topic_name} onChange={(ev) => setEdit(l.id, { topic_name: ev.target.value })} className={inputCls} placeholder="Topic taught" /></td>
-                                      <td className="px-3 py-2 text-right whitespace-nowrap">
-                                        {conducted ? (
-                                          <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 ${labelClass}`}>{label}</span>
-                                        ) : l.stage === 'Faculty Assigned' ? (
-                                          <button onClick={() => saveOne(l, true)} disabled={busy} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Confirm</button>
-                                        ) : isDirty(l) ? (
-                                          <button onClick={() => saveOne(l, false)} disabled={busy} className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Save</button>
-                                        ) : (
-                                          <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 ${labelClass}`}>{label}</span>
-                                        )}
-                                      </td>
-                                    </tr>
-                                  )
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      ))}
-                      <p className="text-[11px] text-neutral-400">Classes are grouped by chapter (all its topics together, whatever their dates). Edit the topic to what you actually taught, then Confirm — the planner updates. To add an extra/demo class or move one, raise a request from your <b>Calendar</b>; once Central approves, the plan shifts.</p>
-                    </div>
-                  )}
-                </Card>
+                        ))}
+                        <p className="text-[11px] text-neutral-400">
+                          Schedule, chapters, and topics are set by Central Team. You can only confirm classes here.
+                        </p>
+                      </div>
+                    )}
+                  </Card>
                 )
               })}
             </div>
@@ -315,22 +323,34 @@ export default function FacultyPlannersPage() {
                         <span className="text-xs text-neutral-500">{p.count} lecture(s) for you</span>
                         <span className="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full ring-1 bg-neutral-100 text-neutral-600 ring-neutral-200">Proposed</span>
                       </div>
-                      <button onClick={() => toggleProposed(p)} className="px-3 py-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-semibold rounded-lg">{expandedProposed === p.plannerId ? 'Hide' : 'Preview'}</button>
+                      <button onClick={() => toggleProposed(p)} className="px-3 py-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-semibold rounded-lg">
+                        {expandedProposed === p.plannerId ? 'Hide' : 'Preview'}
+                      </button>
                     </div>
-                    <p className="text-xs text-neutral-400 mt-1">Central Team has planned these for you. They appear above to confirm once scheduled onto a batch and sent.</p>
+                    <p className="text-xs text-neutral-400 mt-1">Central Team has planned these for you. They appear above to confirm once sent to your batch.</p>
                     {expandedProposed === p.plannerId && (
                       <div className="mt-3 border-t border-neutral-100 pt-3 overflow-x-auto">
                         {!lectures ? (
                           <p className="text-xs text-neutral-400">Loading…</p>
                         ) : (
                           <table className="w-full text-left text-sm">
-                            <thead><tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider"><th className="px-3 py-2">Date</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Topic</th><th className="px-3 py-2">Subject</th></tr></thead>
+                            <thead>
+                              <tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider">
+                                <th className="px-3 py-2">Date</th>
+                                <th className="px-3 py-2">Time</th>
+                                <th className="px-3 py-2">Chapter · Topic</th>
+                                <th className="px-3 py-2">Subject</th>
+                              </tr>
+                            </thead>
                             <tbody className="divide-y divide-neutral-100">
                               {lectures.map((l) => (
                                 <tr key={l.id}>
                                   <td className="px-3 py-2">{new Date(l.planned_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</td>
                                   <td className="px-3 py-2 text-neutral-500">{formatTime(l.start_time)} · {l.duration_minutes}m</td>
-                                  <td className="px-3 py-2"><div className="font-medium text-neutral-950">{l.topic_name}</div><div className="text-xs text-neutral-500">Ch {l.chapter}</div></td>
+                                  <td className="px-3 py-2">
+                                    <div className="font-medium text-neutral-950">{l.topic_name}</div>
+                                    <div className="text-xs text-neutral-500">{l.chapter}</div>
+                                  </td>
                                   <td className="px-3 py-2 text-neutral-600">{subjName(l.subjects)}</td>
                                 </tr>
                               ))}

@@ -8,6 +8,7 @@ const NAV = [
   { label: 'Faculty Schedule View', href: '/faculty-schedule', icon: '👥' },
   { label: 'Students', href: '/branch/students', icon: '🎓' },
   { label: 'Schedule', href: '/branch/calendar', icon: '📅' },
+  { label: 'Batch Scheduler', href: '/branch/batch-scheduler', icon: '🗂️' },
   { label: 'Tests', href: '/branch/tests', icon: '📝' },
   { label: 'Marks Entry', href: '/branch/marks-entry', icon: '✍️' },
   { label: 'Results', href: '/branch/results', icon: '📊' },

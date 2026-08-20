@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { getAppUser, getUserCentreIds } from '@/lib/auth'
 import { checkWeeklyScheduleOverlap, checkClassroomScheduleOverlap } from '@/lib/scheduling'
 import { assignPlanner } from '@/lib/planners'
 import { computeBatchPacing, type BatchPacing } from '@/lib/pacing'
@@ -104,8 +105,11 @@ function plannerName(v: Link['planners']): string {
   return v.name ?? 'Planner'
 }
 
-export default function BatchScheduler() {
+export default function BatchScheduler({ scope = 'central' }: { scope?: 'central' | 'branch' }) {
   const supabase = createClient()
+  const isBranch = scope === 'branch'
+  // For branch scope: store the branch head's allowed centre IDs
+  const [allowedCentreIds, setAllowedCentreIds] = useState<Set<string>>(new Set())
   const [batches, setBatches] = useState<Batch[]>([])
   const [programs, setPrograms] = useState<Program[]>([])
   const [centres, setCentres] = useState<Centre[]>([])
@@ -159,12 +163,13 @@ export default function BatchScheduler() {
   const shownBatches = useMemo(() => {
     const q = gridSearch.toLowerCase().trim()
     return batches.filter((b) => 
+      (isBranch ? allowedCentreIds.has(b.centre_id) : true) &&
       (!gridCentre || b.centre_id === gridCentre) && 
       (!gridManager || b.batch_manager_id === gridManager) &&
       (!gridOwner || b.batch_owner_id === gridOwner) &&
       (!q || b.name.toLowerCase().includes(q))
     )
-  }, [batches, gridSearch, gridCentre, gridManager, gridOwner])
+  }, [batches, gridSearch, gridCentre, gridManager, gridOwner, isBranch, allowedCentreIds])
 
   const centreFaculty = useMemo(() => {
     if (!centreId) return []
@@ -300,8 +305,29 @@ export default function BatchScheduler() {
   const loadData = async () => {
     setLoading(true)
     setMessage(null)
+
+    // For branch scope: resolve the branch head's allowed centres first
+    let branchCentreIds: string[] = []
+    if (isBranch) {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user) {
+        const au = await getAppUser(supabase, user)
+        const fromUserCentres = getUserCentreIds(au)
+        // Also include centres where this user is branch_head
+        const { data: headCentres } = await supabase.from('centres').select('id').eq('branch_head_id', au?.id ?? '')
+        const fromBranchHead = (headCentres ?? []).map((c: { id: string }) => c.id)
+        branchCentreIds = Array.from(new Set([...fromUserCentres, ...fromBranchHead]))
+        setAllowedCentreIds(new Set(branchCentreIds))
+      }
+    }
+
+    let batchQuery = supabase.from('batches').select('*').order('created_at', { ascending: false })
+    if (isBranch && branchCentreIds.length > 0) {
+      batchQuery = batchQuery.in('centre_id', branchCentreIds)
+    }
+
     const [batchesRes, progRes, centRes, subjRes, classRes, facRes, manRes, centralRes, ucRes, planRes, linkRes, fsRes, bpRes] = await Promise.all([
-      supabase.from('batches').select('*').order('created_at', { ascending: false }),
+      batchQuery,
       supabase.from('programs').select('*').order('name'),
       supabase.from('centres').select('id, name').order('name'),
       supabase.from('subjects').select('id, name, program_id').order('name'),
@@ -319,7 +345,11 @@ export default function BatchScheduler() {
     if (batchesRes.error) setMessage({ type: 'error', text: batchesRes.error.message })
     if (batchesRes.data) setBatches(batchesRes.data)
     if (progRes.data) setPrograms(progRes.data)
-    if (centRes.data) setCentres(centRes.data as Centre[])
+    // For branch: only show the branch head's centres in filters/forms
+    if (centRes.data) {
+      const all = centRes.data as Centre[]
+      setCentres(isBranch && branchCentreIds.length > 0 ? all.filter(c => branchCentreIds.includes(c.id)) : all)
+    }
     if (subjRes.data) setSubjects(subjRes.data as Subject[])
     if (classRes.data) setClassrooms(classRes.data as Classroom[])
 

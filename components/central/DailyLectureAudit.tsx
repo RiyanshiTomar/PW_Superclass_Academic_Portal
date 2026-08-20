@@ -347,8 +347,6 @@ export default function DailyLectureAudit() {
     if (allChecked) audit_status = 'audited'
     else if (anyChecked || hasContent) audit_status = 'flagged'
 
-    const { data: { user } } = await supabase.auth.getUser()
-
     const row = {
       batch_planner_id: pid,
       batch_id:         lecture.batch_id,
@@ -362,7 +360,7 @@ export default function DailyLectureAudit() {
       ppt_check:        e.ppt_check,
       remarks:          e.remarks.trim() || null,
       audit_status,
-      audited_by:       user?.id ?? null,
+      audited_by:       appUserId,   // app_users.id — correct FK
       audited_at:       new Date().toISOString(),
       updated_at:       new Date().toISOString(),
     }

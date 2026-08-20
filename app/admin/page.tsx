@@ -67,6 +67,7 @@ export default function AdminHome() {
           { title: 'Branch Heads', desc: 'Assign branch heads to centres', href: '/admin/branch-heads' },
           { title: 'Batch Managers', desc: 'Manage batch managers across centres', href: '/admin/batch-managers' },
           { title: 'Audit Log', desc: 'View all system activity', href: '/admin/audit-log' },
+          { title: 'Audit Report', desc: 'Batch owner-wise lecture audit summary and CSV export', href: '/admin/audit-report' },
         ]}
       />
     </div>

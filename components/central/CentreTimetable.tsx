@@ -103,7 +103,7 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
           .eq('is_buffer', false)
           .not('start_time', 'is', null),
         supabase.from('test_schedules')
-          .select('start_time, duration_minutes, classroom_id, name, test_type, batch_id, subjects(name), app_users(full_name)')
+          .select('start_time, duration_minutes, classroom_id, name, test_type, batch_id, subjects(name), app_users!test_schedules_faculty_id_fkey(full_name)')
           .in('batch_id', batchIds)
           .eq('test_date', date)
           .not('start_time', 'is', null),
@@ -111,11 +111,37 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
       if (cancelled) return
       if (schedRes.error) { setErr(schedRes.error.message); setLoadingDay(false); return }
 
+      // Build a set of valid (batch_id + subject_name + start_time) slots from
+      // today's batch_schedules. Planner rows that don't match a valid slot for
+      // their batch+subject on this weekday are ghost entries (stale from an old
+      // schedule) and must be excluded from the calendar.
+      type SchedSlot = { start: number; end: number; classroom: string }
+      const validSlots = new Map<string, SchedSlot[]>() // key: `${batch_id}||${subject_name}`
+      ;(schedRes.data ?? []).forEach((s) => {
+        const sn = one(s.subjects as never)?.['name'] as string | undefined ?? ''
+        const key = `${s.batch_id as string}||${sn}`
+        const arr = validSlots.get(key) ?? []
+        arr.push({ start: toMinutes((s.start_time as string).slice(0, 5)), end: toMinutes((s.end_time as string).slice(0, 5)), classroom: (s.classroom_id as string) ?? '' })
+        validSlots.set(key, arr)
+      })
+
+      // A planner row is valid if its batch+subject has a matching slot on this
+      // weekday in batch_schedules (time overlap within 90 min tolerance to handle
+      // minor time shifts). Rows with no matching slot are ghost entries — drop them.
+      const validPlanners = (planRes.data ?? []).filter((p) => {
+        const sn = one(p.subjects as never)?.['name'] as string | undefined ?? ''
+        const key = `${p.batch_id as string}||${sn}`
+        const slots = validSlots.get(key)
+        if (!slots || slots.length === 0) return false // no schedule for this subject today → ghost
+        const pStart = toMinutes((p.start_time as string).slice(0, 5))
+        // Accept if any slot overlaps or is within 90 minutes (handles time changes)
+        return slots.some((sl) => Math.abs(sl.start - pStart) <= 90)
+      })
+
       // The planner drives what topic a class covers on a given day. Build a
-      // batch+subject → topic(s) lookup from that day's planner lectures so each
-      // recurring class block can show the day's topic alongside its subject.
+      // batch+subject → topic(s) lookup from valid planner lectures only.
       const planTopics = new Map<string, string[]>()
-      ;(planRes.data ?? []).forEach((p) => {
+      validPlanners.forEach((p) => {
         const bn = batchNameById.get(p.batch_id as string)
         const sn = one(p.subjects as never)?.['name'] as string | undefined
         const t = ((p.topic_name as string) || '').trim()
@@ -133,7 +159,7 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
         const subject = one(s.subjects as never)?.['name'] ?? '—'
         out.push({ key: `c${i}`, roomId: (s.classroom_id as string) ?? '∅', startMin: st, endMin: toMinutes((s.end_time as string).slice(0, 5)), kind: 'class', batch, subject, topic: (planTopics.get(`${batch}||${subject}`) ?? []).join(', '), faculty: one(s.app_users as never)?.['full_name'] ?? '—' })
       })
-      ;(planRes.data ?? []).forEach((p, i) => {
+      validPlanners.forEach((p, i) => {
         const st = toMinutes((p.start_time as string).slice(0, 5))
         const batch = batchNameById.get(p.batch_id as string) ?? 'Batch'
         out.push({ key: `p${i}`, roomId: (p.classroom_id as string) ?? '∅', startMin: st, endMin: st + (p.duration_minutes as number), kind: 'lecture', batch, subject: one(p.subjects as never)?.['name'] ?? 'Lecture', topic: (p.topic_name as string) || '', faculty: one(p.app_users as never)?.['full_name'] ?? '—', tag: 'Planner' })

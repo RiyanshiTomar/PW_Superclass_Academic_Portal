@@ -16,6 +16,7 @@ const NAV = [
   { label: 'Branch Heads', href: '/admin/branch-heads' },
   { label: 'Credentials', href: '/admin/credentials' },
   { label: 'Attendance', href: '/admin/attendance' },
+  { label: 'Audit Report', href: '/admin/audit-report' },
   { label: 'Audit Log', href: '/admin/audit-log' },
 ]
 

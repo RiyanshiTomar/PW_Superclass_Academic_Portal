@@ -412,29 +412,74 @@ export default function EditPlanner() {
   }
 
   // LIVE mode add: convert the NEXT available buffer slot for this subject into
-  // a real lecture. Buffer slots are pre-allocated class times built into the
-  // batch schedule exactly for this purpose — adding a class consumes one buffer.
-  // Error is shown only when ALL buffer slots for this subject are already used.
-  const liveAddRow = (subjectId: string, chapter: string) => {
-    // Find the earliest future buffer slot for this subject.
-    // Buffer rows may have subject_id = null (subject-agnostic) or a specific
-    // subject — prefer subject-specific first, then fall back to untagged ones.
+  // a real lecture. If no pre-existing buffer is found (incomplete materialisation),
+  // we auto-generate one from the batch schedule on the fly — so +Add Row
+  // NEVER fails as long as the subject has a weekly slot and the batch hasn't ended.
+  const liveAddRow = async (subjectId: string, chapter: string) => {
     const allBuffers = liveBuffersRef.current
     const usedBufferIds = new Set(rows.filter((r) => r.db_id && r.status !== 'conducted').map((r) => r.db_id!))
+    const usedDates = new Set(rows.filter((r) => r.subject_id === subjectId).map((r) => r.planned_date))
 
     const subjectBuffer = allBuffers.find(
       (b) => b.subject_id === subjectId && !usedBufferIds.has(b.id)
     )
-    const anyBuffer = subjectBuffer ?? allBuffers.find(
+    let anyBuffer = subjectBuffer ?? allBuffers.find(
       (b) => (!b.subject_id || b.subject_id === subjectId) && !usedBufferIds.has(b.id)
     )
 
+    // ── Fallback: no buffer found → generate one from batch_schedules ──────
+    // This handles incomplete materialisation (some subjects got fewer rows than
+    // the schedule implies). Walk future dates, find the next free slot for this
+    // subject, insert a buffer row into batch_planners, reload the buffer ref.
     if (!anyBuffer) {
-      setMessage({
-        type: 'info',
-        text: `No buffer slots left for ${subjName(subjectId)}. All available slots are used up. Ask the batch scheduler to add more buffer slots, or reschedule an existing lecture.`,
-      })
-      return
+      const sched = liveSchedRef.current.get(subjectId)
+      if (!sched || sched.size === 0) {
+        setMessage({ type: 'info', text: `${subjName(subjectId)} has no weekly schedule slot — add one in Batch Scheduler first.` })
+        return
+      }
+      const from = liveBoundsRef.current.start > todayISO ? liveBoundsRef.current.start : todayISO
+      const searchEnd = new Date(from + 'T12:00:00')
+      searchEnd.setFullYear(searchEnd.getFullYear() + 2)
+      const d = new Date(from + 'T12:00:00')
+      let newDate = '', newSlot: { start: string; duration: number; classroom: string | null } | null = null
+      while (d <= searchEnd) {
+        const dateStr = d.toISOString().split('T')[0]
+        const slot = sched.get(d.getDay())
+        if (slot && !usedDates.has(dateStr)) { newDate = dateStr; newSlot = slot; break }
+        d.setDate(d.getDate() + 1)
+      }
+      if (!newDate || !newSlot) {
+        setMessage({ type: 'info', text: `No free class date found for ${subjName(subjectId)} within the batch window.` })
+        return
+      }
+      // Get faculty from an existing row for this subject
+      const facultyIdForSlot = rows.find((r) => r.subject_id === subjectId && r.faculty_id)?.faculty_id ?? ''
+      // Insert a real buffer row into DB
+      const { data: inserted, error: insErr } = await supabase
+        .from('batch_planners')
+        .insert({
+          batch_id: filterBatch,
+          link_id: liveLinkId,
+          subject_id: subjectId,
+          faculty_id: facultyIdForSlot || null,
+          planned_date: newDate,
+          start_time: newSlot.start,
+          duration_minutes: newSlot.duration,
+          classroom_id: newSlot.classroom,
+          is_buffer: true,
+          stage: liveStage || 'Draft',
+          chapter: '',
+          topic_name: '',
+        })
+        .select('id, subject_id, planned_date, start_time, duration_minutes, classroom_id')
+        .single()
+      if (insErr || !inserted) {
+        setMessage({ type: 'error', text: `Could not create a slot: ${insErr?.message ?? 'unknown error'}` })
+        return
+      }
+      // Add to ref so save logic knows it was a buffer
+      liveBuffersRef.current = [...liveBuffersRef.current, inserted as LiveBuffer]
+      anyBuffer = inserted as LiveBuffer
     }
 
     // Convert the buffer slot into a new real lecture row.
@@ -442,12 +487,12 @@ export default function EditPlanner() {
       const sample = prev.find((r) => r.subject_id === subjectId && r.chapter === chapter)
       const newRow: EditRow = {
         key: nextKey(),
-        db_id: anyBuffer.id,   // same DB row — save will UPDATE it from buffer → real
+        db_id: anyBuffer!.id,
         subject_id: subjectId,
         faculty_id: sample?.faculty_id ?? '',
         chapter,
         topic_name: '',
-        planned_date: anyBuffer.planned_date,
+        planned_date: anyBuffer!.planned_date,
         duration_minutes: anyBuffer.duration_minutes || sample?.duration_minutes || 60,
         status: 'planned',
         start_time: anyBuffer.start_time,
@@ -473,7 +518,7 @@ export default function EditPlanner() {
   const addChapter = () => {
     const chapter = addChapterName.trim()
     if (!chapter) return
-    if (liveLinkId) liveAddRow(activeSubject, chapter)
+    if (liveLinkId) void liveAddRow(activeSubject, chapter)
     else addRowToChapter(activeSubject, chapter)
     setAddChapterOpen(false); setAddChapterName('')
   }
@@ -904,7 +949,7 @@ export default function EditPlanner() {
                     {g.rows.every((r) => r.status === 'conducted')
                       ? <span className="text-xs font-semibold text-neutral-400 whitespace-nowrap">all conducted</span>
                       : <button onClick={() => { setConductChap({ subjectId: activeSubject, chapter: g.chapter }); setConductChapDate(g.rows.filter((r) => r.planned_date && r.planned_date <= todayISO).map((r) => r.planned_date).sort().pop() || todayISO) }} className="text-xs font-semibold text-neutral-600 hover:text-neutral-900 whitespace-nowrap" title="If this chapter was already taught, mark all its topics conducted on one past date">mark conducted…</button>}
-                    <button onClick={() => (liveLinkId ? liveAddRow(activeSubject, g.chapter) : addRowToChapter(activeSubject, g.chapter))} className="text-xs font-semibold text-violet-600 hover:text-violet-700 whitespace-nowrap">+ add row</button>
+                    <button onClick={() => (liveLinkId ? void liveAddRow(activeSubject, g.chapter) : addRowToChapter(activeSubject, g.chapter))} className="text-xs font-semibold text-violet-600 hover:text-violet-700 whitespace-nowrap">+ add row</button>
                   </div>
                 </div>
                 <div className="divide-y divide-neutral-100">

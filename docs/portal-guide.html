@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Superclass Portal — Complete Guide</title>
+  <style>
+    :root {
+      --purple: #6d28d9;
+      --purple-light: #ede9fe;
+      --purple-mid: #8b5cf6;
+      --green: #059669;
+      --green-light: #d1fae5;
+      --amber: #d97706;
+      --amber-light: #fef3c7;
+      --red: #dc2626;
+      --red-light: #fee2e2;
+      --blue: #2563eb;
+      --blue-light: #dbeafe;
+      --gray-50: #f9fafb;
+      --gray-100: #f3f4f6;
+      --gray-200: #e5e7eb;
+      --gray-400: #9ca3af;
+      --gray-600: #4b5563;
+      --gray-700: #374151;
+      --gray-900: #111827;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--gray-700);
+      background: #fff;
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 40px 32px;
+    }
+
+    /* ── Cover ── */
+    .cover {
+      text-align: center;
+      padding: 60px 0 48px;
+      border-bottom: 3px solid var(--purple);
+      margin-bottom: 48px;
+    }
+    .cover .logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .cover .logo-icon {
+      width: 52px; height: 52px;
+      background: var(--purple);
+      border-radius: 14px;
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-size: 24px; font-weight: 800;
+    }
+    .cover h1 {
+      font-size: 32px; font-weight: 800;
+      color: var(--gray-900);
+      line-height: 1.2;
+    }
+    .cover .sub {
+      font-size: 16px;
+      color: var(--gray-600);
+      margin-top: 8px;
+    }
+    .cover .tag {
+      display: inline-block;
+      margin-top: 20px;
+      padding: 6px 16px;
+      background: var(--purple-light);
+      color: var(--purple);
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    /* ── TOC ── */
+    .toc {
+      background: var(--gray-50);
+      border: 1px solid var(--gray-200);
+      border-radius: 12px;
+      padding: 24px 28px;
+      margin-bottom: 48px;
+    }
+    .toc h2 { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--gray-400); margin-bottom: 16px; }
+    .toc ol { padding-left: 20px; }
+    .toc li { margin-bottom: 6px; }
+    .toc a { color: var(--purple); text-decoration: none; font-weight: 500; }
+    .toc a:hover { text-decoration: underline; }
+    .toc .toc-sub { list-style: none; padding-left: 16px; margin-top: 4px; }
+    .toc .toc-sub li::before { content: "— "; color: var(--gray-400); }
+
+    /* ── Sections ── */
+    .section { margin-bottom: 56px; }
+    h2.section-title {
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--gray-900);
+      padding-bottom: 12px;
+      border-bottom: 2px solid var(--gray-200);
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    h2.section-title .num {
+      display: inline-flex;
+      width: 32px; height: 32px;
+      background: var(--purple);
+      color: white;
+      border-radius: 8px;
+      align-items: center; justify-content: center;
+      font-size: 14px;
+      font-weight: 800;
+      flex-shrink: 0;
+    }
+    h3 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--gray-900);
+      margin: 28px 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    h3 .icon { font-size: 18px; }
+    h4 {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--gray-600);
+      margin: 16px 0 8px;
+    }
+    p { margin-bottom: 12px; }
+
+    /* ── Role Cards ── */
+    .role-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+    .role-card {
+      border-radius: 12px;
+      padding: 20px;
+      border: 1.5px solid;
+    }
+    .role-card.admin    { background: var(--purple-light); border-color: #c4b5fd; }
+    .role-card.central  { background: var(--blue-light);   border-color: #93c5fd; }
+    .role-card.branch   { background: var(--green-light);  border-color: #6ee7b7; }
+    .role-card.faculty  { background: var(--amber-light);  border-color: #fcd34d; }
+    .role-card .role-name { font-weight: 800; font-size: 16px; margin-bottom: 4px; }
+    .role-card .role-url { font-size: 11px; font-family: monospace; background: rgba(0,0,0,0.07); padding: 2px 6px; border-radius: 4px; display: inline-block; margin-bottom: 8px; }
+    .role-card .role-desc { font-size: 13px; color: var(--gray-700); }
+
+    /* ── Feature blocks ── */
+    .feature-block {
+      background: var(--gray-50);
+      border: 1px solid var(--gray-200);
+      border-radius: 10px;
+      padding: 20px 24px;
+      margin-bottom: 16px;
+    }
+    .feature-block .feature-title {
+      font-weight: 700;
+      font-size: 15px;
+      color: var(--gray-900);
+      margin-bottom: 8px;
+    }
+
+    /* ── Steps ── */
+    .steps { counter-reset: step; margin: 16px 0; }
+    .step {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 16px;
+      align-items: flex-start;
+    }
+    .step-num {
+      counter-increment: step;
+      flex-shrink: 0;
+      width: 28px; height: 28px;
+      background: var(--purple);
+      color: white;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .step-content { flex: 1; padding-top: 4px; }
+    .step-content strong { display: block; font-size: 14px; margin-bottom: 2px; color: var(--gray-900); }
+    .step-content span { font-size: 13px; color: var(--gray-600); }
+
+    /* ── Flow diagram (text-based) ── */
+    .flow {
+      background: var(--gray-900);
+      color: #e5e7eb;
+      border-radius: 10px;
+      padding: 20px 24px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.8;
+      margin: 16px 0;
+      overflow-x: auto;
+    }
+    .flow .fl-title { color: #a78bfa; font-weight: 700; }
+    .flow .fl-arrow { color: #34d399; }
+    .flow .fl-note  { color: #fbbf24; }
+    .flow .fl-warn  { color: #f87171; }
+
+    /* ── Tables ── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      font-size: 13px;
+    }
+    th {
+      background: var(--gray-900);
+      color: white;
+      padding: 10px 14px;
+      text-align: left;
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    td { padding: 10px 14px; border-bottom: 1px solid var(--gray-200); }
+    tr:last-child td { border-bottom: none; }
+    tr:nth-child(even) td { background: var(--gray-50); }
+    .check { color: var(--green); font-weight: 700; }
+    .cross { color: var(--red); font-weight: 700; }
+
+    /* ── Badges ── */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .badge.green  { background: var(--green-light);  color: var(--green); }
+    .badge.amber  { background: var(--amber-light);  color: var(--amber); }
+    .badge.red    { background: var(--red-light);    color: var(--red); }
+    .badge.purple { background: var(--purple-light); color: var(--purple); }
+    .badge.blue   { background: var(--blue-light);   color: var(--blue); }
+
+    /* ── Info/warning boxes ── */
+    .callout {
+      display: flex;
+      gap: 12px;
+      padding: 14px 18px;
+      border-radius: 8px;
+      margin: 16px 0;
+      font-size: 13px;
+    }
+    .callout.info    { background: var(--blue-light);   border-left: 3px solid var(--blue);   }
+    .callout.success { background: var(--green-light);  border-left: 3px solid var(--green);  }
+    .callout.warning { background: var(--amber-light);  border-left: 3px solid var(--amber);  }
+    .callout.rule    { background: var(--purple-light); border-left: 3px solid var(--purple); }
+    .callout .icon   { font-size: 18px; flex-shrink: 0; line-height: 1.4; }
+    .callout .body strong { display: block; margin-bottom: 2px; color: var(--gray-900); }
+
+    /* ── CSV columns ── */
+    .csv-cols {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 10px 0;
+    }
+    .csv-col {
+      background: var(--gray-900);
+      color: #e5e7eb;
+      font-family: monospace;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+    }
+    .csv-col.req { background: var(--purple); }
+
+    /* ── Scenario cards ── */
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin: 16px 0;
+    }
+    .scenario {
+      border: 1px solid var(--gray-200);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .scenario .q {
+      font-weight: 700;
+      color: var(--gray-900);
+      margin-bottom: 8px;
+      font-size: 13px;
+    }
+    .scenario .a {
+      font-size: 12px;
+      color: var(--gray-600);
+      line-height: 1.6;
+    }
+    .scenario .a strong { color: var(--purple); }
+
+    /* ── Rules list ── */
+    .rules {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      margin: 16px 0;
+    }
+    .rule-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 12px 14px;
+      background: var(--purple-light);
+      border-radius: 8px;
+      font-size: 13px;
+    }
+    .rule-item .ri { font-size: 16px; flex-shrink: 0; }
+
+    /* ── Print ── */
+    @media print {
+      body { padding: 20px 24px; font-size: 13px; }
+      .cover { padding: 40px 0 32px; }
+      .section { page-break-inside: avoid; }
+      h2.section-title { page-break-before: always; }
+      h2.section-title:first-of-type { page-break-before: avoid; }
+    }
+
+    /* ── Divider ── */
+    hr { border: none; border-top: 1px solid var(--gray-200); margin: 32px 0; }
+
+    ul, ol { padding-left: 20px; margin-bottom: 12px; }
+    li { margin-bottom: 4px; font-size: 13px; }
+  </style>
+</head>
+<body>
+
+  <!-- ══ COVER ══════════════════════════════════════════════════════════ -->
+  <div class="cover">
+    <div class="logo">
+      <div class="logo-icon">SC</div>
+    </div>
+    <h1>Superclass Portal</h1>
+    <p class="sub">Complete User Guide — Roles, Features & Workflows</p>
+    <span class="tag">Academic Management System</span>
+  </div>
+
+  <!-- ══ TABLE OF CONTENTS ══════════════════════════════════════════════ -->
+  <div class="toc">
+    <h2>Table of Contents</h2>
+    <ol>
+      <li><a href="#overview">Portal Overview — Who Does What</a></li>
+      <li>
+        <a href="#admin">Admin Portal</a>
+        <ul class="toc-sub">
+          <li>Centres, Rooms, Programs, Users, Syllabus</li>
+        </ul>
+      </li>
+      <li>
+        <a href="#central">Central Team Portal</a>
+        <ul class="toc-sub">
+          <li>Batch Scheduler · Batch Planner · Tests · Daily Audit · Progress · Calendar · Reschedule Requests</li>
+        </ul>
+      </li>
+      <li><a href="#branch">Branch Head Portal</a></li>
+      <li><a href="#faculty">Faculty Portal</a></li>
+      <li><a href="#buffers">The Buffer System — How Capacity Works</a></li>
+      <li><a href="#flows">End-to-End Workflows</a></li>
+      <li><a href="#scenarios">Common Scenarios</a></li>
+      <li><a href="#rules">System Rules</a></li>
+    </ol>
+  </div>
+
+  <!-- ══ 1. OVERVIEW ════════════════════════════════════════════════════ -->
+  <div class="section" id="overview">
+    <h2 class="section-title"><span class="num">1</span> Portal Overview — Who Does What</h2>
+
+    <p>The Superclass Portal is an academic operations platform with four distinct roles. Each role has its own dashboard and access level. No role can access another's data unless explicitly shared.</p>
+
+    <div class="role-grid">
+      <div class="role-card admin">
+        <div class="role-name">🛡 Admin</div>
+        <div class="role-url">/admin</div>
+        <div class="role-desc">Sets up the entire system — centres, classrooms, programs, subjects, syllabus (GTT), and all user accounts. The foundation everything else is built on.</div>
+      </div>
+      <div class="role-card central">
+        <div class="role-name">🎯 Central Team</div>
+        <div class="role-url">/central</div>
+        <div class="role-desc">Runs day-to-day academics — creates batch schedules, builds planners, assigns topics to faculty, schedules tests, audits lectures. The primary operational role.</div>
+      </div>
+      <div class="role-card branch">
+        <div class="role-name">🏫 Branch Head</div>
+        <div class="role-url">/branch</div>
+        <div class="role-desc">Manages their own centre — can edit batch schedules, view tests and calendar, handle attendance and results. Cannot create batches or touch planners.</div>
+      </div>
+      <div class="role-card faculty">
+        <div class="role-name">👨‍🏫 Faculty</div>
+        <div class="role-url">/faculty</div>
+        <div class="role-desc">Views their assigned lectures and confirms them after teaching. Can raise reschedule requests. Cannot modify any planner content — read + confirm only.</div>
+      </div>
+    </div>
+
+    <table>
+      <tr>
+        <th>Feature</th>
+        <th>Admin</th>
+        <th>Central Team</th>
+        <th>Branch Head</th>
+        <th>Faculty</th>
+      </tr>
+      <tr>
+        <td>Create Batches</td>
+        <td class="check">✓</td>
+        <td class="check">✓</td>
+        <td class="cross">✗</td>
+        <td class="cross">✗</td>
+      </tr>
+      <tr>
+        <td>Edit Batch Schedule</td>
+        <td class="check">✓</td>
+        <td class="check">✓</td>
+        <td>Own centre only</td>
+        <td class="cross">✗</td>
+      </tr>
+      <tr>
+        <td>Create / Edit Planner</td>
+        <td class="cross">✗</td>
+        <td class="check">✓</td>
+        <td class="cross">✗</td>
+        <td class="cross">✗</td>
+      </tr>
+      <tr>
+        <td>Schedule Tests</td>
+        <td class="cross">✗</td>
+        <td class="check">✓</td>
+        <td class="cross">✗</td>
+        <td class="cross">✗</td>
+      </tr>
+      <tr>
+        <td>Confirm Lectures</td>
+        <td class="cross">✗</td>
+        <td class="cross">✗</td>
+        <td class="cross">✗</td>
+        <td class="check">✓</td>
+      </tr>
+      <tr>
+        <td>Daily Audit</td>
+        <td class="cross">✗</td>
+        <td class="check">✓</td>
+        <td class="cross">✗</td>
+        <td class="cross">✗</td>
+      </tr>
+      <tr>
+        <td>Audit Report</td>
+        <td class="check">✓</td>
+        <td class="cross">✗</td>
+        <td class="cross">✗</td>
+        <td class="cross">✗</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- ══ 2. ADMIN ═══════════════════════════════════════════════════════ -->
+  <div class="section" id="admin">
+    <h2 class="section-title"><span class="num">2</span> Admin Portal</h2>
+
+    <p>The Admin portal is where the entire system's infrastructure is configured. Nothing else works until the admin sets up the foundation.</p>
+
+    <h3><span class="icon">🏢</span> Centres & Classrooms</h3>
+    <p>Each physical location is a <strong>Centre</strong> (e.g. Patna Superclass, Pitampura Superclass). Inside each centre are <strong>Classrooms / Halls</strong> (Room 1 · Study Space, Star Base, Idea Hub, etc.).</p>
+    <p>Each centre is assigned a <strong>Branch Head</strong> who manages that centre's day-to-day operations.</p>
+
+    <h3><span class="icon">📚</span> Programs & Subjects</h3>
+    <p>A <strong>Program</strong> is a course (CA Foundation, 11th Commerce, CLAT 2027, CUET, etc.). Each program has multiple <strong>Subjects</strong> (Accounts, Maths, Legal Reasoning, etc.).</p>
+
+    <h3><span class="icon">🧠</span> Syllabus — GTT (Concept Tags)</h3>
+    <p>This is the most important setup step. For each subject, Admin defines:</p>
+    <ul>
+      <li><strong>Chapters</strong> — e.g. "Sets, Relations & Functions", "Differentiation"</li>
+      <li><strong>Topics</strong> within each chapter — e.g. "Product Rule", "Chain Rule"</li>
+    </ul>
+    <div class="callout rule">
+      <div class="icon">📌</div>
+      <div class="body"><strong>Why it matters:</strong> The entire planner, test chapter selection, bulk upload validation, and syllabus coverage % all rely on this GTT data. Chapter names must exactly match GTT when used anywhere else in the portal.</div>
+    </div>
+
+    <h3><span class="icon">👥</span> Users</h3>
+    <p>Admin creates all user accounts and assigns roles: Faculty (with subject specialties and centre), Central Team members, Branch Heads, Batch Managers, and Credentials for login.</p>
+
+    <h3><span class="icon">📊</span> Audit Report</h3>
+    <p>A dedicated report page showing batch-owner-wise lecture audit data with date-wise grids, summary stats, and CSV export capability.</p>
+  </div>
+
+  <!-- ══ 3. CENTRAL TEAM ════════════════════════════════════════════════ -->
+  <div class="section" id="central">
+    <h2 class="section-title"><span class="num">3</span> Central Team Portal</h2>
+
+    <p>The Central Team does the bulk of academic operations. The portal is divided into several workspaces accessible from the hub.</p>
+
+    <!-- 3.1 Batch Scheduler -->
+    <h3><span class="icon">🗓</span> 3.1 Batch Scheduler</h3>
+    <p>Sets the <em>weekly recurring timetable</em> for each batch — which subject runs on which days, at what time, in which room, taught by which faculty.</p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <strong>Create a Batch</strong>
+          <span>Name, Program, Centre, Start Date, End Date. Also assign a Batch Manager (offline batch manager) and a Batch Owner (central team member responsible for auditing this batch).</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <strong>Set Weekly Schedule</strong>
+          <span>For each subject: select days of the week, time slot, classroom, and faculty. Multiple date ranges are supported — e.g. Physics on Mon/Wed until Aug, then Mon/Tue/Thu from Sep.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <strong>Save</strong>
+          <span>The schedule is saved. Existing future lectures are updated with the new time/room automatically. New buffer slots are created for any new day slots added — these are used when adding extra classes later.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="icon">💡</div>
+      <div class="body"><strong>Batch Owner vs Batch Manager:</strong> These are two different fields. Batch Manager = the person running the offline batch. Batch Owner = the Central Team member who owns audit responsibility for this batch.</div>
+    </div>
+
+    <!-- 3.2 Batch Planner -->
+    <h3><span class="icon">📋</span> 3.2 Batch Planner</h3>
+    <p>A planner maps the full syllabus to specific dates — chapter by chapter, topic by topic. It is the academic backbone of a batch.</p>
+
+    <h4>Three-step process</h4>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <strong>Create Planner — Build the Template</strong>
+          <span>Add chapters and topics from GTT. Assign dates. The system automatically snaps dates to valid class-days from the batch schedule. Buffer slots are included as empty placeholder rows for future flexibility.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <strong>Assign Planner — Link to a Batch</strong>
+          <span>Attach the planner to a batch. The system materialises all lectures — each lecture gets its exact date, start time, classroom, and faculty from the batch schedule. Overlap-free, always.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <strong>Send to Faculty — Week by Week</strong>
+          <span>Publish the schedule to faculty. Each faculty sees their upcoming lectures and confirms them after teaching. Past lectures are auto-confirmed. Publishing can be done week by week.</span>
+        </div>
+      </div>
+    </div>
+
+    <h4>Edit Planner — Live Mode</h4>
+    <p>Once a batch has a linked planner, select that batch in Edit Planner to enter <em>Live Mode</em> — editing goes directly to that batch's actual schedule.</p>
+
+    <table>
+      <tr>
+        <th>View Mode</th>
+        <th>What You See</th>
+        <th>Best For</th>
+      </tr>
+      <tr>
+        <td><span class="badge purple">📅 Date View</span> (default)</td>
+        <td>All lectures in chronological order — today onwards</td>
+        <td>Day-to-day tracking, quick status updates</td>
+      </tr>
+      <tr>
+        <td><span class="badge blue">📖 Chapter View</span></td>
+        <td>Grouped by chapter within each subject tab</td>
+        <td>Reviewing topic coverage, reordering</td>
+      </tr>
+    </table>
+
+    <h4>Status Flow for Each Lecture</h4>
+    <div class="flow">
+      <span class="fl-title">Planned</span> <span class="fl-arrow">→</span> confirmed by faculty <span class="fl-arrow">→</span> <span class="fl-title">Confirmed</span> <span class="fl-arrow">→</span> marked taught <span class="fl-arrow">→</span> <span class="fl-title">Conducted</span>
+    </div>
+
+    <h4>Adding Extra Classes (+Add Row)</h4>
+    <p>When Central Team clicks <strong>+ Add Row</strong> on a chapter, the next available buffer slot for that subject is converted into a real lecture. The date, time, and room are inherited from the buffer (which was created from the batch schedule).</p>
+    <div class="callout warning">
+      <div class="icon">⚠️</div>
+      <div class="body"><strong>If "No buffer slots left" appears:</strong> Go to Batch Scheduler → open that batch's schedule → click Save (even without changes). New buffer slots will be automatically created for all schedule days. Then +Add Row will work again.</div>
+    </div>
+
+    <h4>Rescheduling</h4>
+    <p>When a lecture is moved to a later date, it lands on the next available buffer slot — the batch's end date never extends. Buffers absorb the shift.</p>
+
+    <!-- 3.3 Tests -->
+    <h3><span class="icon">📝</span> 3.3 Test Scheduler</h3>
+    <p>Schedule tests for one or multiple batches. Tests are <strong>confirmed immediately</strong> — no draft/send-to-faculty flow. Once scheduled, the test appears in everyone's calendar.</p>
+
+    <h4>Scheduling a Single Test</h4>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <strong>Select Centre</strong>
+          <span>This filters the batch list to only that centre's batches.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <strong>Select Batch(es)</strong>
+          <span>Check one or multiple batches. Multiple batches must be from the same centre and same program.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <strong>Set Test Details</strong>
+          <span>Name, Date, Start Time, Duration, Type (Objective/Subjective/Mixed), Scope (Full Syllabus or Specific Chapters).</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-content">
+          <strong>For Part Tests — Select Chapters from GTT</strong>
+          <span>Pick the subject, then select chapters from the GTT list. Each chapter shows what % of it has been taught so far — a helpful guide before scheduling.</span>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">5</div>
+        <div class="step-content">
+          <strong>Room + Invigilator → Schedule Test ✅</strong>
+          <span>The system validates for clashes. If a class clashes, "Schedule & Shift Classes" appears — approve to shift the clashing lecture to a buffer slot.</span>
+        </div>
+      </div>
+    </div>
+
+    <h4>Bulk Upload via CSV</h4>
+    <p>Download the template, fill in multiple tests, and upload at once.</p>
+    <p><strong>CSV Columns:</strong></p>
+    <div class="csv-cols">
+      <span class="csv-col req">Centre</span>
+      <span class="csv-col req">Batch</span>
+      <span class="csv-col">Multiple Batches</span>
+      <span class="csv-col">Subject</span>
+      <span class="csv-col req">Test Name</span>
+      <span class="csv-col req">Date</span>
+      <span class="csv-col">Time</span>
+      <span class="csv-col">Duration</span>
+      <span class="csv-col">Type</span>
+      <span class="csv-col">Scope</span>
+      <span class="csv-col">Chapters (GTT names)</span>
+      <span class="csv-col">Room</span>
+      <span class="csv-col">Invigilator Email</span>
+    </div>
+    <p style="font-size:12px;color:#6b7280;margin-top:4px">Highlighted columns are required. All others are optional or have defaults.</p>
+
+    <p>After upload, a preview table shows each row's status:</p>
+    <p>
+      <span class="badge green">✅ Ready</span> — No issues, will be imported as-is &nbsp;
+      <span class="badge amber">⚠ Will Shift</span> — A class clashes; lectures will be shifted to buffers &nbsp;
+      <span class="badge red">❌ Error</span> — Validation failed; will be skipped
+    </p>
+
+    <div class="callout rule">
+      <div class="icon">📌</div>
+      <div class="body"><strong>GTT Chapter Validation:</strong> Chapter names in the CSV must exactly match the names defined in Admin → Syllabus (GTT). If a chapter name doesn't match, the row is flagged as an error.</div>
+    </div>
+
+    <h4>Syllabus Coverage % (the 60% Gate)</h4>
+    <p>Each upcoming test shows a syllabus coverage indicator — what percentage of the test's syllabus has been taught as of the test date. Below 60% shows a warning ⚠. This is informational — it does not block scheduling.</p>
+
+    <!-- 3.4 Daily Audit -->
+    <h3><span class="icon">🔍</span> 3.4 Daily Lecture Audit</h3>
+    <p>Central Team's quality control tool. Each day, team members verify that scheduled lectures actually happened correctly.</p>
+
+    <table>
+      <tr>
+        <th>Column</th>
+        <th>What to Fill</th>
+      </tr>
+      <tr>
+        <td>Lecture Link</td>
+        <td>YouTube or Drive URL of the recorded lecture</td>
+      </tr>
+      <tr>
+        <td>Topic ✓</td>
+        <td>Was the correct topic taught as per the planner?</td>
+      </tr>
+      <tr>
+        <td>Duration ✓</td>
+        <td>Was the full class duration completed?</td>
+      </tr>
+      <tr>
+        <td>PPT ✓</td>
+        <td>Was quality presentation material used?</td>
+      </tr>
+      <tr>
+        <td>Remarks</td>
+        <td>Any observations, feedback, or issues</td>
+      </tr>
+    </table>
+
+    <p><strong>When you save, the status is set automatically:</strong></p>
+    <p>
+      <span class="badge green">✅ Audited</span> All 3 boxes checked &nbsp;
+      <span class="badge red">🚩 Flagged</span> Any box unchecked or partial &nbsp;
+      <span class="badge amber">⏳ Pending</span> Nothing filled yet
+    </p>
+
+    <p><strong>Batch Owner Filter:</strong> If a Central Team member is assigned as Batch Owner for certain batches, their audit view automatically filters to show only those batches. Other team members see everything.</p>
+
+    <h4>Stats at a Glance</h4>
+    <p>The top strip shows: <em>Today's classes · Today pending · Earlier pending (from Aug 19 onwards) · Total pending · Done today.</em></p>
+
+    <!-- 3.5 Calendar -->
+    <h3><span class="icon">📅</span> 3.5 Calendar (Schedule View)</h3>
+    <p>A centre-wide day view showing every hall on a selected date. Three types of events are shown side by side:</p>
+
+    <table>
+      <tr>
+        <th>Event Type</th>
+        <th>Appearance</th>
+        <th>Source</th>
+      </tr>
+      <tr>
+        <td>Class</td>
+        <td>Solid color block with batch name</td>
+        <td>Recurring weekly schedule (Batch Scheduler)</td>
+      </tr>
+      <tr>
+        <td>Planner Lecture</td>
+        <td>Color block with thick left border + topic name</td>
+        <td>Actual materialised planner entry</td>
+      </tr>
+      <tr>
+        <td>Test</td>
+        <td>Black block with test name</td>
+        <td>Scheduled test</td>
+      </tr>
+    </table>
+
+    <p>No two events in the same hall at the same time — the system enforces this at every entry point.</p>
+
+    <!-- 3.6 Reschedule Requests -->
+    <h3><span class="icon">🔄</span> 3.6 Reschedule Requests</h3>
+    <p>Faculty submit requests from their calendar. Central Team reviews and acts on them here.</p>
+
+    <table>
+      <tr>
+        <th>Request Type</th>
+        <th>What Happens on Approve</th>
+      </tr>
+      <tr>
+        <td>Reschedule</td>
+        <td>That lecture moves to the faculty's requested slot; the planner updates automatically</td>
+      </tr>
+      <tr>
+        <td>Extra Class</td>
+        <td>A new lecture is added at the requested slot</td>
+      </tr>
+      <tr>
+        <td>Prepone Chapter</td>
+        <td>All lectures of that chapter are moved earlier in the schedule</td>
+      </tr>
+      <tr>
+        <td>Cancellation</td>
+        <td>Lecture is cancelled; option to assign a substitute faculty</td>
+      </tr>
+    </table>
+
+    <div class="callout success">
+      <div class="icon">✅</div>
+      <div class="body"><strong>All approvals are immediate:</strong> The planner updates in real-time when Central Team approves. Faculty sees the change in their calendar right away. No manual sync needed.</div>
+    </div>
+
+    <!-- 3.7 Progress -->
+    <h3><span class="icon">📈</span> 3.7 Progress Tracking</h3>
+    <p>Per-batch academic health dashboard showing:</p>
+    <ul>
+      <li>Overall syllabus % covered vs planned end date</li>
+      <li>Buffer slots: total / used / remaining</li>
+      <li>Subject-wise breakdown — which subjects are on track, ahead, or behind</li>
+      <li>Warning if a subject will not finish by the batch end date</li>
+    </ul>
+  </div>
+
+  <!-- ══ 4. BRANCH HEAD ═════════════════════════════════════════════════ -->
+  <div class="section" id="branch">
+    <h2 class="section-title"><span class="num">4</span> Branch Head Portal</h2>
+
+    <p>The Branch Head manages their assigned centre. They see only their own centre's data.</p>
+
+    <table>
+      <tr>
+        <th>Feature</th>
+        <th>What They Can Do</th>
+      </tr>
+      <tr>
+        <td>Batch Scheduler</td>
+        <td>Edit the weekly schedule (time, room, day) for their centre's batches. <em>Cannot</em> create, delete, merge batches, or attach planners.</td>
+      </tr>
+      <tr>
+        <td>Tests</td>
+        <td>View all scheduled tests for their centre</td>
+      </tr>
+      <tr>
+        <td>Calendar</td>
+        <td>Day view for their centre — all halls, all events</td>
+      </tr>
+      <tr>
+        <td>Students</td>
+        <td>Manage student records for their centre</td>
+      </tr>
+      <tr>
+        <td>Marks Entry / Results / Attendance</td>
+        <td>Academic data management for their centre's batches</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- ══ 5. FACULTY ═════════════════════════════════════════════════════ -->
+  <div class="section" id="faculty">
+    <h2 class="section-title"><span class="num">5</span> Faculty Portal</h2>
+
+    <p>Faculty has a simple, focused experience. They cannot modify any planner content — their role is to confirm lectures and raise requests when needed.</p>
+
+    <h3><span class="icon">📋</span> My Planners</h3>
+    <p>Shows all assigned lectures in date order, grouped by batch and chapter. For each lecture, faculty sees:</p>
+    <ul>
+      <li><strong>Date & Time</strong> — set by the schedule</li>
+      <li><strong>Classroom</strong> — assigned room</li>
+      <li><strong>Chapter & Topic</strong> — set by Central Team, <strong>read-only</strong></li>
+    </ul>
+
+    <div class="callout rule">
+      <div class="icon">📌</div>
+      <div class="body"><strong>Faculty can ONLY Confirm.</strong> They cannot edit topics, chapters, dates, or any planner content. Central Team is the sole authority on what the planner contains.</div>
+    </div>
+
+    <p>Two confirm options:</p>
+    <ul>
+      <li><strong>Confirm</strong> — confirm one lecture at a time</li>
+      <li><strong>Confirm All</strong> — confirm all pending lectures for a batch at once</li>
+    </ul>
+
+    <h3><span class="icon">📅</span> Calendar</h3>
+    <p>A personal calendar view of all upcoming lectures and tests. Faculty can raise <strong>Reschedule Requests</strong> from here — click on a lecture to request a date/time change, extra class, or cancellation. Central Team reviews and approves/rejects.</p>
+  </div>
+
+  <!-- ══ 6. BUFFER SYSTEM ═══════════════════════════════════════════════ -->
+  <div class="section" id="buffers">
+    <h2 class="section-title"><span class="num">6</span> The Buffer System — How Capacity Works</h2>
+
+    <p>Buffers are the key mechanism that keeps batch schedules flexible without ever extending the batch end date.</p>
+
+    <h3><span class="icon">🧩</span> What Is a Buffer?</h3>
+    <p>A buffer slot is a <em>reserved, empty class slot</em> in the batch planner. It has a date, time, and room (inherited from the weekly schedule) but no topic, chapter, or faculty assignment yet. Think of it as a blank seat in the calendar.</p>
+
+    <h3><span class="icon">📌</span> How Buffers Are Created</h3>
+    <p>Buffers are automatically created when:</p>
+    <ul>
+      <li>A planner is first assigned to a batch (extra slots are created beyond the actual lecture count)</li>
+      <li>Batch Scheduler is saved with a new day/slot — the system creates buffers for all future dates on that new slot</li>
+    </ul>
+
+    <h3><span class="icon">⚡</span> When Buffers Are Used (Consumed)</h3>
+    <table>
+      <tr>
+        <th>Action</th>
+        <th>What Happens to Buffers</th>
+      </tr>
+      <tr>
+        <td>+Add Row in Edit Planner</td>
+        <td>The nearest future buffer for that subject is converted into a real lecture</td>
+      </tr>
+      <tr>
+        <td>Reschedule (lecture moved forward)</td>
+        <td>The lecture lands on the next available buffer date; batch end date stays unchanged</td>
+      </tr>
+      <tr>
+        <td>Test scheduled (class clash)</td>
+        <td>Clashing class moves to buffer; test occupies its original slot</td>
+      </tr>
+    </table>
+
+    <h3><span class="icon">🔄</span> Replenishing Buffers</h3>
+    <div class="flow">
+<span class="fl-note">Problem:</span> "+Add Row" shows "No buffer slots left"
+<span class="fl-arrow">→</span> Go to <span class="fl-title">Batch Scheduler</span>
+<span class="fl-arrow">→</span> Open the batch's schedule
+<span class="fl-arrow">→</span> Click <span class="fl-title">Save</span> (no changes needed)
+<span class="fl-arrow">→</span> New buffer slots are automatically created for all future schedule days
+<span class="fl-arrow">→</span> Return to Edit Planner — <span class="fl-title">+Add Row now works ✓</span>
+    </div>
+
+    <div class="callout success">
+      <div class="icon">✅</div>
+      <div class="body"><strong>The batch end date NEVER moves.</strong> All shifts, extra classes, and test-priority moves are absorbed by buffer slots. If there are no buffers left, new capacity must be explicitly added through the Batch Scheduler.</div>
+    </div>
+  </div>
+
+  <!-- ══ 7. FLOWS ════════════════════════════════════════════════════════ -->
+  <div class="section" id="flows">
+    <h2 class="section-title"><span class="num">7</span> End-to-End Workflows</h2>
+
+    <h3><span class="icon">📋</span> Full Planner Lifecycle</h3>
+    <div class="flow">
+<span class="fl-title">ADMIN</span>
+  └── Define subjects + GTT (chapters & topics) per program
+
+<span class="fl-title">CENTRAL TEAM — Setup</span>
+  └── Batch Scheduler → Create batch + set weekly schedule (days/times/rooms/faculty)
+
+<span class="fl-title">CENTRAL TEAM — Planner</span>
+  └── Create Planner → add chapters/topics from GTT, assign sequence
+  └── Assign Planner to batch → system materialises all lectures with correct dates/times/rooms
+  └── Send to Faculty (week by week or all at once)
+
+<span class="fl-title">FACULTY</span>
+  └── View lectures in My Planners
+  └── Confirm each lecture after teaching
+  └── Raise reschedule request if needed
+
+<span class="fl-title">CENTRAL TEAM — Ongoing</span>
+  └── Reschedule Requests: review → approve/reject
+  └── Edit Planner (Live Mode): update topics, add rows, mark conducted
+  └── Daily Audit: verify lecture quality each day
+  └── Progress Tracking: monitor syllabus coverage
+    </div>
+
+    <h3><span class="icon">📝</span> Test Scheduling Lifecycle</h3>
+    <div class="flow">
+<span class="fl-title">CENTRAL TEAM</span>
+  └── Test Scheduler → New Test
+  └── Select Centre → filter batches → select batch(es)
+  └── Set date/time/duration/type/scope
+  └── Part Test? → select subject → pick chapters from GTT
+  └── Select room → optional invigilator
+  └── "Schedule Test" → directly <span class="fl-title">Confirmed ✅</span>
+        ├── No clash: done immediately
+        └── Class clash: "Schedule & Shift" → lectures shift to buffers → test confirmed
+
+<span class="fl-title">EVERYONE</span>
+  └── Test appears in Calendar on the scheduled date
+  └── Syllabus % shown (60% gate is informational only)
+    </div>
+  </div>
+
+  <!-- ══ 8. SCENARIOS ════════════════════════════════════════════════════ -->
+  <div class="section" id="scenarios">
+    <h2 class="section-title"><span class="num">8</span> Common Scenarios</h2>
+
+    <div class="scenario-grid">
+      <div class="scenario">
+        <div class="q">🔴 "Need to add an extra class for a chapter"</div>
+        <div class="a">Central Team → Edit Planner → Select batch → Find the chapter → Click <strong>+Add Row</strong>. The next available buffer slot is converted into the new class. Save the planner.</div>
+      </div>
+      <div class="scenario">
+        <div class="q">🔴 "+Add Row says 'No buffer slots left'"</div>
+        <div class="a">Central Team → Batch Scheduler → Open the batch → <strong>Save</strong> (no changes needed). New buffers are auto-created. Return to Edit Planner and try +Add Row again.</div>
+      </div>
+      <div class="scenario">
+        <div class="q">🟡 "Faculty can't make it — class needs to be moved"</div>
+        <div class="a">Faculty → Calendar → Click the lecture → Submit Reschedule Request with preferred new slot. Central Team → Reschedule Requests → Review → <strong>Approve</strong>. Planner updates automatically.</div>
+      </div>
+      <div class="scenario">
+        <div class="q">🟡 "Test date clashes with a scheduled class"</div>
+        <div class="a">During test creation, the system detects the clash and shows <strong>"Schedule & Shift Classes"</strong>. Click it — the clashing lecture moves to a buffer slot, and the test is confirmed.</div>
+      </div>
+      <div class="scenario">
+        <div class="q">🔵 "Schedule same test for multiple batches at once"</div>
+        <div class="a">Test Scheduler → Select Centre → Check multiple batches (same centre + program) → Fill test details → Schedule Test. All batches get the test linked.</div>
+      </div>
+      <div class="scenario">
+        <div class="q">🔵 "Upload 20 tests at once via CSV"</div>
+        <div class="a">Test Scheduler → Bulk Upload → Download Template → Fill with Centre, Batch, Test Name, Date etc. → Upload → Review preview (Ready/Shift/Error) → <strong>Import All</strong>.</div>
+      </div>
+      <div class="scenario">
+        <div class="q">🟢 "Audit all today's lectures"</div>
+        <div class="a">Daily Lecture Audit → Select today's date → Filter by Centre/Batch if needed → For each class: add lecture link, check the 3 boxes, add remarks → <strong>Save</strong> (auto-confirms as Audited or Flagged).</div>
+      </div>
+      <div class="scenario">
+        <div class="q">🟢 "Get weekly audit report for management"</div>
+        <div class="a">Admin Portal → Audit Report → Set date range → View Summary (owner-wise grid) or Detail (all lectures) → Click <strong>Download CSV</strong>.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ 9. RULES ════════════════════════════════════════════════════════ -->
+  <div class="section" id="rules">
+    <h2 class="section-title"><span class="num">9</span> System Rules</h2>
+    <p>These rules are enforced by the system — they cannot be bypassed.</p>
+
+    <div class="rules">
+      <div class="rule-item">
+        <div class="ri">🚫</div>
+        <div><strong>Faculty cannot edit any planner content.</strong> They can only confirm lectures. Chapters, topics, dates, and times are set by Central Team only.</div>
+      </div>
+      <div class="rule-item">
+        <div class="ri">📅</div>
+        <div><strong>Batch end date never extends.</strong> All lecture shifts (from reschedules or test priority) land on existing buffer slots within the batch's timeline.</div>
+      </div>
+      <div class="rule-item">
+        <div class="ri">🏢</div>
+        <div><strong>No overlapping classes in the same room.</strong> The Batch Scheduler blocks any overlapping time slots in the same classroom.</div>
+      </div>
+      <div class="rule-item">
+        <div class="ri">📚</div>
+        <div><strong>Chapter names must match GTT exactly.</strong> In bulk test upload and planner creation, chapter names are validated against the Admin-defined syllabus.</div>
+      </div>
+      <div class="rule-item">
+        <div class="ri">✅</div>
+        <div><strong>Tests are confirmed immediately.</strong> There is no Draft → Send to Faculty → Confirm flow for tests. Schedule it — it's live.</div>
+      </div>
+      <div class="rule-item">
+        <div class="ri">🏫</div>
+        <div><strong>Branch Heads see only their centre.</strong> All data access (batches, tests, calendar) is automatically scoped to their assigned centre(s).</div>
+      </div>
+      <div class="rule-item">
+        <div class="ri">🔄</div>
+        <div><strong>Planner approvals are real-time.</strong> When Central Team approves a reschedule request, the planner updates immediately — no manual sync or refresh needed.</div>
+      </div>
+      <div class="rule-item">
+        <div class="ri">📊</div>
+        <div><strong>Syllabus % is capped at 100%.</strong> Coverage is calculated per chapter (not globally), so common topic names across chapters don't inflate the percentage.</div>
+      </div>
+    </div>
+  </div>
+
+  <hr />
+  <p style="text-align:center; color:var(--gray-400); font-size:12px; padding:16px 0;">
+    Superclass Portal Guide &nbsp;·&nbsp; To save as PDF: open in browser → File → Print → Save as PDF
+  </p>
+
+</body>
+</html>

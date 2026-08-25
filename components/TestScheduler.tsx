@@ -129,6 +129,8 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   // Free rooms when the selected room is busy
   const [freeRooms, setFreeRooms] = useState<FreeClassroom[]>([])
   const [roomClash, setRoomClash] = useState(false)
+  // Form centre picker — narrows batch list in the form
+  const [formCentre, setFormCentre] = useState('')
   // Filters for the test list
   const [filterCentre, setFilterCentre] = useState('')
   const [filterBatchId, setFilterBatchId] = useState('')
@@ -331,7 +333,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   }
   
   const resetForm = () => {
-    setShowForm(false); setEditingId(null)
+    setShowForm(false); setEditingId(null); setFormCentre('')
     setBatchId(''); setSelectedBatches(new Set()); setName(''); setTestDate(''); setStartTime('10:00'); setDuration('60')
     setTestType('Objective'); setPartType('Full'); setSubjectId(''); setFacultyId(''); setClassroomId('')
     setEligible([]); setSelectedChapters(new Set()); setCanShift(false); setFreeWindows([])
@@ -486,19 +488,13 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         }
       }
       
-      const shiftNote = res.shifted ? ` ${res.shifted} clashing lecture(s) shifted forward.` : ''
-      const unshiftNote = res.unshiftable ? ` ⚠ ${res.unshiftable} lecture(s) couldn't be shifted — no buffer/class-date left before the batch's end date. Check Edit Planner.` : ''
-      const bufferNote = res.shifted && res.shifted > 0 ? ` (${res.shifted} buffer slot${res.shifted > 1 ? 's' : ''} utilized)` : ''
+      const shiftNote = res.shifted ? ` ${res.shifted} lecture(s) shifted forward (buffer utilized).` : ''
+      const unshiftNote = res.unshiftable ? ` ⚠ ${res.unshiftable} lecture(s) couldn't shift — no buffer left before batch end. Check Edit Planner.` : ''
       const batchNote = activeBatchIds.length > 1 ? ` Mapped to ${activeBatchIds.length} batches.` : ''
-      let stageNote = ''
-      if (scheduleDirect) {
-        const testId = editingId ?? (res as { id?: string }).id
-        if (testId) {
-          const { error: stageErr } = await setTestStage(supabase, testId, 'Confirmed')
-          stageNote = stageErr ? ` (could not confirm: ${stageErr})` : ' Scheduled directly — no faculty confirmation needed.'
-        }
-      }
-      setMsg({ type: unshiftNote ? 'info' : 'success', text: (editingId ? 'Test updated.' : scheduleDirect ? 'Test scheduled and confirmed - ready for execution.' : 'Test saved as draft. Use "Send to Faculty" to assign.') + shiftNote + bufferNote + unshiftNote + stageNote + batchNote })
+      // Always confirm immediately — no send/confirm flow
+      const testId = editingId ?? (res as { id?: string }).id
+      if (testId && !editingId) await setTestStage(supabase, testId, 'Confirmed')
+      setMsg({ type: unshiftNote ? 'info' : 'success', text: (editingId ? 'Test updated.' : 'Test scheduled ✅') + shiftNote + unshiftNote + batchNote })
       resetForm()
       await loadData()
     } catch (err) {
@@ -532,11 +528,11 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   }
   // ---- Bulk CSV upload -----------------------------------------------------
   const downloadBulkTemplate = () => {
-    const headers = ['Batch', 'Multiple Batches', 'Subject', 'Test Name', 'Date', 'Time', 'Duration', 'Type', 'Scope', 'Chapters', 'Room', 'Invigilator Email']
-    const example = ['(exact batch name)', '(optional: batch1;batch2;batch3)', '(blank = Full syllabus)', 'Weekly Test 3', '2026-08-15', '10:00', '60', 'Objective', 'Full', 'Chapter A; Chapter B', '(optional room no)', '(optional) faculty@pw.live']
+    const headers = ['Centre', 'Batch', 'Multiple Batches (same centre)', 'Subject', 'Test Name', 'Date', 'Time', 'Duration', 'Type', 'Scope', 'Chapters (GTT names; semicolon-separated)', 'Room', 'Invigilator Email']
+    const example = ['Patna Superclass', 'CAF Jan 2027 B1', '(or: B1;B2;B3 — same centre)', '(blank=Full)', 'Mock Test 5', '2026-09-10', '10:00', '120', 'Objective', 'Full', 'Sets Relations Functions; Limits', '(optional room no)', '(optional)']
     const esc = (c: string) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)
     const csv = [headers.join(','), example.map(esc).join(',')].join('\n')
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }))
+    const url = URL.createObjectURL(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' }))
     const a = document.createElement('a'); a.href = url; a.download = 'test-upload-template.csv'; a.click(); URL.revokeObjectURL(url)
   }
 
@@ -572,8 +568,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     if (raw.length < 2) { setBulkMsg({ type: 'error', text: 'The CSV needs a header row and at least one test row.' }); return }
     const headers = raw[0]
     const ci = {
+      centre: colIndex(headers, ['centre', 'center']),
       batch: colIndex(headers, ['batch']),
-      multiBatch: colIndex(headers, ['multiple batches', 'multi batch', 'batches']),
+      multiBatch: colIndex(headers, ['multiple batches', 'multiple batches (same centre)', 'multi batch', 'batches']),
       subject: colIndex(headers, ['subject']),
       name: colIndex(headers, ['test name', 'name']),
       date: colIndex(headers, ['date', 'test date']),
@@ -591,64 +588,64 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     const rows: BulkRow[] = []
     for (let i = 1; i < raw.length; i++) {
       const cells = raw[i]
-      const batchName = cells[ci.batch]?.trim() ?? ''
-      const multiBatchNames = cells[ci.multiBatch]?.trim() ?? ''
-      const subjectName = cells[ci.subject]?.trim() ?? ''
-      const name = cells[ci.name]?.trim() ?? ''
-      const date = normalizeDate(cells[ci.date]?.trim() ?? '')
-      const time = normalizeTime(cells[ci.time]?.trim() ?? '') ?? '10:00'
-      const duration = parseInt(cells[ci.duration]?.trim() ?? '60', 10)
-      const type = cells[ci.type]?.trim() || 'Objective'
-      const scope = cells[ci.scope]?.trim() === 'Part' ? 'Part' : 'Full'
+      if (cells[0]?.trim().startsWith('#')) continue // skip comment rows
+      const centreName   = ci.centre >= 0 ? cells[ci.centre]?.trim() ?? '' : ''
+      const batchName    = ci.batch >= 0  ? cells[ci.batch]?.trim() ?? '' : ''
+      const multiBatchNames = ci.multiBatch >= 0 ? cells[ci.multiBatch]?.trim() ?? '' : ''
+      const subjectName  = cells[ci.subject]?.trim() ?? ''
+      const name         = cells[ci.name]?.trim() ?? ''
+      const date         = normalizeDate(cells[ci.date]?.trim() ?? '')
+      const time         = normalizeTime(cells[ci.time]?.trim() ?? '') ?? '10:00'
+      const duration     = parseInt(cells[ci.duration]?.trim() ?? '60', 10)
+      const type         = cells[ci.type]?.trim() || 'Objective'
+      const scope        = cells[ci.scope]?.trim() === 'Part' ? 'Part' : 'Full'
       const chapterNames = cells[ci.chapters]?.trim() ?? ''
       const roomHint = cells[ci.room]?.trim() ?? ''
       const invigEmail = cells[ci.invig]?.trim() ?? ''
 
       const errors: string[] = []
       
+      // Resolve centre to narrow batch search
+      let resolvedCentreId: string | null = null
+      if (centreName) {
+        const foundCentre = centres.find(c => norm(c.name) === norm(centreName))
+        if (!foundCentre) errors.push(`Centre "${centreName}" not found`)
+        else resolvedCentreId = foundCentre.id
+      }
+
+      // Batch pool: filter by centre if provided
+      const batchPool = resolvedCentreId
+        ? visibleBatches.filter(b => b.centre_id === resolvedCentreId)
+        : visibleBatches
+
       // Handle batch selection - either single batch or multiple batches
       let batchId: string | null = null
       let batchIds: string[] = []
       let batchLabel = ''
       
       if (multiBatchNames) {
-        // Multi-batch mode: parse semicolon-separated batch names
         const batchNameList = multiBatchNames.split(';').map(n => n.trim()).filter(Boolean)
-        const foundBatches = batchNameList.map(name => visibleBatches.find(b => norm(b.name) === norm(name)))
+        const foundBatches = batchNameList.map(n => batchPool.find(b => norm(b.name) === norm(n)))
         const validBatches = foundBatches.filter(Boolean) as Batch[]
-        
         if (validBatches.length === 0) {
-          errors.push(`None of the batches found: ${batchNameList.join(', ')}`)
-        } else if (validBatches.length !== batchNameList.length) {
-          const missing = batchNameList.filter(name => !validBatches.some(b => norm(b.name) === norm(name)))
-          errors.push(`Some batches not found: ${missing.join(', ')}`)
+          errors.push(`None of the batches found: ${batchNameList.join(', ')}${resolvedCentreId ? ` in ${centreName}` : ''}`)
         } else {
-          // Validate all batches are from same centre and program
           const centreIds = new Set(validBatches.map(b => b.centre_id))
           const programIds = new Set(validBatches.map(b => b.program_id))
-          
-          if (centreIds.size > 1) {
-            errors.push('All batches must be from the same centre')
-          } else if (programIds.size > 1) {
-            errors.push('All batches must be from the same program')
-          } else {
+          if (centreIds.size > 1) errors.push('All batches must be from the same centre')
+          else if (programIds.size > 1) errors.push('All batches must be from the same program')
+          else {
             batchIds = validBatches.map(b => b.id)
-            batchId = validBatches[0].id // Use first as primary
+            batchId = validBatches[0].id
             batchLabel = `${validBatches.map(b => b.name).join(', ')} (${validBatches.length} batches)`
           }
         }
       } else if (batchName) {
-        // Single batch mode (legacy)
-        const batch = visibleBatches.find(b => norm(b.name) === norm(batchName))
-        if (!batch) {
-          errors.push(`Batch "${batchName}" not found`)
-        } else {
-          batchId = batch.id
-          batchIds = [batch.id]
-          batchLabel = batch.name
-        }
+        const batch = batchPool.find(b => norm(b.name) === norm(batchName))
+        if (!batch) errors.push(`Batch "${batchName}" not found${resolvedCentreId ? ` in ${centreName}` : ''}`)
+        else { batchId = batch.id; batchIds = [batch.id]; batchLabel = batch.name }
       } else {
-        errors.push('Either Batch or Multiple Batches must be specified')
+        errors.push('Batch name required (Batch column or Multiple Batches column)')
       }
 
       let subjectId: string | null = null
@@ -669,11 +666,11 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       if (scope === 'Part' && chapterNames && subjectId) {
         const chapterNameList = chapterNames.split(';').map(n => n.trim()).filter(Boolean)
         const subjectChapters = await chaptersOfSubject(subjectId)
-        chapterIds = chapterNameList.map(name => subjectChapters.find(ch => norm(ch.name) === norm(name))?.id).filter(Boolean) as string[]
-        if (chapterIds.length !== chapterNameList.length) {
-          const missing = chapterNameList.filter(name => !subjectChapters.some(ch => norm(ch.name) === norm(name)))
-          errors.push(`Chapters not found: ${missing.join(', ')}`)
-        }
+        chapterIds = chapterNameList.map(cn => subjectChapters.find(ch => norm(ch.name) === norm(cn))?.id).filter(Boolean) as string[]
+        const missing = chapterNameList.filter(cn => !subjectChapters.some(ch => norm(ch.name) === norm(cn)))
+        if (missing.length > 0) errors.push(`Chapters not in GTT: ${missing.join(', ')}`)
+      } else if (scope === 'Part' && !chapterNames) {
+        errors.push('Chapters required for Part scope (use GTT chapter names)')
       }
 
       let facultyId: string | null = null
@@ -721,8 +718,8 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         row.clashNote = `Clashes with ${classClash.subject_name} (${formatTime(classClash.start_time)}–${endTime})`
       }
 
-      // Auto-assign room
-      const centreRooms = formRooms.filter(r => r.centre_id === primaryBatch.centre_id)
+      // Auto-assign room — use classrooms state (not formRooms which is form-specific)
+      const centreRooms = classrooms.filter(r => r.centre_id === primaryBatch.centre_id && r.is_active)
       const assignedRoomId = await pickFreeRoom(centreRooms, primaryBatch.centre_id, row.date, row.time!, row.duration)
       if (assignedRoomId) {
         row.classroomId = assignedRoomId
@@ -773,14 +770,12 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         const testPriority = row.status === 'shift'
         const res = await createTest(supabase, input, row.chapterIds, { testPriority })
         if (res.ok) {
-          // Map to multiple batches if needed
-          if (row.batchIds.length > 1) {
-            const testId = (res as any).id
-            if (testId) {
-              await supabase.rpc('map_test_to_batches', {
-                test_uuid: testId,
-                batch_uuids: row.batchIds
-              })
+          // Always confirm immediately — no faculty send/confirm flow
+          const testId = (res as any).id
+          if (testId) {
+            await setTestStage(supabase, testId, 'Confirmed')
+            if (row.batchIds.length > 1) {
+              await supabase.rpc('map_test_to_batches', { test_uuid: testId, batch_uuids: row.batchIds })
             }
           }
           created++
@@ -814,6 +809,11 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     if (!filterCentre) return visibleBatches
     return visibleBatches.filter((b) => b.centre_id === filterCentre)
   }, [visibleBatches, filterCentre])
+  // Batches in the form, filtered by the form centre picker
+  const formCentreBatches = useMemo(() => {
+    if (!formCentre) return visibleBatches
+    return visibleBatches.filter((b) => b.centre_id === formCentre)
+  }, [visibleBatches, formCentre])
 
   return (
     <div className="p-4 max-w-full mx-auto">
@@ -831,19 +831,29 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         <Card className="mb-6">
           <h3 className="text-xl font-semibold mb-4">{editingId ? 'Edit Test' : 'New Test'}</h3>
           <form onSubmit={submit} className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            
+
+            {/* Centre picker — narrows the batch list */}
+            <div className="lg:col-span-2">
+              <label className="block text-sm font-medium mb-1">Centre</label>
+              <select value={formCentre} onChange={(e) => { setFormCentre(e.target.value); setBatchId(''); setSelectedBatches(new Set()) }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                <option value="">All centres</option>
+                {filteredCentres.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+
             {/* Batch Selection */}
             <div className="lg:col-span-2">
-              <label className="block text-sm font-medium mb-2">📚 Batch Selection</label>
-              
+              <label className="block text-sm font-medium mb-2">📚 Batch(es) *</label>
+
               {/* Multi-batch selection */}
               <div className="mb-3">
                 <div className="flex items-center gap-2 mb-2">
-                  <label className="text-sm font-medium text-gray-700">Multiple Batches</label>
+                  <label className="text-sm font-medium text-gray-700">Select Batches</label>
                   <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded-full">Recommended</span>
                 </div>
                 <div className="max-h-32 overflow-y-auto border rounded-lg p-2 bg-gray-50">
-                  {visibleBatches.map((b) => (
+                  {formCentreBatches.map((b) => (
                     <label key={b.id} className="flex items-center gap-2 cursor-pointer hover:bg-white p-2 rounded text-sm">
                       <input
                         type="checkbox"
@@ -886,7 +896,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                   disabled={selectedBatches.size > 0}
                 >
                   <option value="">Select single batch...</option>
-                  {visibleBatches.map((b) => <option key={b.id} value={b.id}>{b.name} — {centres.find((c) => c.id === b.centre_id)?.name ?? ''}</option>)}
+                  {formCentreBatches.map((b) => <option key={b.id} value={b.id}>{b.name} — {centres.find((c) => c.id === b.centre_id)?.name ?? ''}</option>)}
                 </select>
               </div>
             </div>
@@ -1041,9 +1051,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
             {/* Form Actions */}
             <div className="lg:col-span-2 flex flex-wrap gap-2 pt-4 border-t">
               <BtnPrimary type="submit" disabled={saving} className="text-sm">
-                {saving ? 'Saving...' : editingId ? 'Update Test' : 'Save as Draft'}
+                {saving ? 'Scheduling…' : editingId ? 'Update Test' : '✅ Schedule Test'}
               </BtnPrimary>
-              
+
               {canShift && (
                 <BtnPrimary
                   type="button"
@@ -1051,18 +1061,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                   disabled={saving}
                   className="bg-orange-600 hover:bg-orange-700 text-sm"
                 >
-                  {saving ? 'Scheduling...' : 'Schedule (Shift Classes)'}
-                </BtnPrimary>
-              )}
-
-              {!editingId && (scope === 'central' || scope === 'admin') && (
-                <BtnPrimary
-                  type="button"
-                  onClick={() => doSubmit(false, true)}
-                  disabled={saving}
-                  className="bg-green-600 hover:bg-green-700 text-white text-sm"
-                >
-                  {saving ? 'Confirming...' : '🎯 Schedule & Confirm'}
+                  {saving ? 'Scheduling…' : 'Schedule & Shift Classes'}
                 </BtnPrimary>
               )}
 
@@ -1337,120 +1336,95 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         </div>
       </div>
 
-      {/* ---- Test List -------------------------------------------------------- */}
+      {/* ---- Test List — Excel Table ---------------------------------------- */}
       {loading ? (
-        <div className="text-center py-8 text-gray-500">Loading tests...</div>
+        <div className="text-center py-8 text-gray-500">Loading tests…</div>
       ) : filteredTests.length === 0 ? (
         <div className="text-center py-8 text-gray-500">
           {visibleTests.length === 0 ? 'No tests scheduled yet.' : 'No tests match your filters.'}
         </div>
       ) : (
-        <div className="grid gap-4">
-          {filteredTests.map((t) => {
-            const batch = batches.find((b) => b.id === t.batch_id)
-            const centre = centres.find((c) => c.id === batch?.centre_id)
-            const subject = subjects.find((s) => s.id === t.subject_id)
-            const classroom = classrooms.find((c) => c.id === t.classroom_id)
-            const invigilator = faculty.find((f) => f.id === t.faculty_id)
-            const chapters = testChapterNames(t.id)
-            const completion = completions[t.id]
-            const isUpcoming = t.test_date >= new Date().toISOString().split('T')[0]
-            
-            return (
-              <Card key={t.id} className="hover:shadow-lg transition-shadow">
-                <div className="flex justify-between items-start mb-4">
-                  <div>
-                    <h4 className="text-lg font-semibold">{t.name}</h4>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className={stageBadgeClass(t.stage)}>{t.stage}</span>
-                      <span className="text-sm text-gray-600">
-                        {getTestBatchNames(t.id, t.batch_id)} • {centre?.name}
+        <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white">
+          <table className="w-full text-left text-sm min-w-[900px]">
+            <thead>
+              <tr className="bg-neutral-50 border-b border-neutral-200 text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+                <th className="px-3 py-2">Date</th>
+                <th className="px-3 py-2">Time</th>
+                <th className="px-3 py-2">Test Name</th>
+                <th className="px-3 py-2">Batch(es)</th>
+                <th className="px-3 py-2">Centre</th>
+                <th className="px-3 py-2">Type · Scope</th>
+                <th className="px-3 py-2">Subject / Chapters</th>
+                <th className="px-3 py-2">Room</th>
+                <th className="px-3 py-2">Invigilator</th>
+                <th className="px-3 py-2">Syllabus</th>
+                {isPrivileged && <th className="px-3 py-2 text-right">Actions</th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-100">
+              {filteredTests.map((t) => {
+                const batch      = batches.find((b) => b.id === t.batch_id)
+                const centre     = centres.find((c) => c.id === batch?.centre_id)
+                const subject    = subjects.find((s) => s.id === t.subject_id)
+                const classroom  = classrooms.find((c) => c.id === t.classroom_id)
+                const invigilator = faculty.find((f) => f.id === t.faculty_id)
+                const chapters   = testChapterNames(t.id)
+                const completion = completions[t.id]
+                const isUpcoming = t.test_date >= new Date().toISOString().split('T')[0]
+                return (
+                  <tr key={t.id} className={`hover:bg-neutral-50 ${!isUpcoming ? 'opacity-60' : ''}`}>
+                    <td className="px-3 py-2 whitespace-nowrap font-medium">
+                      {new Date(t.test_date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap text-neutral-500">
+                      {formatTime(t.start_time)} <span className="text-xs">({t.duration_minutes}m)</span>
+                    </td>
+                    <td className="px-3 py-2 font-semibold">{t.name}</td>
+                    <td className="px-3 py-2 max-w-[160px]">
+                      <span className="truncate block text-neutral-700" title={getTestBatchNames(t.id, t.batch_id)}>
+                        {getTestBatchNames(t.id, t.batch_id)}
                       </span>
-                    </div>
-                  </div>
-                  <div className="flex gap-2">
-                    {(scope === 'central' || scope === 'admin') && (
-                      <>
-                        <BtnSecondary
-                          onClick={() => startEdit(t)}
-                          disabled={busyId === t.id}
-                          className="text-sm"
-                        >
-                          Edit
-                        </BtnSecondary>
-                        <BtnSecondary
-                          onClick={() => deleteTest(t)}
-                          disabled={busyId === t.id}
-                          className="text-sm text-red-600 hover:bg-red-50"
-                        >
-                          Delete
-                        </BtnSecondary>
-                      </>
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap text-neutral-500">{centre?.name ?? '—'}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <span className="text-xs bg-neutral-100 px-2 py-0.5 rounded-full">{t.test_type}</span>
+                      {' · '}
+                      <span className="text-xs text-neutral-500">{t.part_type}</span>
+                    </td>
+                    <td className="px-3 py-2 max-w-[180px]">
+                      {t.part_type === 'Full'
+                        ? <span className="text-xs text-neutral-400">Full syllabus</span>
+                        : <div>
+                            <span className="text-xs font-medium">{subject?.name}</span>
+                            {chapters.length > 0 && <p className="text-xs text-neutral-400 truncate" title={chapters.join(', ')}>{chapters.join(', ')}</p>}
+                          </div>}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap text-neutral-600">{classroom ? roomLabel(classroom) : '—'}</td>
+                    <td className="px-3 py-2 whitespace-nowrap text-neutral-600">
+                      {invigilator ? `${invigilator.full_name}${invigilator.faculty_type ? ` (${invigilator.faculty_type})` : ''}` : '—'}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {completion && isUpcoming && completion.hasData
+                        ? <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${completion.pct >= 60 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                            {completion.pct}%{completion.pct < 60 ? ' ⚠' : ''}
+                          </span>
+                        : <span className="text-neutral-300 text-xs">—</span>}
+                    </td>
+                    {isPrivileged && (
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        {busyId === t.id
+                          ? <span className="text-xs text-neutral-400">…</span>
+                          : <>
+                              <button onClick={() => startEdit(t)} className="text-xs font-semibold text-violet-600 hover:text-violet-800 mr-3">Edit</button>
+                              <button onClick={() => deleteTest(t)} className="text-xs font-semibold text-red-500 hover:text-red-700">Delete</button>
+                            </>}
+                      </td>
                     )}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-                  <div>
-                    <div className="font-medium text-gray-700 mb-2">Schedule</div>
-                    <div>{new Date(t.test_date).toLocaleDateString('en-GB')}</div>
-                    <div>{formatTime(t.start_time)} ({t.duration_minutes}m)</div>
-                    <div>{t.test_type} • {t.part_type}</div>
-                  </div>
-
-                  <div>
-                    <div className="font-medium text-gray-700 mb-2">Details</div>
-                    {t.part_type === 'Part' && subject && (
-                      <div className="mb-1">{subject.name}</div>
-                    )}
-                    {chapters.length > 0 && (
-                      <div className="text-xs text-gray-600 mb-1">
-                        Chapters: {chapters.join(', ')}
-                      </div>
-                    )}
-                    {classroom && <div>Room: {roomLabel(classroom)}</div>}
-                    {invigilator && <div>Invigilator: {invigilator.full_name} {invigilator.faculty_type ? `(${invigilator.faculty_type})` : ''}</div>}
-                  </div>
-
-                  <div>
-                    <div className="font-medium text-gray-700 mb-2">Status</div>
-                    {completion && isUpcoming && (
-                      <div className={`text-xs px-2 py-1 rounded mb-2 ${
-                        completion.pct >= 60 ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
-                      }`}>
-                        {completion.pct}% syllabus taught
-                        {completion.pct < 60 && ' ⚠'}
-                      </div>
-                    )}
-                    
-                    {t.stage === 'Draft' && (scope === 'central' || scope === 'admin') && (
-                      <BtnPrimary
-                        onClick={() => changeStage(t, 'Faculty Assigned')}
-                        disabled={busyId === t.id}
-                        className="text-sm mb-2"
-                      >
-                        Send to Faculty
-                      </BtnPrimary>
-                    )}
-                    
-                    {t.stage === 'Faculty Assigned' && (scope === 'central' || scope === 'admin') && (
-                      <BtnPrimary
-                        onClick={() => changeStage(t, 'Confirmed')}
-                        disabled={busyId === t.id}
-                        className="text-sm mb-2"
-                      >
-                        Confirm Test
-                      </BtnPrimary>
-                    )}
-
-                    {busyId === t.id && (
-                      <div className="text-sm text-gray-500">Processing...</div>
-                    )}
-                  </div>
-                </div>
-              </Card>
-            )
-          })}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

@@ -90,6 +90,7 @@ export default function EditPlanner() {
   const [activeSubject, setActiveSubject] = useState('')
   const [search, setSearch] = useState('')
   const [reorderMode, setReorderMode] = useState<'rows' | 'chapters'>('rows')
+  const [viewMode, setViewMode] = useState<'chapter' | 'date'>('date')
   const dragKeyRef = useRef<string | null>(null)
   const dragChapterRef = useRef<string | null>(null)
   // "Already conducted" date dialog
@@ -357,8 +358,15 @@ export default function EditPlanner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, activeSubject, search, faculty, tests, liveLinkId])
 
-  // Chapters from this subject's Concept Tags (GTT) that aren't already a
-  // group in the current planner — the pool "+ add chapter" can pick from.
+  // Flat date-wise view: all rows for the active subject sorted by date,
+  // with status colour coding — conducted grey, confirmed green, planned white.
+  const dateSortedRows = useMemo(() => {
+    const q = search.toLowerCase().trim()
+    return rows
+      .filter((r) => r.subject_id === activeSubject && (!q || facName(r.faculty_id).toLowerCase().includes(q) || r.topic_name.toLowerCase().includes(q) || r.chapter.toLowerCase().includes(q)))
+      .sort((a, b) => a.planned_date.localeCompare(b.planned_date) || (a.start_time ?? '').localeCompare(b.start_time ?? ''))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, activeSubject, search, faculty])
   const availableChaptersToAdd = useMemo(() => {
     const subj = master?.subjects.find((s) => s.id === activeSubject)
     if (!subj) return []
@@ -783,6 +791,13 @@ export default function EditPlanner() {
               <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="e.g. a teacher's name…" className="w-full h-10 px-3 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
             </div>
             <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">View</label>
+              <div className="inline-flex rounded-lg border border-neutral-200 overflow-hidden">
+                <button onClick={() => setViewMode('date')} className={`px-3 h-10 text-sm font-semibold ${viewMode === 'date' ? 'bg-violet-600 text-white' : 'bg-white text-neutral-600'}`}>📅 Date</button>
+                <button onClick={() => setViewMode('chapter')} className={`px-3 h-10 text-sm font-semibold ${viewMode === 'chapter' ? 'bg-violet-600 text-white' : 'bg-white text-neutral-600'}`}>📖 Chapter</button>
+              </div>
+            </div>
+            <div>
               <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Drag to reorder</label>
               <div className="inline-flex rounded-lg border border-neutral-200 overflow-hidden">
                 <button onClick={() => setReorderMode('rows')} className={`px-3 h-10 text-sm font-semibold ${reorderMode === 'rows' ? 'bg-violet-600 text-white' : 'bg-white text-neutral-600'}`}>Rows</button>
@@ -795,8 +810,79 @@ export default function EditPlanner() {
             </div>
           </div>
 
+          {/* ── DATE VIEW ── */}
+          {viewMode === 'date' && (
+            <Card className="overflow-x-auto p-0">
+              {dateSortedRows.length === 0 ? (
+                <p className="p-8 text-center text-sm text-neutral-400">No classes match.</p>
+              ) : (
+                <table className="w-full text-left text-sm min-w-[700px]">
+                  <thead>
+                    <tr className="bg-neutral-50 border-b border-neutral-200 text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+                      <th className="px-3 py-2">Date</th>
+                      <th className="px-3 py-2">Time</th>
+                      <th className="px-3 py-2">Chapter</th>
+                      <th className="px-3 py-2 min-w-[180px]">Topic</th>
+                      <th className="px-3 py-2">Faculty</th>
+                      <th className="px-3 py-2">Status</th>
+                      <th className="px-3 py-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-100">
+                    {dateSortedRows.map((r) => (
+                      <tr key={r.key} className={r.status === 'conducted' ? 'bg-neutral-100/70' : r.status === 'confirmed' ? 'bg-emerald-50/60' : ''}>
+                        <td className="px-3 py-2 whitespace-nowrap font-medium text-neutral-800">
+                          {fmtDate(r.planned_date)}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap text-neutral-500">
+                          {r.start_time ? r.start_time.slice(0, 5) : '—'}
+                        </td>
+                        <td className="px-3 py-2 text-neutral-600 text-xs">{r.chapter}</td>
+                        <td className="px-3 py-2">
+                          {r.status === 'conducted' ? (
+                            <span className="text-neutral-600">{r.topic_name || '—'}</span>
+                          ) : (
+                            <input
+                              list="ep-topics"
+                              value={r.topic_name}
+                              onChange={(e) => updateRow(r.key, { topic_name: e.target.value })}
+                              className="w-full h-7 px-2 bg-neutral-50 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400"
+                              placeholder="Topic…"
+                            />
+                          )}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap text-neutral-600 text-xs">{facName(r.faculty_id)}</td>
+                        <td className="px-3 py-2">
+                          <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase rounded-full border ${statusPill(r.status)}`}>
+                            {r.status}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-right whitespace-nowrap">
+                          {r.status !== 'conducted' && (
+                            <button
+                              onClick={() => setStatus(r.key, 'conducted')}
+                              className="text-xs text-neutral-400 hover:text-neutral-700 mr-2"
+                              title="Mark conducted"
+                            >✓</button>
+                          )}
+                          {r.status !== 'conducted' && (
+                            <button
+                              onClick={() => removeRow(r.key)}
+                              className="text-xs text-red-400 hover:text-red-600"
+                              title="Remove"
+                            >×</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </Card>
+          )}
+
           {/* Chapter groups */}
-          <div className="space-y-4">
+          {viewMode === 'chapter' && <div className="space-y-4">
             {chapterGroups.groups.length === 0 ? (
               <Card className="p-8 text-center text-sm text-neutral-400">No classes match.</Card>
             ) : chapterGroups.groups.map((g) => (
@@ -927,7 +1013,7 @@ export default function EditPlanner() {
                 </div>
               </div>
             ))}
-          </div>
+          </div>}
 
           <BtnPrimary onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : liveLinkId ? `Save live schedule (${liveBatchLabel})` : 'Save Planner (template)'}</BtnPrimary>
         </>

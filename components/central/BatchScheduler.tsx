@@ -494,11 +494,13 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
 // non-conducted rows to match the new weekly slot for their subject+weekday.
 // Topic, chapter, faculty, and status are never touched — this can't scramble
 // a live plan, it only fixes stale times/rooms.
+// Also adds buffer slots for any new schedule days that don't yet have
+// a batch_planners row — so central team can use + add row immediately.
 async function syncMaterialisedTimes(
   supabase: ReturnType<typeof createClient>,
   batchId: string,
   flat: FlatSchedule[]
-): Promise<{ updated: number; unmatchedCount: number }> {
+): Promise<{ updated: number; unmatchedCount: number; newBuffers: number }> {
   const today = new Date().toISOString().split('T')[0]
   const { data, error } = await supabase
     .from('batch_planners')
@@ -506,7 +508,7 @@ async function syncMaterialisedTimes(
     .eq('batch_id', batchId)
     .eq('is_buffer', false)
     .gte('planned_date', today)
-  if (error || !data) return { updated: 0, unmatchedCount: 0 }
+  if (error || !data) return { updated: 0, unmatchedCount: 0, newBuffers: 0 }
 
   const bySubjDay = new Map<string, { start: string; end: string; classroom: string | null; from: string | null; to: string | null }[]>()
   for (const f of flat) {
@@ -533,7 +535,101 @@ async function syncMaterialisedTimes(
       if (!upErr) updated++
     }
   }
-  return { updated, unmatchedCount }
+
+  // --- New: Create buffer slots for schedule days that have no coverage ---
+  // For each (subject, weekday) slot, walk every date from today to end_date.
+  // If that date has no batch_planner row for this subject, insert a buffer.
+  let newBuffers = 0
+  try {
+    const { data: batchInfo } = await supabase
+      .from('batches').select('end_date').eq('id', batchId).single<{ end_date: string }>()
+    const endDate = batchInfo?.end_date ?? today
+
+    // Get existing link_id for this batch (needed to insert buffer rows)
+    const { data: linkData } = await supabase
+      .from('batch_planner_links').select('id, stage')
+      .eq('batch_id', batchId).limit(1).maybeSingle()
+    if (!linkData) return { updated, unmatchedCount, newBuffers: 0 }
+
+    // All existing batch_planners dates per subject (buffer + real, future only)
+    const { data: allRows } = await supabase
+      .from('batch_planners')
+      .select('subject_id, planned_date')
+      .eq('batch_id', batchId)
+      .gte('planned_date', today)
+    const existingBySubjDate = new Set<string>(
+      (allRows ?? []).map((r: { subject_id: string | null; planned_date: string }) =>
+        `${r.subject_id ?? ''}:${r.planned_date}`
+      )
+    )
+
+    // Get faculty_id per subject from existing real lectures (buffer inherits same faculty)
+    const { data: facSample } = await supabase
+      .from('batch_planners')
+      .select('subject_id, faculty_id')
+      .eq('batch_id', batchId)
+      .eq('is_buffer', false)
+      .not('faculty_id', 'is', null)
+    const facultyBySubject = new Map<string, string>()
+    for (const r of (facSample ?? []) as { subject_id: string | null; faculty_id: string | null }[]) {
+      if (r.subject_id && r.faculty_id && !facultyBySubject.has(r.subject_id))
+        facultyBySubject.set(r.subject_id, r.faculty_id)
+    }
+
+    const toInsert: Record<string, unknown>[] = []
+    // Walk each (subject, weekday) combination in the new schedule
+    const uniqueSubjDays = new Map<string, { subjectId: string; dow: number; slots: typeof bySubjDay extends Map<string, infer V> ? V : never }>()
+    for (const [key, slots] of bySubjDay.entries()) {
+      const [subjectId, dowStr] = key.split(':')
+      uniqueSubjDays.set(key, { subjectId, dow: parseInt(dowStr), slots })
+    }
+
+    for (const { subjectId, dow, slots } of uniqueSubjDays.values()) {
+      const d = new Date(today + 'T12:00:00')
+      const end = new Date(endDate + 'T12:00:00')
+      while (d <= end) {
+        if (d.getDay() === dow) {
+          const dateStr = d.toISOString().split('T')[0]
+          const slot = slots.find(sl => (!sl.from || dateStr >= sl.from) && (!sl.to || dateStr <= sl.to)) ?? slots[0]
+          if (slot && !existingBySubjDate.has(`${subjectId}:${dateStr}`)) {
+            const dur = Math.max(0, toMinutes(slot.end.slice(0, 5)) - toMinutes(slot.start.slice(0, 5)))
+            const facultyId = facultyBySubject.get(subjectId) ?? null
+            if (!facultyId) { d.setDate(d.getDate() + 1); continue } // skip if no faculty known yet
+            toInsert.push({
+              batch_id: batchId,
+              link_id: linkData.id,
+              subject_id: subjectId,
+              faculty_id: facultyId,
+              planned_date: dateStr,
+              start_time: slot.start,
+              duration_minutes: dur,
+              classroom_id: slot.classroom,
+              is_buffer: true,
+              stage: linkData.stage || 'Draft',
+              chapter: '',
+              topic_name: '',
+            })
+            // Mark as existing to avoid duplicate inserts within this pass
+            existingBySubjDate.add(`${subjectId}:${dateStr}`)
+          }
+        }
+        d.setDate(d.getDate() + 1)
+      }
+    }
+
+    if (toInsert.length > 0) {
+      // Insert in chunks to avoid payload limits
+      const CHUNK = 200
+      for (let i = 0; i < toInsert.length; i += CHUNK) {
+        const { error: insErr } = await supabase.from('batch_planners').insert(toInsert.slice(i, i + CHUNK))
+        if (!insErr) newBuffers += Math.min(CHUNK, toInsert.length - i)
+      }
+    }
+  } catch (_) {
+    // Non-critical — just return without new buffers
+  }
+
+  return { updated, unmatchedCount, newBuffers }
 }
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -670,6 +766,7 @@ async function syncMaterialisedTimes(
       if (editingBatch) {
         const sync = await syncMaterialisedTimes(supabase, batchId, flat)
         if (sync.updated) syncNote = ` ${sync.updated} already-scheduled class(es) were moved to the new time/room.`
+        if (sync.newBuffers) syncNote += ` ${sync.newBuffers} new buffer slot(s) added for new schedule days.`
         if (sync.unmatchedCount) syncNote += ` ${sync.unmatchedCount} class(es) no longer have a matching weekly slot on their day — check them in Edit Planner.`
       }
     }

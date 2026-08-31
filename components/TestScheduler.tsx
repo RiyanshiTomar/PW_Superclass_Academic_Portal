@@ -34,16 +34,43 @@ function parseCsvRows(text: string): string[][] {
 function normalizeDate(raw: string): string | null {
   const v = raw.trim()
   if (!v) return null
+  // YYYY-MM-DD (ISO) — most reliable, use as-is
   if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v
-  const m = v.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/)
-  if (m) { const [, d, mo, y] = m; return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}` }
+  // MM/DD/YYYY or MM-DD-YYYY (Excel default in US locale — e.g. 8/24/2026)
+  const mMDY = v.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/)
+  if (mMDY) {
+    const [, first, second, y] = mMDY
+    const f = parseInt(first), s = parseInt(second)
+    // If the second part > 12 it must be a day — so format is MM/DD/YYYY
+    if (s > 12) return `${y}-${first.padStart(2, '0')}-${second.padStart(2, '0')}`
+    // If the first part > 12 it must be a day — so format is DD/MM/YYYY
+    if (f > 12) return `${y}-${second.padStart(2, '0')}-${first.padStart(2, '0')}`
+    // Ambiguous (both ≤ 12): Excel default is MM/DD — trust that
+    return `${y}-${first.padStart(2, '0')}-${second.padStart(2, '0')}`
+  }
+  // DD/MM/YYYY explicit (e.g. 24/08/2026)
+  const mDMY = v.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/)
+  if (mDMY) { const [, d, mo, y] = mDMY; return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}` }
   return null
 }
 function normalizeTime(raw: string): string | null {
   const v = raw.trim()
-  const m = v.match(/^(\d{1,2}):(\d{2})/)
-  if (!m) return null
-  return `${m[1].padStart(2, '0')}:${m[2]}`
+  // HH:MM:SS or HH:MM (24-hour)
+  const m24 = v.match(/^(\d{1,2}):(\d{2})/)
+  if (m24 && !v.toLowerCase().includes('m')) {
+    return `${m24[1].padStart(2, '0')}:${m24[2]}`
+  }
+  // H:MM AM/PM or HH:MM AM/PM (Excel 12-hour format e.g. "1:00 PM")
+  const m12 = v.match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i)
+  if (m12) {
+    let h = parseInt(m12[1])
+    const mins = m12[2]
+    const isPM = m12[3].toLowerCase() === 'pm'
+    if (isPM && h < 12) h += 12
+    if (!isPM && h === 12) h = 0
+    return `${String(h).padStart(2, '0')}:${mins}`
+  }
+  return null
 }
 const norm = (s: string) => s.toLowerCase().trim()
 
@@ -529,9 +556,17 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   // ---- Bulk CSV upload -----------------------------------------------------
   const downloadBulkTemplate = () => {
     const headers = ['Centre', 'Batch', 'Multiple Batches (same centre)', 'Subject', 'Test Name', 'Date', 'Time', 'Duration', 'Type', 'Scope', 'Chapters (GTT names; semicolon-separated)', 'Room', 'Invigilator Email']
-    const example = ['Patna Superclass', 'CAF Jan 2027 B1', '(or: B1;B2;B3 — same centre)', '(blank=Full)', 'Mock Test 5', '2026-09-10', '10:00', '120', 'Objective', 'Full', 'Sets Relations Functions; Limits', '(optional room no)', '(optional)']
+    const rows = [
+      // Row 1: Full syllabus example
+      ['Patna Superclass', '11th 2027 B1', '', '', 'Mock Test 4', '8/24/2026', '1:00 PM', '180', 'Subjective', 'Full', '', '', ''],
+      // Row 2: Part test with chapters
+      ['Patna Superclass', '11th 2027 B1', '', 'Economics', 'Mock Test 4', '8/31/2026', '1:00 PM', '180', 'Subjective', 'Part', 'Introduction to Micro Economics; Consumer Surplus and Ordinal Utility Analysis', '', ''],
+      // Row 3: Multiple batches
+      ['Patna Superclass', '', '11th 2027 B1;11th 2027 B2', '', 'AILET Mock 2', '9/7/2026', '10:00 AM', '120', 'Objective', 'Full', '', '1 - Study Space', ''],
+    ]
     const esc = (c: string) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)
-    const csv = [headers.join(','), example.map(esc).join(',')].join('\n')
+    const lines = [headers.join(','), ...rows.map(r => r.map(esc).join(','))]
+    const csv = lines.join('\n')
     const url = URL.createObjectURL(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' }))
     const a = document.createElement('a'); a.href = url; a.download = 'test-upload-template.csv'; a.click(); URL.revokeObjectURL(url)
   }
@@ -1141,9 +1176,34 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
 
             {bulkMsg && <Alert type={bulkMsg.type}>{bulkMsg.text}</Alert>}
 
-            <div className="mb-4">
-              <BtnSecondary onClick={downloadBulkTemplate} className="mb-3">
-                📥 Download CSV Template
+            {/* Formatting guide */}
+            <div className="mb-4 p-3 bg-neutral-50 border border-neutral-200 rounded-lg text-xs">
+              <p className="font-semibold text-neutral-700 mb-2">📋 CSV Format Guide — Download template for examples</p>
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1">
+                {[
+                  ['Centre', 'Exact centre name', 'Patna Superclass'],
+                  ['Batch', 'Exact batch name', '11th 2027 B1'],
+                  ['Multiple Batches', 'Semicolon-separated, same centre', '11th 2027 B1;11th 2027 B2'],
+                  ['Subject', 'Exact name (blank = Full syllabus)', 'Economics'],
+                  ['Test Name', 'Any name', 'Mock Test 4'],
+                  ['Date', 'MM/DD/YYYY or YYYY-MM-DD', '8/24/2026  or  2026-08-24'],
+                  ['Time', '12-hr or 24-hr', '1:00 PM  or  13:00'],
+                  ['Duration', 'In minutes', '180'],
+                  ['Scope', 'Full or Part', 'Full'],
+                  ['Chapters', 'GTT names, semicolon-separated', 'Consumer Surplus; Demand Analysis'],
+                ].map(([col, fmt, ex]) => (
+                  <div key={col} className="flex gap-1 items-baseline py-0.5">
+                    <span className="font-semibold text-neutral-700 w-32 shrink-0">{col}:</span>
+                    <span className="text-neutral-500">{fmt} — <span className="font-mono text-violet-700">{ex}</span></span>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-amber-600">⚠ Chapter names must exactly match GTT (Concept Tags). Separate multiple chapters with <code className="bg-neutral-200 px-1 rounded">;</code></p>
+            </div>
+
+            <div className="mb-4 flex gap-3">
+              <BtnSecondary onClick={downloadBulkTemplate}>
+                📥 Download Template (with examples)
               </BtnSecondary>
               
               <div>

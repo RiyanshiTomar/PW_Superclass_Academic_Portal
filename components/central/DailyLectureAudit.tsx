@@ -372,11 +372,25 @@ export default function DailyLectureAudit() {
     if (error) {
       setMessage({ type: 'error', text: 'Save failed: ' + error.message })
     } else {
+      // If topic_check is ticked → mark the lecture as conducted in batch_planners.
+      // This creates a permanent record: audit done + topic verified = class conducted.
+      if (e.topic_check) {
+        await supabase
+          .from('batch_planners')
+          .update({
+            status: 'conducted',
+            stage: 'Confirmed',
+          })
+          .eq('id', pid)
+          .neq('status', 'conducted') // don't overwrite already-conducted rows
+      }
+
       setMessage({
         type: 'success',
-        text: audit_status === 'audited' ? '✅ Audited!'
-            : audit_status === 'flagged' ? '🚩 Flagged.'
-            : '⏳ Saved.',
+        text: audit_status === 'audited'
+          ? '✅ Audited! Lecture marked as conducted in planner.'
+          : audit_status === 'flagged' ? '🚩 Flagged.'
+          : '⏳ Saved.',
       })
       // Update local state
       setLectures(prev => prev.map(l =>

@@ -358,15 +358,21 @@ export default function EditPlanner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, activeSubject, search, faculty, tests, liveLinkId])
 
-  // Flat date-wise view: all rows for the active subject sorted by date,
-  // with status colour coding — conducted grey, confirmed green, planned white.
+  // Flat date-wise view: all rows + tests for the active subject sorted by date
   const dateSortedRows = useMemo(() => {
     const q = search.toLowerCase().trim()
-    return rows
+    const lectures = rows
       .filter((r) => r.subject_id === activeSubject && (!q || facName(r.faculty_id).toLowerCase().includes(q) || r.topic_name.toLowerCase().includes(q) || r.chapter.toLowerCase().includes(q)))
       .sort((a, b) => a.planned_date.localeCompare(b.planned_date) || (a.start_time ?? '').localeCompare(b.start_time ?? ''))
+    // Relevant tests for date view (same filter as chapterGroups)
+    const relevantTests = tests.filter(t => {
+      if (!liveLinkId) return false
+      if (t.part_type === 'Full') return true
+      return t.subject_id === activeSubject
+    })
+    return { lectures, tests: relevantTests }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, activeSubject, search, faculty])
+  }, [rows, activeSubject, search, faculty, tests, liveLinkId])
   const availableChaptersToAdd = useMemo(() => {
     const subj = master?.subjects.find((s) => s.id === activeSubject)
     if (!subj) return []
@@ -858,7 +864,7 @@ export default function EditPlanner() {
           {/* ── DATE VIEW ── */}
           {viewMode === 'date' && (
             <Card className="overflow-x-auto p-0">
-              {dateSortedRows.length === 0 ? (
+              {dateSortedRows.lectures.length === 0 && dateSortedRows.tests.length === 0 ? (
                 <p className="p-8 text-center text-sm text-neutral-400">No classes match.</p>
               ) : (
                 <table className="w-full text-left text-sm min-w-[700px]">
@@ -866,7 +872,7 @@ export default function EditPlanner() {
                     <tr className="bg-neutral-50 border-b border-neutral-200 text-xs font-semibold text-neutral-500 uppercase tracking-wider">
                       <th className="px-3 py-2">Date</th>
                       <th className="px-3 py-2">Time</th>
-                      <th className="px-3 py-2">Chapter</th>
+                      <th className="px-3 py-2">Chapter / Test</th>
                       <th className="px-3 py-2 min-w-[180px]">Topic</th>
                       <th className="px-3 py-2">Faculty</th>
                       <th className="px-3 py-2">Status</th>
@@ -874,52 +880,64 @@ export default function EditPlanner() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-neutral-100">
-                    {dateSortedRows.map((r) => (
-                      <tr key={r.key} className={r.status === 'conducted' ? 'bg-neutral-100/70' : r.status === 'confirmed' ? 'bg-emerald-50/60' : ''}>
-                        <td className="px-3 py-2 whitespace-nowrap font-medium text-neutral-800">
-                          {fmtDate(r.planned_date)}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-neutral-500">
-                          {r.start_time ? r.start_time.slice(0, 5) : '—'}
-                        </td>
-                        <td className="px-3 py-2 text-neutral-600 text-xs">{r.chapter}</td>
-                        <td className="px-3 py-2">
-                          {r.status === 'conducted' ? (
-                            <span className="text-neutral-600">{r.topic_name || '—'}</span>
-                          ) : (
-                            <input
-                              list="ep-topics"
-                              value={r.topic_name}
-                              onChange={(e) => updateRow(r.key, { topic_name: e.target.value })}
-                              className="w-full h-7 px-2 bg-neutral-50 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400"
-                              placeholder="Topic…"
-                            />
-                          )}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-neutral-600 text-xs">{facName(r.faculty_id)}</td>
-                        <td className="px-3 py-2">
-                          <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase rounded-full border ${statusPill(r.status)}`}>
-                            {r.status}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 text-right whitespace-nowrap">
-                          {r.status !== 'conducted' && (
-                            <button
-                              onClick={() => setStatus(r.key, 'conducted')}
-                              className="text-xs text-neutral-400 hover:text-neutral-700 mr-2"
-                              title="Mark conducted"
-                            >✓</button>
-                          )}
-                          {r.status !== 'conducted' && (
-                            <button
-                              onClick={() => removeRow(r.key)}
-                              className="text-xs text-red-400 hover:text-red-600"
-                              title="Remove"
-                            >×</button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                    {(() => {
+                      // Merge lectures + tests, sort by date then time
+                      type Item = { type: 'lecture'; r: typeof dateSortedRows.lectures[0] } | { type: 'test'; t: PlannerTest }
+                      const items: Item[] = [
+                        ...dateSortedRows.lectures.map(r => ({ type: 'lecture' as const, r })),
+                        ...dateSortedRows.tests.map(t => ({ type: 'test' as const, t })),
+                      ]
+                      items.sort((a, b) => {
+                        const da = a.type === 'lecture' ? a.r.planned_date : a.t.test_date
+                        const db = b.type === 'lecture' ? b.r.planned_date : b.t.test_date
+                        const dc = da.localeCompare(db)
+                        if (dc !== 0) return dc
+                        const ta = a.type === 'lecture' ? (a.r.start_time ?? '') : a.t.start_time
+                        const tb = b.type === 'lecture' ? (b.r.start_time ?? '') : b.t.start_time
+                        if (ta !== tb) return ta.localeCompare(tb)
+                        return a.type === 'lecture' ? -1 : 1
+                      })
+                      return items.map((item, idx) => {
+                        if (item.type === 'test') {
+                          const t = item.t
+                          return (
+                            <tr key={`test-${t.id}-${idx}`} className="bg-violet-50/60">
+                              <td className="px-3 py-2 whitespace-nowrap font-medium text-violet-700">{fmtDate(t.test_date)}</td>
+                              <td className="px-3 py-2 whitespace-nowrap text-neutral-500">{t.start_time.slice(0,5)} <span className="text-xs">({t.duration_minutes}m)</span></td>
+                              <td className="px-3 py-2 text-xs font-semibold text-violet-700" colSpan={3}>📝 TEST: {t.name} · {t.test_type} · {t.part_type}</td>
+                              <td className="px-3 py-2">
+                                <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase rounded-full border ${t.stage === 'Confirmed' ? 'bg-emerald-100 text-emerald-800 border-emerald-300' : 'bg-amber-100 text-amber-800 border-amber-300'}`}>{t.stage}</span>
+                              </td>
+                              <td />
+                            </tr>
+                          )
+                        }
+                        const r = item.r
+                        return (
+                          <tr key={r.key} className={r.status === 'conducted' ? 'bg-neutral-100/70' : r.status === 'confirmed' ? 'bg-emerald-50/60' : ''}>
+                            <td className="px-3 py-2 whitespace-nowrap font-medium text-neutral-800">{fmtDate(r.planned_date)}</td>
+                            <td className="px-3 py-2 whitespace-nowrap text-neutral-500">{r.start_time ? r.start_time.slice(0, 5) : '—'}</td>
+                            <td className="px-3 py-2 text-neutral-600 text-xs">{r.chapter}</td>
+                            <td className="px-3 py-2">
+                              {r.status === 'conducted' ? (
+                                <span className="text-neutral-600">{r.topic_name || '—'}</span>
+                              ) : (
+                                <input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(r.key, { topic_name: e.target.value })}
+                                  className="w-full h-7 px-2 bg-neutral-50 border border-neutral-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-violet-400" placeholder="Topic…" />
+                              )}
+                            </td>
+                            <td className="px-3 py-2 whitespace-nowrap text-neutral-600 text-xs">{facName(r.faculty_id)}</td>
+                            <td className="px-3 py-2">
+                              <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase rounded-full border ${statusPill(r.status)}`}>{r.status}</span>
+                            </td>
+                            <td className="px-3 py-2 text-right whitespace-nowrap">
+                              {r.status !== 'conducted' && <button onClick={() => setStatus(r.key, 'conducted')} className="text-xs text-neutral-400 hover:text-neutral-700 mr-2" title="Mark conducted">✓</button>}
+                              {r.status !== 'conducted' && <button onClick={() => removeRow(r.key)} className="text-xs text-red-400 hover:text-red-600" title="Remove">×</button>}
+                            </td>
+                          </tr>
+                        )
+                      })
+                    })()}
                   </tbody>
                 </table>
               )}

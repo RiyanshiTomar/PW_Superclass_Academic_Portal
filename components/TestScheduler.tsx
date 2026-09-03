@@ -687,7 +687,13 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       if (scope === 'Part') {
         if (!subjectName) errors.push('Subject required for Part tests')
         else {
-          const subject = subjects.find(s => norm(s.name) === norm(subjectName))
+          // Match subject within the batch's program first — avoids wrong subject
+          // when multiple programs have the same subject name (e.g. "Economics")
+          const batchProgId = batchId ? batches.find(b => b.id === batchId)?.program_id : null
+          const subject = batchProgId
+            ? subjects.find(s => norm(s.name) === norm(subjectName) && s.program_id === batchProgId)
+              ?? subjects.find(s => norm(s.name) === norm(subjectName))
+            : subjects.find(s => norm(s.name) === norm(subjectName))
           if (!subject) errors.push(`Subject "${subjectName}" not found`)
           else subjectId = subject.id
         }
@@ -703,9 +709,17 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         const subjectChapters = await chaptersOfSubject(subjectId)
         chapterIds = chapterNameList.map(cn => subjectChapters.find(ch => norm(ch.name) === norm(cn))?.id).filter(Boolean) as string[]
         const missing = chapterNameList.filter(cn => !subjectChapters.some(ch => norm(ch.name) === norm(cn)))
-        if (missing.length > 0) errors.push(`Chapters not in GTT: ${missing.join(', ')}`)
+        if (missing.length > 0) {
+          const available = subjectChapters.slice(0, 5).map(c => c.name).join('; ')
+          errors.push(`Chapters not found in GTT: "${missing.join('", "')}" — GTT chapters are: ${available}${subjectChapters.length > 5 ? '...' : ''}`)
+        }
+      } else if (scope === 'Part' && !chapterNames && subjectId) {
+        // Show available chapters so team knows what to put
+        const subjectChapters = await chaptersOfSubject(subjectId)
+        const available = subjectChapters.slice(0, 5).map(c => c.name).join('; ')
+        errors.push(`Chapters required for Part test — GTT chapters: ${available}${subjectChapters.length > 5 ? '...' : ''}`)
       } else if (scope === 'Part' && !chapterNames) {
-        errors.push('Chapters required for Part scope (use GTT chapter names)')
+        errors.push('Chapters required for Part scope (use GTT chapter names from Admin → Syllabus)')
       }
 
       let facultyId: string | null = null
@@ -722,35 +736,32 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       })
     }
 
-    // Now validate slots and assign rooms
+    // Validate slots and assign rooms
     for (const row of rows) {
       if (row.status === 'error' || !row.date || !row.batchId) continue
 
-      // Check for test-vs-test clash first
       const primaryBatch = batches.find(b => b.id === row.batchId)
       if (!primaryBatch) continue
 
+      // Check test-vs-test clash WITH testPriority=true — classes/lectures do NOT block
+      // (they will be shifted automatically on import, just like the single-test flow)
       const clash = await validateTestSlot(supabase, {
         batchId: row.batchId, date: row.date, startTime: row.time!, durationMinutes: row.duration,
         facultyId: row.facultyId, classroomId: row.classroomId
-      })
+      }, { testPriority: true })
       if (clash) {
         row.status = 'error'
         row.errors.push(`Test clash: ${clash}`)
         continue
       }
 
-      // Check for class/lecture clash
+      // Check for class/lecture clash — mark as 'shift' (will shift lectures on import)
       const classClash = await getClashingClass(supabase, {
         batchId: row.batchId, date: row.date, startTime: row.time!, durationMinutes: row.duration
       })
       if (classClash) {
         row.status = 'shift'
-        const endTime = formatTime(
-          new Date(new Date(`2000-01-01T${classClash.start_time}:00`).getTime() + classClash.duration_minutes * 60000)
-            .toTimeString().slice(0, 5)
-        )
-        row.clashNote = `Clashes with ${classClash.subject_name} (${formatTime(classClash.start_time)}–${endTime})`
+        row.clashNote = `Clashes with ${classClash.subject_name} (${formatTime(classClash.start_time)}) — lectures will shift to buffers`
       }
 
       // Auto-assign room — use classrooms state (not formRooms which is form-specific)

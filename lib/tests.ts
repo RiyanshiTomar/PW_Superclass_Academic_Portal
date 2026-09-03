@@ -678,16 +678,42 @@ export type PlannerTest = {
   faculty_id: string | null
 }
 
-/** Get all tests for a batch to display inline in the planner view. */
+/** Get all tests for a batch to display inline in the planner view.
+ *  Also includes tests where this batch is a secondary batch (multi-batch tests). */
 export async function getTestsForBatch(supabase: SupabaseClient, batchId: string): Promise<PlannerTest[]> {
-  const { data } = await supabase
+  // Primary batch tests
+  const { data: primary } = await supabase
     .from('test_schedules')
     .select('id, name, test_date, start_time, duration_minutes, test_type, part_type, stage, subject_id, classroom_id, faculty_id')
     .eq('batch_id', batchId)
     .order('test_date')
     .order('start_time')
-  
-  return (data ?? []) as PlannerTest[]
+
+  // Multi-batch tests where this batch is a secondary mapping
+  const { data: mappings } = await supabase
+    .from('test_batch_mappings')
+    .select('test_id')
+    .eq('batch_id', batchId)
+
+  let secondary: PlannerTest[] = []
+  if (mappings && mappings.length > 0) {
+    const mappedIds = mappings.map((m: { test_id: string }) => m.test_id)
+    const primaryIds = new Set((primary ?? []).map((t: { id: string }) => t.id))
+    const newIds = mappedIds.filter((id: string) => !primaryIds.has(id))
+    if (newIds.length > 0) {
+      const { data: secData } = await supabase
+        .from('test_schedules')
+        .select('id, name, test_date, start_time, duration_minutes, test_type, part_type, stage, subject_id, classroom_id, faculty_id')
+        .in('id', newIds)
+        .order('test_date')
+        .order('start_time')
+      secondary = (secData ?? []) as PlannerTest[]
+    }
+  }
+
+  const all = [...(primary ?? []), ...secondary] as PlannerTest[]
+  all.sort((a, b) => a.test_date.localeCompare(b.test_date) || a.start_time.localeCompare(b.start_time))
+  return all
 }
 
 // --- Comprehensive Batch Progress Tracking --------------------------------

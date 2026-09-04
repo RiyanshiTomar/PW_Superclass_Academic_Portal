@@ -73,6 +73,12 @@ function normalizeTime(raw: string): string | null {
   return null
 }
 const norm = (s: string) => s.toLowerCase().trim()
+  .replace(/[''`]/g, "'")           // normalize apostrophes
+  .replace(/[–—]/g, '-')            // normalize dashes
+  .replace(/responsibilities/g, 'responsibility')
+  .replace(/transactions/g, 'transaction')
+  .replace(/statements/g, 'statement')
+  .replace(/\s+/g, ' ')
 
 type BulkRow = {
   line: number
@@ -573,7 +579,14 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
 
   const colIndex = (headers: string[], aliases: string[]) => {
     const h = headers.map((x) => x.toLowerCase().trim())
-    for (const a of aliases) { const i = h.indexOf(a); if (i >= 0) return i }
+    for (const a of aliases) {
+      // Exact match first
+      const i = h.indexOf(a)
+      if (i >= 0) return i
+      // Starts-with match (handles extra suffixes like "(GTT names; semicolon-separated)")
+      const j = h.findIndex(col => col.startsWith(a) || a.startsWith(col))
+      if (j >= 0) return j
+    }
     return -1
   }
 
@@ -613,7 +626,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       duration: colIndex(headers, ['duration', 'duration (min)', 'duration(min)', 'minutes']),
       type: colIndex(headers, ['type', 'test type']),
       scope: colIndex(headers, ['scope', 'part type', 'part']),
-      chapters: colIndex(headers, ['chapters', 'chapter']),
+      chapters: colIndex(headers, ['chapters (gtt names; semicolon-separated)', 'chapters (gtt names, semicolon-separated)', 'chapters', 'chapter']),
       room: colIndex(headers, ['room', 'room no', 'classroom']),
       invig: colIndex(headers, ['invigilator email', 'invigilator', 'faculty email', 'faculty']),
     }
@@ -687,13 +700,16 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       if (scope === 'Part') {
         if (!subjectName) errors.push('Subject required for Part tests')
         else {
-          // Match subject within the batch's program first — avoids wrong subject
-          // when multiple programs have the same subject name (e.g. "Economics")
-          const batchProgId = batchId ? batches.find(b => b.id === batchId)?.program_id : null
-          const subject = batchProgId
-            ? subjects.find(s => norm(s.name) === norm(subjectName) && s.program_id === batchProgId)
-              ?? subjects.find(s => norm(s.name) === norm(subjectName))
-            : subjects.find(s => norm(s.name) === norm(subjectName))
+          const batchProgId = batchId
+            ? batches.find(b => b.id === batchId)?.program_id
+            : batchIds.length > 0
+              ? batches.find(b => b.id === batchIds[0])?.program_id
+              : null
+          // Match subject: prefer batch's program, fallback to any match
+          const subject = (batchProgId
+            ? subjects.find(s => s.name.toLowerCase().trim() === subjectName.toLowerCase().trim() && s.program_id === batchProgId)
+            : null)
+            ?? subjects.find(s => s.name.toLowerCase().trim() === subjectName.toLowerCase().trim())
           if (!subject) errors.push(`Subject "${subjectName}" not found`)
           else subjectId = subject.id
         }
@@ -707,14 +723,33 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       if (scope === 'Part' && chapterNames && subjectId) {
         const chapterNameList = chapterNames.split(';').map(n => n.trim()).filter(Boolean)
         const subjectChapters = await chaptersOfSubject(subjectId)
-        chapterIds = chapterNameList.map(cn => subjectChapters.find(ch => norm(ch.name) === norm(cn))?.id).filter(Boolean) as string[]
-        const missing = chapterNameList.filter(cn => !subjectChapters.some(ch => norm(ch.name) === norm(cn)))
+        const found: string[] = []
+        const missing: string[] = []
+        for (const cn of chapterNameList) {
+          const normCn = norm(cn)
+          // 1. Exact match
+          // 2. Substring match (one contains the other)
+          // 3. Word-overlap match — if 60%+ words overlap (handles "Theory Based" vs "Theory Base of")
+          const wordOverlap = (a: string, b: string) => {
+            const wa = new Set(a.split(/\s+/).filter(w => w.length > 2))
+            const wb = new Set(b.split(/\s+/).filter(w => w.length > 2))
+            if (wa.size === 0 || wb.size === 0) return 0
+            let common = 0
+            for (const w of wa) if (wb.has(w)) common++
+            return common / Math.min(wa.size, wb.size)
+          }
+          const match = subjectChapters.find(ch => norm(ch.name) === normCn)
+            ?? subjectChapters.find(ch => norm(ch.name).includes(normCn) || normCn.includes(norm(ch.name)))
+            ?? subjectChapters.find(ch => wordOverlap(normCn, norm(ch.name)) >= 0.6)
+          if (match) found.push(match.id)
+          else missing.push(cn)
+        }
         if (missing.length > 0) {
           const available = subjectChapters.slice(0, 5).map(c => c.name).join('; ')
-          errors.push(`Chapters not found in GTT: "${missing.join('", "')}" — GTT chapters are: ${available}${subjectChapters.length > 5 ? '...' : ''}`)
+          errors.push(`Chapters not found in GTT: "${missing.join('", "')}" — GTT chapters: ${available}${subjectChapters.length > 5 ? '...' : ''}`)
         }
+        chapterIds = found
       } else if (scope === 'Part' && !chapterNames && subjectId) {
-        // Show available chapters so team knows what to put
         const subjectChapters = await chaptersOfSubject(subjectId)
         const available = subjectChapters.slice(0, 5).map(c => c.name).join('; ')
         errors.push(`Chapters required for Part test — GTT chapters: ${available}${subjectChapters.length > 5 ? '...' : ''}`)

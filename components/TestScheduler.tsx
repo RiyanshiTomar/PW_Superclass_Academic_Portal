@@ -700,18 +700,64 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       if (scope === 'Part') {
         if (!subjectName) errors.push('Subject required for Part tests')
         else {
-          const batchProgId = batchId
-            ? batches.find(b => b.id === batchId)?.program_id
-            : batchIds.length > 0
-              ? batches.find(b => b.id === batchIds[0])?.program_id
+          // Find subject by fetching ALL subjects with this name from DB
+          // then pick the best match by checking which one has chapters matching the CSV
+          const { data: allSubjectsWithName } = await supabase
+            .from('subjects')
+            .select('id, name, program_id')
+            .ilike('name', subjectName.trim())
+          
+          if (!allSubjectsWithName || allSubjectsWithName.length === 0) {
+            errors.push(`Subject "${subjectName}" not found in GTT`)
+          } else if (allSubjectsWithName.length === 1) {
+            subjectId = allSubjectsWithName[0].id
+          } else {
+            // Multiple subjects with same name (different programs)
+            // Pick the one whose chapters best match the CSV chapters
+            const batchProgId = batchId
+              ? batches.find(b => b.id === batchId)?.program_id
+              : batchIds.length > 0
+                ? batches.find(b => b.id === batchIds[0])?.program_id
+                : null
+            
+            // 1st: exact program match
+            const progMatch = batchProgId
+              ? allSubjectsWithName.find(s => s.program_id === batchProgId)
               : null
-          // Match subject: prefer batch's program, fallback to any match
-          const subject = (batchProgId
-            ? subjects.find(s => s.name.toLowerCase().trim() === subjectName.toLowerCase().trim() && s.program_id === batchProgId)
-            : null)
-            ?? subjects.find(s => s.name.toLowerCase().trim() === subjectName.toLowerCase().trim())
-          if (!subject) errors.push(`Subject "${subjectName}" not found`)
-          else subjectId = subject.id
+            
+            if (progMatch) {
+              subjectId = progMatch.id
+            } else if (chapterNames) {
+              // 2nd: find which subject's chapters best match the CSV chapters
+              const csvChapList = chapterNames.split(';').map(n => n.trim()).filter(Boolean)
+              const firstCsvChap = norm(csvChapList[0] || '')
+              let bestSubjId: string | null = null
+              let bestScore = 0
+              
+              for (const subj of allSubjectsWithName) {
+                const { data: chaps } = await supabase
+                  .from('chapters')
+                  .select('name')
+                  .eq('subject_id', subj.id)
+                  .limit(10)
+                if (!chaps?.length) continue
+                // Count how many CSV chapters match GTT chapters
+                let score = 0
+                for (const csvCh of csvChapList.slice(0, 5)) {
+                  const normCsv = norm(csvCh)
+                  if (chaps.some(ch => norm(ch.name).includes(normCsv) || normCsv.includes(norm(ch.name)) || 
+                    norm(ch.name).split(' ').filter(w=>w.length>2).some(w => normCsv.includes(w)))) {
+                    score++
+                  }
+                }
+                if (score > bestScore) { bestScore = score; bestSubjId = subj.id }
+              }
+              subjectId = bestSubjId || allSubjectsWithName[0].id
+            } else {
+              // No chapters to compare — use first match
+              subjectId = allSubjectsWithName[0].id
+            }
+          }
         }
       }
 

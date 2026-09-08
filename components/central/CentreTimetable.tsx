@@ -111,6 +111,25 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
       if (cancelled) return
       if (schedRes.error) { setErr(schedRes.error.message); setLoadingDay(false); return }
 
+      // Also fetch tests linked via test_batch_mappings (multi-batch tests)
+      const { data: mappedTestIds } = await supabase
+        .from('test_batch_mappings')
+        .select('test_id')
+        .in('batch_id', batchIds)
+      if (mappedTestIds && mappedTestIds.length > 0) {
+        const existingIds = new Set((testRes.data ?? []).map((t: { batch_id: string }) => t.batch_id))
+        const newIds = mappedTestIds.map((m: { test_id: string }) => m.test_id)
+        if (newIds.length > 0) {
+          const { data: mappedTests } = await supabase
+            .from('test_schedules')
+            .select('start_time, duration_minutes, classroom_id, name, test_type, batch_id, subjects(name), app_users!test_schedules_faculty_id_fkey(full_name)')
+            .in('id', newIds)
+            .eq('test_date', date)
+            .not('start_time', 'is', null)
+          if (mappedTests) (testRes.data as unknown[]) = [...(testRes.data ?? []), ...mappedTests.filter((t: { batch_id: string }) => !existingIds.has(t.batch_id))]
+        }
+      }
+
       // Build a set of valid (batch_id + subject_name + start_time) slots from
       // today's batch_schedules. Planner rows that don't match a valid slot for
       // their batch+subject on this weekday are ghost entries (stale from an old

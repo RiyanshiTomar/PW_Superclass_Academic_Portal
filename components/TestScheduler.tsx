@@ -819,15 +819,16 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
 
     // Validate slots and assign rooms
     for (const row of rows) {
-      if (row.status === 'error' || !row.date || !row.batchId) continue
+      if (row.status === 'error' || !row.date || (!row.batchId && row.batchIds.length === 0)) continue
+
+      // For multi-batch rows, batchId may be null — use first of batchIds
+      if (!row.batchId && row.batchIds.length > 0) row.batchId = row.batchIds[0]
 
       const primaryBatch = batches.find(b => b.id === row.batchId)
       if (!primaryBatch) continue
 
-      // Check test-vs-test clash WITH testPriority=true — classes/lectures do NOT block
-      // (they will be shifted automatically on import, just like the single-test flow)
       const clash = await validateTestSlot(supabase, {
-        batchId: row.batchId, date: row.date, startTime: row.time!, durationMinutes: row.duration,
+        batchId: row.batchId!, date: row.date, startTime: row.time!, durationMinutes: row.duration,
         facultyId: row.facultyId, classroomId: row.classroomId
       }, { testPriority: true })
       if (clash) {
@@ -836,9 +837,8 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         continue
       }
 
-      // Check for class/lecture clash — mark as 'shift' (will shift lectures on import)
       const classClash = await getClashingClass(supabase, {
-        batchId: row.batchId, date: row.date, startTime: row.time!, durationMinutes: row.duration
+        batchId: row.batchId!, date: row.date, startTime: row.time!, durationMinutes: row.duration
       })
       if (classClash) {
         row.status = 'shift'
@@ -859,7 +859,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       // Syllabus completion check for Part tests
       if (row.scope === 'Part' && row.subjectId && row.chapterIds.length > 0) {
         const comp = await getTestCompletion(supabase, {
-          batchId: row.batchId,
+          batchId: row.batchId!,
           byDate: row.date,
           partType: 'Part',
           subjectId: row.subjectId,
@@ -882,7 +882,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       if (row.status === 'error') { skipped++; continue }
       try {
         const input: TestInput = {
-          batch_id: row.batchId!,
+          batch_id: row.batchId || row.batchIds[0],
           subject_id: row.subjectId,
           classroom_id: row.classroomId,
           faculty_id: row.facultyId,
@@ -894,7 +894,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
           part_type: row.scope,
           created_by: appUser?.id ?? null,
         }
-        const testPriority = row.status === 'shift'
+        const testPriority = true // Always use test priority — classes/lectures will be shifted
         const res = await createTest(supabase, input, row.chapterIds, { testPriority })
         if (res.ok) {
           // Always confirm immediately — no faculty send/confirm flow
@@ -907,10 +907,12 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
           }
           created++
         } else {
+          console.error('createTest failed row', row.line, row.name, row.date, ':', res.error)
           errCount++
         }
-      } catch (err) {
+      } catch (err: unknown) {
         errCount++
+        console.error('bulkImport error for row', row.line, ':', err instanceof Error ? err.message : err)
       }
     }
     setBulkBusy(false)

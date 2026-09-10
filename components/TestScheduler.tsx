@@ -86,14 +86,16 @@ type BulkRow = {
   batchId: string | null
   batchIds: string[]  // Add support for multiple batches
   batchLabel: string
-  subjectId: string | null
+  subjectId: string | null        // null when multi-subject Part test
+  subjectIds: string[]            // all resolved subject IDs (1 for single, N for multi)
   scope: 'Full' | 'Part'
   name: string
   date: string | null
   time: string | null
   duration: number
   testType: string
-  chapterIds: string[]
+  chapterIds: string[]            // combined chapters from ALL subjects
+  subjectChapterMap: { subjectId: string; subjectName: string; chapterIds: string[]; chapterNames: string[] }[]
   facultyId: string | null
   classroomId: string | null
   roomAutoAssigned: boolean  // true if room was auto-picked (not in CSV)
@@ -561,14 +563,16 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   }
   // ---- Bulk CSV upload -----------------------------------------------------
   const downloadBulkTemplate = () => {
-    const headers = ['Centre', 'Batch', 'Multiple Batches (same centre)', 'Subject', 'Test Name', 'Date', 'Time', 'Duration', 'Type', 'Scope', 'Chapters (GTT names; semicolon-separated)', 'Room', 'Invigilator Email']
+    const headers = ['Centre', 'Batch', 'Multiple Batches (same centre)', 'Subject', 'Test Name', 'Date', 'Time', 'Duration', 'Type', 'Scope', 'Chapters (GTT names; use || between subjects)', 'Room', 'Invigilator Email']
     const rows = [
-      // Row 1: Full syllabus example
+      // Row 1: Full syllabus, single batch
       ['Patna Superclass', '11th 2027 B1', '', '', 'Mock Test 4', '8/24/2026', '1:00 PM', '180', 'Subjective', 'Full', '', '', ''],
-      // Row 2: Part test with chapters
-      ['Patna Superclass', '11th 2027 B1', '', 'Economics', 'Mock Test 4', '8/31/2026', '1:00 PM', '180', 'Subjective', 'Part', 'Introduction to Micro Economics; Consumer Surplus and Ordinal Utility Analysis', '', ''],
-      // Row 3: Multiple batches
-      ['Patna Superclass', '', '11th 2027 B1;11th 2027 B2', '', 'AILET Mock 2', '9/7/2026', '10:00 AM', '120', 'Objective', 'Full', '', '1 - Study Space', ''],
+      // Row 2: Single-subject Part test
+      ['Patna Superclass', '11th 2027 B1', '', 'Economics', 'Economics Part Test 1', '8/31/2026', '1:00 PM', '120', 'Subjective', 'Part', 'Introduction to Micro Economics;Consumer Surplus and Ordinal Utility Analysis', '', ''],
+      // Row 3: Multi-subject Part test (Physics + Chemistry) — subjects split by ";", chapter groups split by "||"
+      ['Patna Superclass', '11th 2027 B1', '', 'Physics;Chemistry', 'Science Combined Test', '9/7/2026', '10:00 AM', '180', 'Objective', 'Part', 'Units and Measurement;Motion in a Straight Line||Some Basic Concepts of Chemistry;Atomic Structure', '', ''],
+      // Row 4: Multi-subject across multiple batches
+      ['Patna Superclass', '', '11th 2027 B1;11th 2027 B2', 'Maths;Physics', 'AILET Mock 2', '9/14/2026', '10:00 AM', '120', 'Objective', 'Part', 'Sets and Functions;Trigonometry||Units and Measurement;Laws of Motion', '1 - Study Space', ''],
     ]
     const esc = (c: string) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)
     const lines = [headers.join(','), ...rows.map(r => r.map(esc).join(','))]
@@ -640,14 +644,14 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       const centreName   = ci.centre >= 0 ? cells[ci.centre]?.trim() ?? '' : ''
       const batchName    = ci.batch >= 0  ? cells[ci.batch]?.trim() ?? '' : ''
       const multiBatchNames = ci.multiBatch >= 0 ? cells[ci.multiBatch]?.trim() ?? '' : ''
-      const subjectName  = cells[ci.subject]?.trim() ?? ''
+      const subjectName  = ci.subject >= 0 ? (cells[ci.subject]?.trim() ?? '') : ''
       const name         = cells[ci.name]?.trim() ?? ''
       const date         = normalizeDate(cells[ci.date]?.trim() ?? '')
       const time         = normalizeTime(cells[ci.time]?.trim() ?? '') ?? '10:00'
       const duration     = parseInt(cells[ci.duration]?.trim() ?? '60', 10)
       const type         = cells[ci.type]?.trim() || 'Objective'
       const scope        = cells[ci.scope]?.trim() === 'Part' ? 'Part' : 'Full'
-      const chapterNames = cells[ci.chapters]?.trim() ?? ''
+      const chapterNames = ci.chapters >= 0 ? (cells[ci.chapters]?.trim() ?? '') : ''
       const roomHint = cells[ci.room]?.trim() ?? ''
       const invigEmail = cells[ci.invig]?.trim() ?? ''
 
@@ -696,111 +700,138 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         errors.push('Batch name required (Batch column or Multiple Batches column)')
       }
 
-      let subjectId: string | null = null
-      if (scope === 'Part') {
-        if (!subjectName) errors.push('Subject required for Part tests')
-        else {
-          // Find subject by fetching ALL subjects with this name from DB
-          // then pick the best match by checking which one has chapters matching the CSV
-          const { data: allSubjectsWithName } = await supabase
-            .from('subjects')
-            .select('id, name, program_id')
-            .ilike('name', subjectName.trim())
-          
-          if (!allSubjectsWithName || allSubjectsWithName.length === 0) {
-            errors.push(`Subject "${subjectName}" not found in GTT`)
-          } else if (allSubjectsWithName.length === 1) {
-            subjectId = allSubjectsWithName[0].id
-          } else {
-            // Multiple subjects with same name (different programs)
-            // Pick the one whose chapters best match the CSV chapters
-            const batchProgId = batchId
-              ? batches.find(b => b.id === batchId)?.program_id
-              : batchIds.length > 0
-                ? batches.find(b => b.id === batchIds[0])?.program_id
-                : null
-            
-            // 1st: exact program match
-            const progMatch = batchProgId
-              ? allSubjectsWithName.find(s => s.program_id === batchProgId)
-              : null
-            
-            if (progMatch) {
-              subjectId = progMatch.id
-            } else if (chapterNames) {
-              // 2nd: find which subject's chapters best match the CSV chapters
-              const csvChapList = chapterNames.split(';').map(n => n.trim()).filter(Boolean)
-              const firstCsvChap = norm(csvChapList[0] || '')
-              let bestSubjId: string | null = null
-              let bestScore = 0
-              
-              for (const subj of allSubjectsWithName) {
-                const { data: chaps } = await supabase
-                  .from('chapters')
-                  .select('name')
-                  .eq('subject_id', subj.id)
-                  .limit(10)
-                if (!chaps?.length) continue
-                // Count how many CSV chapters match GTT chapters
-                let score = 0
-                for (const csvCh of csvChapList.slice(0, 5)) {
-                  const normCsv = norm(csvCh)
-                  if (chaps.some(ch => norm(ch.name).includes(normCsv) || normCsv.includes(norm(ch.name)) || 
-                    norm(ch.name).split(' ').filter(w=>w.length>2).some(w => normCsv.includes(w)))) {
-                    score++
-                  }
-                }
-                if (score > bestScore) { bestScore = score; bestSubjId = subj.id }
-              }
-              subjectId = bestSubjId || allSubjectsWithName[0].id
-            } else {
-              // No chapters to compare — use first match
-              subjectId = allSubjectsWithName[0].id
-            }
-          }
-        }
-      }
-
       if (!name) errors.push('Test name is required')
       if (!date) errors.push('Invalid date format')
       if (isNaN(duration) || duration < 15 || duration > 480) errors.push('Duration must be 15-480 minutes')
 
-      let chapterIds: string[] = []
-      if (scope === 'Part' && chapterNames && subjectId) {
-        const chapterNameList = chapterNames.split(';').map(n => n.trim()).filter(Boolean)
-        const subjectChapters = await chaptersOfSubject(subjectId)
-        const found: string[] = []
-        const missing: string[] = []
-        for (const cn of chapterNameList) {
-          const normCn = norm(cn)
-          // 1. Exact match
-          // 2. Substring match (one contains the other)
-          // 3. Word-overlap match — if 60%+ words overlap (handles "Theory Based" vs "Theory Base of")
-          const wordOverlap = (a: string, b: string) => {
-            const wa = new Set(a.split(/\s+/).filter(w => w.length > 2))
-            const wb = new Set(b.split(/\s+/).filter(w => w.length > 2))
-            if (wa.size === 0 || wb.size === 0) return 0
-            let common = 0
-            for (const w of wa) if (wb.has(w)) common++
-            return common / Math.min(wa.size, wb.size)
+      // ---------- subject + chapter resolution (single OR multi) ----------
+      // Multi-subject syntax:
+      //   Subject column  : "Physics;Chemistry"
+      //   Chapters column : "Chap1A;Chap1B||ChapA;ChapB"
+      //   "||" separates chapter groups — one group per subject, in the same
+      //   order as the subjects. A group can be empty ("Physics;Chem||;ChapA")
+      //   if you want all-chapters for that subject (not recommended — use Full
+      //   scope instead).
+      //
+      // Single-subject (legacy): Subject = "Physics", Chapters = "Chap1;Chap2"
+
+      const wordOverlap = (a: string, b: string) => {
+        const wa = new Set(a.split(/\s+/).filter(w => w.length > 2))
+        const wb = new Set(b.split(/\s+/).filter(w => w.length > 2))
+        if (wa.size === 0 || wb.size === 0) return 0
+        let common = 0
+        for (const w of wa) if (wb.has(w)) common++
+        return common / Math.min(wa.size, wb.size)
+      }
+
+      // Helper: resolve a single subject name → id (uses program/chapter heuristics)
+      const resolveSubjectId = async (sName: string, chapHint: string): Promise<string | null> => {
+        const { data: found } = await supabase
+          .from('subjects').select('id, name, program_id').ilike('name', sName.trim())
+        if (!found || found.length === 0) return null
+        if (found.length === 1) return found[0].id
+        // Disambiguate by program first, then chapter matching
+        const batchProgId = batchId
+          ? batches.find(b => b.id === batchId)?.program_id
+          : batchIds.length > 0 ? batches.find(b => b.id === batchIds[0])?.program_id : null
+        const progMatch = batchProgId ? found.find(s => s.program_id === batchProgId) : null
+        if (progMatch) return progMatch.id
+        if (chapHint) {
+          const csvChaps = chapHint.split(';').map(n => n.trim()).filter(Boolean)
+          let bestId: string | null = null, bestScore = 0
+          for (const subj of found) {
+            const { data: chaps } = await supabase.from('chapters').select('name').eq('subject_id', subj.id).limit(10)
+            if (!chaps?.length) continue
+            let score = 0
+            for (const csvCh of csvChaps.slice(0, 5)) {
+              const nc = norm(csvCh)
+              if (chaps.some(ch => norm(ch.name).includes(nc) || nc.includes(norm(ch.name)) ||
+                norm(ch.name).split(' ').filter(w => w.length > 2).some(w => nc.includes(w)))) score++
+            }
+            if (score > bestScore) { bestScore = score; bestId = subj.id }
           }
+          return bestId || found[0].id
+        }
+        return found[0].id
+      }
+
+      // Helper: match a list of chapter-name strings to DB chapter IDs for one subject
+      const resolveChapterIds = async (
+        sid: string, sDisplayName: string, chapNameList: string[]
+      ): Promise<{ found: string[]; missing: string[]; availableHint: string }> => {
+        const subjectChapters = await chaptersOfSubject(sid)
+        const found: string[] = [], missing: string[] = []
+        for (const cn of chapNameList) {
+          const normCn = norm(cn)
           const match = subjectChapters.find(ch => norm(ch.name) === normCn)
             ?? subjectChapters.find(ch => norm(ch.name).includes(normCn) || normCn.includes(norm(ch.name)))
             ?? subjectChapters.find(ch => wordOverlap(normCn, norm(ch.name)) >= 0.6)
           if (match) found.push(match.id)
           else missing.push(cn)
         }
-        if (missing.length > 0) {
-          const available = subjectChapters.slice(0, 5).map(c => c.name).join('; ')
-          errors.push(`Chapters not found in GTT: "${missing.join('", "')}" — GTT chapters: ${available}${subjectChapters.length > 5 ? '...' : ''}`)
+        const availableHint = subjectChapters.slice(0, 5).map(c => c.name).join('; ') + (subjectChapters.length > 5 ? '...' : '')
+        return { found, missing, availableHint }
+      }
+
+      // Split subject names and chapter groups
+      const subjectNameList = scope === 'Part'
+        ? subjectName.split(';').map(s => s.trim()).filter(Boolean)
+        : []
+      // "||" separates chapter groups matching each subject; ";" separates chapters within a group
+      const chapterGroups: string[] = scope === 'Part'
+        ? chapterNames.split('||').map(g => g.trim())
+        : []
+      // Pad groups so every subject has a corresponding group (empty string = no chapters specified)
+      while (chapterGroups.length < subjectNameList.length) chapterGroups.push('')
+
+      let subjectId: string | null = null
+      const subjectIds: string[] = []
+      const subjectChapterMap: BulkRow['subjectChapterMap'] = []
+      let chapterIds: string[] = []
+
+      if (scope === 'Part') {
+        if (subjectNameList.length === 0) {
+          errors.push('Subject required for Part tests')
+        } else {
+          for (let si = 0; si < subjectNameList.length; si++) {
+            const sName = subjectNameList[si]
+            const chapGroup = chapterGroups[si] ?? ''
+
+            const sid = await resolveSubjectId(sName, chapGroup)
+            if (!sid) {
+              errors.push(`Subject "${sName}" not found in GTT`)
+              continue
+            }
+            subjectIds.push(sid)
+
+            const chapNameList = chapGroup.split(';').map(n => n.trim()).filter(Boolean)
+            if (chapNameList.length === 0) {
+              // No chapters specified for this subject
+              const subjectChapters = await chaptersOfSubject(sid)
+              const availableHint = subjectChapters.slice(0, 5).map(c => c.name).join('; ') + (subjectChapters.length > 5 ? '...' : '')
+              errors.push(`Chapters required for "${sName}" — GTT chapters: ${availableHint}`)
+              continue
+            }
+
+            const { found, missing, availableHint } = await resolveChapterIds(sid, sName, chapNameList)
+            if (missing.length > 0) {
+              errors.push(`[${sName}] Chapters not found in GTT: "${missing.join('", "')}" — GTT chapters: ${availableHint}`)
+            }
+            if (found.length > 0) {
+              subjectChapterMap.push({
+                subjectId: sid,
+                subjectName: sName,
+                chapterIds: found,
+                // keep only the names that successfully resolved (same-index as found)
+                chapterNames: chapNameList.filter((cn) => !missing.includes(cn)),
+              })
+              chapterIds.push(...found)
+            }
+          }
+
+          // For the test_schedules record: null when multi-subject, single id when one subject
+          subjectId = subjectIds.length === 1 ? subjectIds[0] : null
         }
-        chapterIds = found
-      } else if (scope === 'Part' && !chapterNames && subjectId) {
-        const subjectChapters = await chaptersOfSubject(subjectId)
-        const available = subjectChapters.slice(0, 5).map(c => c.name).join('; ')
-        errors.push(`Chapters required for Part test — GTT chapters: ${available}${subjectChapters.length > 5 ? '...' : ''}`)
-      } else if (scope === 'Part' && !chapterNames) {
-        errors.push('Chapters required for Part scope (use GTT chapter names from Admin → Syllabus)')
       }
 
       let facultyId: string | null = null
@@ -811,7 +842,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       }
 
       rows.push({
-        line: i + 1, raw: cells, batchId, batchIds, batchLabel, subjectId, scope, name, date, time, duration, testType: type,
+        line: i + 1, raw: cells, batchId, batchIds, batchLabel,
+        subjectId, subjectIds, subjectChapterMap,
+        scope, name, date, time, duration, testType: type,
         chapterIds, facultyId, classroomId: null, roomAutoAssigned: false, errors,
         status: errors.length ? 'error' : 'free', clashNote: null, completion: null,
       })
@@ -883,6 +916,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       try {
         const input: TestInput = {
           batch_id: row.batchId || row.batchIds[0],
+          // Multi-subject Part tests store subject_id as null on the main record;
+          // chapters are attached via test_chapters (one row per chapter, covering
+          // all subjects). Single-subject Part tests keep their subject_id set.
           subject_id: row.subjectId,
           classroom_id: row.classroomId,
           faculty_id: row.facultyId,
@@ -895,19 +931,24 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
           created_by: appUser?.id ?? null,
         }
         const testPriority = true // Always use test priority — classes/lectures will be shifted
+        // chapterIds already contains the combined list of all subjects' chapters
         const res = await createTest(supabase, input, row.chapterIds, { testPriority })
         if (res.ok) {
-          // Always confirm immediately — no faculty send/confirm flow
-          const testId = (res as any).id
+          const testId = (res as { id?: string }).id
           if (testId) {
+            // Always confirm immediately — no faculty send/confirm flow
             await setTestStage(supabase, testId, 'Confirmed')
+            // Multi-batch: map remaining batches to the test
             if (row.batchIds.length > 1) {
               await supabase.rpc('map_test_to_batches', { test_uuid: testId, batch_uuids: row.batchIds })
             }
           }
           created++
         } else {
-          console.error('createTest failed row', row.line, row.name, row.date, ':', res.error)
+          const subjectHint = row.subjectIds.length > 1
+            ? `subjects: ${row.subjectChapterMap.map(s => s.subjectName).join(', ')}`
+            : row.subjectId ? `subject_id: ${row.subjectId}` : ''
+          console.error('createTest failed row', row.line, row.name, row.date, subjectHint, ':', res.error)
           errCount++
         }
       } catch (err: unknown) {
@@ -1276,15 +1317,15 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1">
                 {[
                   ['Centre', 'Exact centre name', 'Patna Superclass'],
-                  ['Batch', 'Exact batch name', '11th 2027 B1'],
+                  ['Batch', 'Exact batch name (single)', '11th 2027 B1'],
                   ['Multiple Batches', 'Semicolon-separated, same centre', '11th 2027 B1;11th 2027 B2'],
-                  ['Subject', 'Exact name (blank = Full syllabus)', 'Economics'],
+                  ['Subject', 'One subject, or semicolon-separated for multi', 'Physics;Chemistry'],
                   ['Test Name', 'Any name', 'Mock Test 4'],
                   ['Date', 'MM/DD/YYYY or YYYY-MM-DD', '8/24/2026  or  2026-08-24'],
                   ['Time', '12-hr or 24-hr', '1:00 PM  or  13:00'],
                   ['Duration', 'In minutes', '180'],
-                  ['Scope', 'Full or Part', 'Full'],
-                  ['Chapters', 'GTT names, semicolon-separated', 'Consumer Surplus; Demand Analysis'],
+                  ['Scope', 'Full or Part', 'Part'],
+                  ['Chapters', 'Single subject: Chap1;Chap2 — Multi-subject: group per subject separated by ||', 'Chap A;Chap B||Chap X;Chap Y'],
                 ].map(([col, fmt, ex]) => (
                   <div key={col} className="flex gap-1 items-baseline py-0.5">
                     <span className="font-semibold text-neutral-700 w-32 shrink-0">{col}:</span>
@@ -1292,7 +1333,10 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                   </div>
                 ))}
               </div>
-              <p className="mt-2 text-amber-600">⚠ Chapter names must exactly match GTT (Concept Tags). Separate multiple chapters with <code className="bg-neutral-200 px-1 rounded">;</code></p>
+              <div className="mt-2 space-y-1">
+                <p className="text-amber-600">⚠ Chapter names must match GTT (Concept Tags). Separate chapters within a subject with <code className="bg-neutral-200 px-1 rounded">;</code></p>
+                <p className="text-blue-600">💡 Multi-subject Part test: list subjects as <code className="bg-neutral-200 px-1 rounded">Physics;Chemistry</code> and chapters as <code className="bg-neutral-200 px-1 rounded">Chap1;Chap2||ChapA;ChapB</code> — each group after <code className="bg-neutral-200 px-1 rounded">||</code> matches the corresponding subject.</p>
+              </div>
             </div>
 
             <div className="mb-4 flex gap-3">
@@ -1377,7 +1421,19 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                               <div className="text-xs text-blue-600 mt-1">Multi-batch: {row.batchIds.length} batches</div>
                             )}
                           </td>
-                          <td className="border border-gray-300 px-3 py-2 font-medium">{row.name}</td>
+                          <td className="border border-gray-300 px-3 py-2 font-medium">
+                            <div>{row.name}</div>
+                            {row.scope === 'Part' && row.subjectChapterMap.length > 0 && (
+                              <div className="text-xs text-violet-600 mt-0.5">
+                                {row.subjectChapterMap.length > 1
+                                  ? `${row.subjectChapterMap.length} subjects: ${row.subjectChapterMap.map(s => s.subjectName).join(', ')}`
+                                  : row.subjectChapterMap[0].subjectName}
+                              </div>
+                            )}
+                            {row.scope === 'Full' && (
+                              <div className="text-xs text-gray-400 mt-0.5">Full syllabus</div>
+                            )}
+                          </td>
                           <td className="border border-gray-300 px-3 py-2">
                             <div>{row.date}</div>
                             <div className="text-xs text-gray-600">{row.time} ({row.duration}m)</div>
@@ -1414,6 +1470,12 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                               <div className="text-yellow-600 text-xs">⚠️ {row.clashNote}</div>
                             ) : row.completion && row.completion.pct < 60 ? (
                               <div className="text-yellow-600 text-xs">⚠️ Only {row.completion.pct}% syllabus taught</div>
+                            ) : row.subjectChapterMap.length > 1 ? (
+                              <div className="text-green-600 text-xs space-y-0.5">
+                                {row.subjectChapterMap.map((s) => (
+                                  <div key={s.subjectId}>✅ <span className="font-medium">{s.subjectName}</span>: {s.chapterIds.length} chapter{s.chapterIds.length !== 1 ? 's' : ''}</div>
+                                ))}
+                              </div>
                             ) : (
                               <div className="text-green-600 text-xs">✅ Ready to schedule</div>
                             )}

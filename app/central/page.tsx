@@ -34,7 +34,7 @@ export default function CentralHub() {
             Manage batches and lecture planners across all centres. Pick a workspace on the right.
           </p>
         </div>
-        <div className="flex gap-3 shrink-0">
+        <div className="flex flex-wrap gap-2 shrink-0">
           {CLICKERS.map((c, i) => {
             const active = view === c.key
             return (
@@ -42,7 +42,7 @@ export default function CentralHub() {
                 key={c.key}
                 onClick={() => setView(c.key)}
                 style={{ animationDelay: `${i * 80}ms` }}
-                className={`animate-fade-up hover-lift text-left rounded-2xl border px-4 py-3 min-w-[180px] ${
+                className={`animate-fade-up hover-lift text-left rounded-2xl border px-4 py-3 flex-1 min-w-[140px] sm:flex-none sm:min-w-[180px] ${
                   active
                     ? 'border-transparent bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-lg shadow-violet-500/30'
                     : 'border-neutral-200 bg-white/90 text-neutral-700 hover:border-violet-300 hover:shadow-md'

@@ -315,42 +315,102 @@ export default function FacultyCalendarPage() {
 
   return (
     <div className="max-w-5xl mx-auto">
-      <PageHeader title="Calendar" description="Your confirmed lectures. Confirm assigned planners in My Planners — they appear here once confirmed. Click an upcoming class to request a reschedule, prepone, extra/demo class or cancellation. Already-conducted classes are shown for reference only." />
+      <PageHeader title="Calendar" description="Your confirmed lectures. Click an upcoming class to request a reschedule, extra class, or cancellation." />
 
       {message && <Alert type={message.type === 'info' ? 'info' : message.type}>{message.text}</Alert>}
 
-      <Card className="p-4 sm:p-6">
+      <Card className="p-3 sm:p-6">
         <div className="flex items-center justify-between mb-4">
           <BtnSecondary onClick={prevMonth}>← Prev</BtnSecondary>
-          <h3 className="font-bold text-neutral-950">{MONTHS[month]} {year}</h3>
+          <h3 className="font-bold text-neutral-950 text-sm sm:text-base">{MONTHS[month]} {year}</h3>
           <BtnSecondary onClick={nextMonth}>Next →</BtnSecondary>
         </div>
 
         {loading ? (
           <p className="py-12 text-center text-neutral-400">Loading…</p>
         ) : (
-          <div className="grid grid-cols-7 gap-1">
-            {DAYS.map((d) => (
-              <div key={d} className="text-center text-[11px] font-bold uppercase tracking-wider text-neutral-400 py-2">{d}</div>
-            ))}
-            {cells.map((date, i) => {
-              if (!date) return <div key={i} className="min-h-[100px] rounded-xl bg-neutral-100/40" />
-              const dayLectures = byDate.get(date) ?? []
-              const isToday = date === todayStr
-              const dayNum = Number(date.slice(8, 10))
-              const shown = dayLectures.slice(0, 6)
-              const extra = dayLectures.length - shown.length
-              return (
-                <div
-                  key={i}
-                  className={`min-h-[100px] rounded-xl border p-1.5 transition-all duration-300 hover:shadow-md ${isToday ? 'border-violet-400 bg-violet-50/50 ring-2 ring-violet-300/50' : 'border-neutral-200 bg-white/80 hover:border-violet-200'}`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className={`grid h-5 min-w-5 place-items-center rounded-full px-1 text-xs font-bold ${isToday ? 'bg-violet-600 text-white' : 'text-neutral-400'}`}>{dayNum}</span>
-                    {dayLectures.length > 0 && <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />}
+          <>
+            {/* ── Desktop: 7-col month grid (sm and up) ── */}
+            <div className="hidden sm:grid grid-cols-7 gap-1">
+              {DAYS.map((d) => (
+                <div key={d} className="text-center text-[11px] font-bold uppercase tracking-wider text-neutral-400 py-2">{d}</div>
+              ))}
+              {cells.map((date, i) => {
+                if (!date) return <div key={i} className="min-h-[80px] rounded-xl bg-neutral-100/40" />
+                const dayLectures = byDate.get(date) ?? []
+                const isToday = date === todayStr
+                const dayNum = Number(date.slice(8, 10))
+                const shown = dayLectures.slice(0, 4)
+                const extra = dayLectures.length - shown.length
+                return (
+                  <div
+                    key={i}
+                    className={`min-h-[80px] rounded-xl border p-1.5 transition-all duration-300 hover:shadow-md cursor-pointer ${isToday ? 'border-violet-400 bg-violet-50/50 ring-2 ring-violet-300/50' : 'border-neutral-200 bg-white/80 hover:border-violet-200'}`}
+                    onClick={() => dayLectures.length > 0 && setDayModal(date)}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className={`grid h-5 min-w-5 place-items-center rounded-full px-1 text-xs font-bold ${isToday ? 'bg-violet-600 text-white' : 'text-neutral-400'}`}>{dayNum}</span>
+                      {dayLectures.length > 0 && <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />}
+                    </div>
+                    <div className="space-y-0.5">
+                      {shown.map((l) => {
+                        const conducted = isConducted(l)
+                        return (
+                          <button
+                            key={l.id}
+                            onClick={(e) => { e.stopPropagation(); openModal(l) }}
+                            className={`w-full text-left rounded px-1 py-0.5 text-[9px] leading-tight border-l-2 ${conducted ? 'bg-neutral-100 text-neutral-500 border-neutral-300' : 'bg-emerald-50 text-emerald-900 border-emerald-400'}`}
+                          >
+                            <div className="font-bold truncate">{formatTime(l.start_time)}</div>
+                            <div className="truncate">{one(l.batches)?.name ?? 'Batch'}</div>
+                          </button>
+                        )
+                      })}
+                      {extra > 0 && <div className="text-[9px] text-violet-600 font-bold text-center">+{extra}</div>}
+                    </div>
                   </div>
-                  <div className="space-y-1">
-                    {shown.map((l, li) => {
+                )
+              })}
+            </div>
+
+            {/* ── Mobile: compact list view grouped by date ── */}
+            <div className="sm:hidden space-y-2">
+              {/* Day headers strip for current week context */}
+              <div className="grid grid-cols-7 gap-0.5 mb-3">
+                {DAYS.map((d) => (
+                  <div key={d} className="text-center text-[9px] font-bold uppercase text-neutral-400 py-1">{d.slice(0,1)}</div>
+                ))}
+                {cells.slice(0, 42).map((date, i) => {
+                  if (!date) return <div key={i} className="h-8 rounded bg-neutral-100/40" />
+                  const isToday = date === todayStr
+                  const has = (byDate.get(date)?.length ?? 0) > 0
+                  const dayNum = Number(date.slice(8, 10))
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => has && setDayModal(date)}
+                      className={`h-8 rounded flex flex-col items-center justify-center text-[10px] font-bold transition-all ${isToday ? 'bg-violet-600 text-white' : has ? 'bg-emerald-100 text-emerald-800' : 'text-neutral-400'}`}
+                    >
+                      {dayNum}
+                      {has && !isToday && <span className="h-1 w-1 rounded-full bg-emerald-500 mt-0.5" />}
+                    </button>
+                  )
+                })}
+              </div>
+
+              {/* Upcoming lectures list */}
+              <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider px-1 mt-3 mb-2">Upcoming Classes</p>
+              {Array.from(byDate.entries())
+                .filter(([date]) => date >= todayStr)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .slice(0, 20)
+                .map(([date, lectures]) => (
+                  <div key={date}>
+                    <div className="text-xs font-bold text-neutral-600 px-1 mb-1 mt-2">
+                      {new Date(date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}
+                      {date === todayStr && <span className="ml-2 text-violet-600">Today</span>}
+                    </div>
+                    {lectures.map((l) => {
                       const batch = one(l.batches)
                       const conducted = isConducted(l)
                       const req = reqByPlanner[l.id]
@@ -359,33 +419,39 @@ export default function FacultyCalendarPage() {
                         <button
                           key={l.id}
                           onClick={() => openModal(l)}
-                          style={{ animationDelay: `${li * 60}ms` }}
-                          className={`animate-fade-up w-full text-left rounded-lg px-1.5 py-1 text-[10px] leading-tight transition-all hover:scale-[1.03] hover:shadow-sm border-l-2 ${conducted ? 'bg-neutral-100 hover:bg-neutral-200 text-neutral-500 border-neutral-300' : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border-emerald-400'}`}
-                          title={`${batch?.name ?? ''} · ${l.topic_name}${conducted ? ' (conducted)' : ''}`}
+                          className={`w-full text-left rounded-xl px-3 py-2.5 mb-1 border-l-4 flex items-center gap-3 ${conducted ? 'bg-neutral-100 border-neutral-300' : 'bg-emerald-50 border-emerald-400'}`}
                         >
-                          <div className="font-bold truncate flex items-center gap-1">{formatTime(l.start_time)}{conducted && <span className="text-[8px] font-semibold text-neutral-400">✓done</span>}</div>
-                          <div className="truncate">{batch?.name ?? 'Batch'}</div>
-                          <div className="truncate text-[9px] opacity-80">{l.topic_name}</div>
-                          {req && (
-                            <div className={`mt-0.5 truncate text-[8px] font-bold uppercase tracking-wide ${reqPending ? 'text-amber-600' : req.status === 'approved' ? 'text-emerald-600' : 'text-rose-500'}`}>
-                              {reqPending ? '⏳ request pending' : req.status === 'approved' ? '✓ request approved' : '✕ request rejected'}
-                            </div>
-                          )}
+                          <div className="shrink-0 text-center">
+                            <div className="text-xs font-bold text-neutral-700">{formatTime(l.start_time)}</div>
+                            <div className="text-[10px] text-neutral-400">{l.duration_minutes}m</div>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="font-semibold text-sm text-neutral-900 truncate">{batch?.name ?? 'Batch'}</div>
+                            {l.chapter && <div className="text-xs font-medium text-violet-700 truncate">{l.chapter}</div>}
+                            {l.topic_name && <div className="text-xs text-neutral-500 truncate">{l.topic_name}</div>}
+                            {req && (
+                              <div className={`text-[10px] font-semibold mt-0.5 ${reqPending ? 'text-amber-600' : req.status === 'approved' ? 'text-emerald-600' : 'text-rose-500'}`}>
+                                {reqPending ? '⏳ Pending' : req.status === 'approved' ? '✓ Approved' : '✕ Rejected'}
+                              </div>
+                            )}
+                          </div>
+                          {!conducted && <span className="text-neutral-400 shrink-0">›</span>}
+                          {conducted && <span className="text-xs text-neutral-400 shrink-0">✓</span>}
                         </button>
                       )
                     })}
-                    {extra > 0 && (
-                      <button onClick={() => setDayModal(date)} className="w-full rounded-lg px-1.5 py-1 text-[10px] font-bold text-violet-600 bg-violet-100/60 hover:bg-violet-200 transition-colors">+{extra} more</button>
-                    )}
                   </div>
-                </div>
-              )
-            })}
-          </div>
+                ))}
+              {Array.from(byDate.entries()).filter(([d]) => d >= todayStr).length === 0 && (
+                <p className="text-sm text-neutral-400 text-center py-8">No upcoming classes this month.</p>
+              )}
+            </div>
+          </>
         )}
-        <div className="flex flex-wrap gap-4 mt-4 text-xs text-neutral-500">
-          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-100 inline-block" /> Upcoming (confirmed)</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-neutral-200 inline-block" /> Already conducted</span>
+
+        <div className="flex flex-wrap gap-3 mt-4 text-xs text-neutral-500">
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-100 inline-block" /> Upcoming</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-neutral-200 inline-block" /> Conducted</span>
           <span className="flex items-center gap-1"><span className="text-amber-600 font-bold">⏳</span> Request pending</span>
         </div>
       </Card>
@@ -411,12 +477,28 @@ export default function FacultyCalendarPage() {
                     style={{ animationDelay: `${li * 50}ms` }}
                     className={`animate-fade-up w-full text-left rounded-xl p-3 border-l-4 transition-all hover:scale-[1.02] hover:shadow-sm ${conducted ? 'bg-neutral-100 border-neutral-300' : 'bg-emerald-50 border-emerald-400'}`}
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-neutral-900 text-sm">{formatTime(l.start_time)} · {l.duration_minutes}m</span>
-                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${conducted ? 'bg-neutral-200 text-neutral-700' : 'bg-emerald-200 text-emerald-800'}`}>{conducted ? 'Conducted' : 'Confirmed'}</span>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="font-bold text-neutral-900 text-sm">{formatTime(l.start_time)} · {l.duration_minutes}m</div>
+                        <div className="text-sm font-semibold text-neutral-800">{batch?.name ?? 'Batch'}</div>
+                      </div>
+                      <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${conducted ? 'bg-neutral-200 text-neutral-700' : 'bg-emerald-200 text-emerald-800'}`}>{conducted ? 'Conducted' : 'Confirmed'}</span>
                     </div>
-                    <div className="text-sm font-medium text-neutral-800 mt-0.5">{batch?.name ?? 'Batch'} — {l.topic_name}</div>
-                    <div className="text-xs text-neutral-500">{centre?.name ?? ''}{one(l.classrooms)?.name ? ` · ${one(l.classrooms)!.name}` : ''} · Ch {l.chapter}</div>
+                    {l.chapter && (
+                      <div className="mt-1.5 rounded-lg bg-violet-50 border border-violet-100 px-2 py-1">
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-violet-500 mb-0.5">Chapter</div>
+                        <div className="text-xs font-semibold text-violet-800">{l.chapter}</div>
+                      </div>
+                    )}
+                    {l.topic_name && (
+                      <div className="mt-1 rounded-lg bg-neutral-50 border border-neutral-100 px-2 py-1">
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 mb-0.5">Topic</div>
+                        <div className="text-xs text-neutral-700">{l.topic_name}</div>
+                      </div>
+                    )}
+                    {(centre?.name || one(l.classrooms)?.name) && (
+                      <div className="text-xs text-neutral-400 mt-1">{centre?.name ?? ''}{one(l.classrooms)?.name ? ` · ${one(l.classrooms)!.name}` : ''}</div>
+                    )}
                     {req && <div className={`text-[11px] font-semibold mt-1 ${req.status === 'pending' ? 'text-amber-600' : req.status === 'approved' ? 'text-emerald-600' : 'text-rose-500'}`}>{req.status === 'pending' ? '⏳ request pending' : req.status === 'approved' ? '✓ request approved' : '✕ request rejected'}</div>}
                   </button>
                 )

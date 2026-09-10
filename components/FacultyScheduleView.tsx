@@ -444,7 +444,7 @@ export default function FacultyScheduleView() {
 
   if (loading) {
     return (
-      <div className="h-screen flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
           <p className="text-neutral-500">Loading faculty schedule data...</p>
@@ -454,7 +454,7 @@ export default function FacultyScheduleView() {
   }
 
   return (
-    <div className="h-screen flex flex-col">
+    <div className="min-h-screen flex flex-col">
       {/* Header */}
       <div className="p-2 md:p-4 border-b border-neutral-200 bg-white">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">

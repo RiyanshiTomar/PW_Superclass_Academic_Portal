@@ -34,6 +34,7 @@ function batchName(v: LinkLite['batches']): string {
   if (!v) return 'Batch'
   return Array.isArray(v) ? v[0]?.name ?? 'Batch' : v.name ?? 'Batch'
 }
+
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim().replace(/s$/, '')
 const fmtDate = (d: string) => (d ? new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : '—')
 // Edit Planner shows the COMPLETE planner with its real dates (past + future);
@@ -1023,22 +1024,21 @@ export default function EditPlanner() {
                                 setMessage(null)
                                 updateRow(r.key, { planned_date: newDate, ...(check.slot ? { start_time: check.slot.start, classroom_id: check.slot.classroom, duration_minutes: check.slot.duration } : {}) })
                               }}
-                              title={r.planned_date < todayISO && r.status !== 'conducted' ? 'This date is in the past' : ''}
-                              className="w-[130px] shrink-0 h-9 px-2 border border-neutral-200 rounded-lg text-xs font-semibold text-neutral-600 bg-white/70 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                              className="w-[130px] sm:shrink-0 h-9 px-2 border border-neutral-200 rounded-lg text-xs font-semibold text-neutral-600 bg-white/70 focus:outline-none focus:ring-2 focus:ring-violet-500"
                             />
                             <input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(r.key, { topic_name: e.target.value })} placeholder="Topic taught" className="flex-1 min-w-[160px] h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
-                            <select value={r.faculty_id} onChange={(e) => updateRow(r.key, { faculty_id: e.target.value })} className="w-[160px] shrink-0 h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                            <select value={r.faculty_id} onChange={(e) => updateRow(r.key, { faculty_id: e.target.value })} className="w-[160px] sm:shrink-0 h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
                               <option value="">Faculty…</option>
                               {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                             </select>
                             {(!liveLinkId || liveHasStatus) ? (
-                              <select value={r.status} onChange={(e) => setStatus(r.key, e.target.value as Status)} className={`w-[150px] shrink-0 h-9 px-2 rounded-lg text-xs font-semibold border ${statusPill(r.status)}`}>
+                              <select value={r.status} onChange={(e) => setStatus(r.key, e.target.value as Status)} className={`w-[150px] sm:shrink-0 h-9 px-2 rounded-lg text-xs font-semibold border ${statusPill(r.status)}`}>
                                 <option value="planned">Planned</option>
                                 <option value="confirmed">Scheduled ✓</option>
                                 <option value="conducted">Already conducted</option>
                               </select>
                             ) : (
-                              <span className={`w-[150px] shrink-0 h-9 px-2 flex items-center rounded-lg text-[11px] font-semibold border ${statusPill(r.status)}`} title="Status is inferred from the date (past = conducted). Run the batch-status migration to edit it here.">
+                              <span className={`w-[150px] sm:shrink-0 h-9 px-2 flex items-center rounded-lg text-[11px] font-semibold border ${statusPill(r.status)}`} title="Status is inferred from the date (past = conducted). Run the batch-status migration to edit it here.">
                                 {r.status === 'conducted' ? 'Conducted' : r.stage || 'Planned'}
                               </span>
                             )}
@@ -1055,16 +1055,16 @@ export default function EditPlanner() {
                             className={`flex flex-wrap md:flex-nowrap items-center gap-2 px-3 py-2.5 border-l-4 ${testStageColor}`}
                           >
                             <span className="w-4 shrink-0 text-lg">📝</span>
-                            <div className="w-[130px] shrink-0 h-9 px-2 flex items-center border border-neutral-200 rounded-lg text-xs font-semibold text-neutral-600 bg-neutral-50">
+                            <div className="w-[130px] sm:shrink-0 h-9 px-2 flex items-center border border-neutral-200 rounded-lg text-xs font-semibold text-neutral-600 bg-neutral-50">
                               {fmtDate(t.test_date)}
                             </div>
                             <div className="flex-1 min-w-[160px] h-9 px-2 flex items-center bg-neutral-50 border border-neutral-200 rounded-lg text-sm font-semibold text-violet-700">
                               🧪 TEST: {t.name}
                             </div>
-                            <div className="w-[160px] shrink-0 h-9 px-2 flex items-center bg-neutral-50 border border-neutral-200 rounded-lg text-xs text-neutral-600">
+                            <div className="w-[160px] sm:shrink-0 h-9 px-2 flex items-center bg-neutral-50 border border-neutral-200 rounded-lg text-xs text-neutral-600">
                               {t.start_time.slice(0,5)} · {t.duration_minutes}m
                             </div>
-                            <div className={`w-[150px] shrink-0 h-9 px-2 flex items-center rounded-lg text-xs font-semibold border ${t.stage === 'Confirmed' ? 'bg-emerald-100 border-emerald-300 text-emerald-800' : t.stage === 'Completed' ? 'bg-neutral-200 border-neutral-300 text-neutral-700' : 'bg-amber-100 border-amber-300 text-amber-800'}`}>
+                            <div className={`w-[150px] sm:shrink-0 h-9 px-2 flex items-center rounded-lg text-xs font-semibold border ${t.stage === 'Confirmed' ? 'bg-emerald-100 border-emerald-300 text-emerald-800' : t.stage === 'Completed' ? 'bg-neutral-200 border-neutral-300 text-neutral-700' : 'bg-amber-100 border-amber-300 text-amber-800'}`}>
                               {t.stage}
                             </div>
                             <div className="shrink-0 w-4"></div>

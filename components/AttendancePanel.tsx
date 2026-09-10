@@ -301,7 +301,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
         {showCentrePicker && (
           <div>
             <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Centre</label>
-            <select value={centreId} onChange={(e) => selectCentre(e.target.value)} className={`${selectCls} min-w-[220px]`} disabled={loading}>
+            <select value={centreId} onChange={(e) => selectCentre(e.target.value)} className={`${selectCls} w-full sm:min-w-[220px]`} disabled={loading}>
               <option value="">{loading ? 'Loading…' : 'Select a centre'}</option>
               {centreChoices.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
@@ -309,7 +309,7 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
         )}
         <div>
           <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Batch</label>
-          <select value={batchId} onChange={(e) => selectBatch(e.target.value)} className={`${selectCls} min-w-[240px]`} disabled={loading || (showCentrePicker && !centreId)}>
+          <select value={batchId} onChange={(e) => selectBatch(e.target.value)} className={`${selectCls} w-full sm:min-w-[240px]`} disabled={loading || (showCentrePicker && !centreId)}>
             <option value="">{(showCentrePicker && !centreId) ? 'Select a centre first' : batchOptions.length === 0 ? 'No batches' : 'Select a batch'}</option>
             {batchOptions.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>

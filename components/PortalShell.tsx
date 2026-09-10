@@ -131,10 +131,7 @@ export default function PortalShell({
             </div>
           </div>
         )}
-        <main className="flex-1 p-4 sm:p-6 lg:p-10">
-          {/* No transform-based animation here: a lingering transform makes it the
-              containing block for position:fixed modals, pushing them off-screen on
-              long/scrolled pages. Keep page content transform-free. */}
+        <main className="flex-1 p-3 sm:p-6 lg:p-10 overflow-x-hidden">
           <div>{children}</div>
         </main>
       </div>

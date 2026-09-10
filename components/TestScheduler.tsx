@@ -1273,7 +1273,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
             {/* Formatting guide */}
             <div className="mb-4 p-3 bg-neutral-50 border border-neutral-200 rounded-lg text-xs">
               <p className="font-semibold text-neutral-700 mb-2">📋 CSV Format Guide — Download template for examples</p>
-              <div className="grid grid-cols-2 gap-x-6 gap-y-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1">
                 {[
                   ['Centre', 'Exact centre name', 'Patna Superclass'],
                   ['Batch', 'Exact batch name', '11th 2027 B1'],

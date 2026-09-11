@@ -40,6 +40,7 @@ export default async function Home() {
     branch_head: '/branch',
     batch_manager: '/batch-manager',
     syllabus_editor: '/admin/syllabus',
+    progress_reviewer: '/progress-reviewer',
   }
 
   redirect(roleRedirects[activeRoles[0]] || '/login')

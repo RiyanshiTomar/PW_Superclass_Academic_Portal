@@ -182,8 +182,8 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const [bulkMsg, setBulkMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
 
   const isPrivileged = scope === 'central' || scope === 'admin'
-  // branch heads and batch-managers can add/edit tests but cannot delete
-  const canSchedule = isPrivileged || scope === 'branch' || scope === 'batch-manager'
+  // branch heads can add/edit tests but cannot delete
+  const canSchedule = isPrivileged || scope === 'branch'
 
   const loadData = async () => {
     setLoading(true)

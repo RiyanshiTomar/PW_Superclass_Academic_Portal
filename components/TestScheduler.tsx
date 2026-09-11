@@ -182,6 +182,8 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const [bulkMsg, setBulkMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
 
   const isPrivileged = scope === 'central' || scope === 'admin'
+  // branch heads and batch-managers can add/edit tests but cannot delete
+  const canSchedule = isPrivileged || scope === 'branch' || scope === 'batch-manager'
 
   const loadData = async () => {
     setLoading(true)
@@ -992,8 +994,8 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       {msg && <Alert type={msg.type}>{msg.text}</Alert>}
 
       <div className="flex gap-4 mb-6">
-        <BtnPrimary onClick={() => { resetForm(); setShowForm(true) }}>+ New Test</BtnPrimary>
-        <BtnSecondary onClick={() => setShowBulk(true)}>📄 Bulk Upload</BtnSecondary>
+        {canSchedule && <BtnPrimary onClick={() => { resetForm(); setShowForm(true) }}>+ New Test</BtnPrimary>}
+        {canSchedule && <BtnSecondary onClick={() => setShowBulk(true)}>📄 Bulk Upload</BtnSecondary>}
       </div>
 
       {/* ---- Test Form -------------------------------------------------------- */}
@@ -1574,7 +1576,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                 <th className="px-3 py-2">Room</th>
                 <th className="px-3 py-2">Invigilator</th>
                 <th className="px-3 py-2">Syllabus</th>
-                {isPrivileged && <th className="px-3 py-2 text-right">Actions</th>}
+                {canSchedule && <th className="px-3 py-2 text-right">Actions</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-100">
@@ -1626,13 +1628,15 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                           </span>
                         : <span className="text-neutral-300 text-xs">—</span>}
                     </td>
-                    {isPrivileged && (
+                    {canSchedule && (
                       <td className="px-3 py-2 text-right whitespace-nowrap">
                         {busyId === t.id
                           ? <span className="text-xs text-neutral-400">…</span>
                           : <>
                               <button onClick={() => startEdit(t)} className="text-xs font-semibold text-violet-600 hover:text-violet-800 mr-3">Edit</button>
-                              <button onClick={() => deleteTest(t)} className="text-xs font-semibold text-red-500 hover:text-red-700">Delete</button>
+                              {isPrivileged && (
+                                <button onClick={() => deleteTest(t)} className="text-xs font-semibold text-red-500 hover:text-red-700">Delete</button>
+                              )}
                             </>}
                       </td>
                     )}

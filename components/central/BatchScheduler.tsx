@@ -105,9 +105,12 @@ function plannerName(v: Link['planners']): string {
   return v.name ?? 'Planner'
 }
 
-export default function BatchScheduler({ scope = 'central' }: { scope?: 'central' | 'branch' }) {
+export default function BatchScheduler({ scope = 'central' }: { scope?: 'central' | 'branch' | 'batch-manager' }) {
   const supabase = createClient()
-  const isBranch = scope === 'branch'
+  // batch-manager gets the same restricted access as branch head:
+  // can edit schedule slots only, cannot create/delete batches or change core fields
+  const isBranch = scope === 'branch' || scope === 'batch-manager'
+  const isBatchManager = scope === 'batch-manager'
   // For branch scope: store the branch head's allowed centre IDs
   const [allowedCentreIds, setAllowedCentreIds] = useState<Set<string>>(new Set())
   const [batches, setBatches] = useState<Batch[]>([])
@@ -163,13 +166,14 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
   const shownBatches = useMemo(() => {
     const q = gridSearch.toLowerCase().trim()
     return batches.filter((b) => 
-      (isBranch ? allowedCentreIds.has(b.centre_id) : true) &&
+      // branch: restrict to allowed centres; batch-manager: batches already pre-filtered from DB
+      (scope === 'branch' ? allowedCentreIds.has(b.centre_id) : true) &&
       (!gridCentre || b.centre_id === gridCentre) && 
       (!gridManager || b.batch_manager_id === gridManager) &&
       (!gridOwner || b.batch_owner_id === gridOwner) &&
       (!q || b.name.toLowerCase().includes(q))
     )
-  }, [batches, gridSearch, gridCentre, gridManager, gridOwner, isBranch, allowedCentreIds])
+  }, [batches, gridSearch, gridCentre, gridManager, gridOwner, scope, allowedCentreIds])
 
   const centreFaculty = useMemo(() => {
     if (!centreId) return []
@@ -308,21 +312,29 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
 
     // For branch scope: resolve the branch head's allowed centres first
     let branchCentreIds: string[] = []
+    let batchManagerUserId: string | null = null
     if (isBranch) {
       const { data: { user } } = await supabase.auth.getUser()
       if (user) {
         const au = await getAppUser(supabase, user)
-        const fromUserCentres = getUserCentreIds(au)
-        // Also include centres where this user is branch_head
-        const { data: headCentres } = await supabase.from('centres').select('id').eq('branch_head_id', au?.id ?? '')
-        const fromBranchHead = (headCentres ?? []).map((c: { id: string }) => c.id)
-        branchCentreIds = Array.from(new Set([...fromUserCentres, ...fromBranchHead]))
+        if (isBatchManager) {
+          // batch-manager: scope to batches they manage directly
+          batchManagerUserId = au?.id ?? null
+        } else {
+          // branch head: scope to their centre(s)
+          const fromUserCentres = getUserCentreIds(au)
+          const { data: headCentres } = await supabase.from('centres').select('id').eq('branch_head_id', au?.id ?? '')
+          const fromBranchHead = (headCentres ?? []).map((c: { id: string }) => c.id)
+          branchCentreIds = Array.from(new Set([...fromUserCentres, ...fromBranchHead]))
+        }
         setAllowedCentreIds(new Set(branchCentreIds))
       }
     }
 
-    let batchQuery = supabase.from('batches').select('*').order('created_at', { ascending: false })
-    if (isBranch && branchCentreIds.length > 0) {
+    let batchQuery = supabase.from('batches').select('*').neq('status', 'Merged').order('created_at', { ascending: false })
+    if (isBatchManager && batchManagerUserId) {
+      batchQuery = batchQuery.eq('batch_manager_id', batchManagerUserId)
+    } else if (isBranch && branchCentreIds.length > 0) {
       batchQuery = batchQuery.in('centre_id', branchCentreIds)
     }
 
@@ -346,9 +358,10 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
     if (batchesRes.data) setBatches(batchesRes.data)
     if (progRes.data) setPrograms(progRes.data)
     // For branch: only show the branch head's centres in filters/forms
+    // For batch-manager: show all centres (batches already filtered by batch_manager_id)
     if (centRes.data) {
       const all = centRes.data as Centre[]
-      setCentres(isBranch && branchCentreIds.length > 0 ? all.filter(c => branchCentreIds.includes(c.id)) : all)
+      setCentres(scope === 'branch' && branchCentreIds.length > 0 ? all.filter(c => branchCentreIds.includes(c.id)) : all)
     }
     if (subjRes.data) setSubjects(subjRes.data as Subject[])
     if (classRes.data) setClassrooms(classRes.data as Classroom[])

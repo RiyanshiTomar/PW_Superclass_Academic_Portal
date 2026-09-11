@@ -5,6 +5,7 @@ import { getAppUser } from '@/lib/auth'
 
 const NAV = [
   { label: 'Dashboard', href: '/batch-manager', icon: '📋' },
+  { label: 'Batch Scheduler', href: '/batch-manager/batch-scheduler', icon: '🗂️' },
   { label: 'Tests', href: '/batch-manager/tests', icon: '📝' },
   { label: 'Marks Entry', href: '/batch-manager/marks-entry', icon: '✍️' },
   { label: 'Results', href: '/batch-manager/results', icon: '📊' },

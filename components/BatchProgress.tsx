@@ -6,7 +6,7 @@ import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import { computeBatchPacing, pacingWarnings, type BatchPacing, type SubjectPace } from '@/lib/pacing'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
 
-type Scope = 'central' | 'admin' | 'branch' | 'batch-manager'
+type Scope = 'central' | 'admin' | 'branch' | 'batch-manager' | 'progress_reviewer'
 type Batch = { id: string; name: string; centre_id: string; batch_manager_id: string | null; end_date: string | null }
 type Centre = { id: string; name: string; branch_head_id: string | null }
 
@@ -32,7 +32,7 @@ export default function BatchProgress({ scope = 'central' }: { scope?: Scope }) 
   const [loading, setLoading] = useState(true)
   const [loadingPace, setLoadingPace] = useState(false)
 
-  const isPrivileged = scope === 'central' || scope === 'admin'
+  const isPrivileged = scope === 'central' || scope === 'admin' || scope === 'progress_reviewer'
 
   useEffect(() => {
     (async () => {

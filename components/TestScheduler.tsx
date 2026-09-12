@@ -951,14 +951,21 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
             ? `subjects: ${row.subjectChapterMap.map(s => s.subjectName).join(', ')}`
             : row.subjectId ? `subject_id: ${row.subjectId}` : ''
           console.error('createTest failed row', row.line, row.name, row.date, subjectHint, ':', res.error)
+          // Surface the actual DB error in the UI row
+          row.status = 'error'
+          row.errors = [...row.errors, res.error ?? 'Unknown error']
           errCount++
         }
       } catch (err: unknown) {
         errCount++
-        console.error('bulkImport error for row', row.line, ':', err instanceof Error ? err.message : err)
+        const errMsg = err instanceof Error ? err.message : String(err)
+        console.error('bulkImport error for row', row.line, ':', errMsg)
+        row.status = 'error'
+        row.errors = [...row.errors, errMsg]
       }
     }
     setBulkBusy(false)
+    setBulkRows([...bulkRows]) // trigger re-render to show updated error rows
     setBulkMsg({ type: created > 0 ? 'success' : 'error', text: `Import complete: ${created} created, ${skipped} skipped (errors), ${errCount} failed.` })
     if (created > 0) {
       setBulkRows([])

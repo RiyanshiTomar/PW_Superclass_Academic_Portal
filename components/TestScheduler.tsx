@@ -612,8 +612,8 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     for (const room of rooms) {
       if (freeRooms.some(fr => fr.id === room.id)) return room.id
     }
-    // Fallback: return first room from candidate list (best effort)
-    return rooms[0]?.id ?? null
+    // No free room found — return null so the row shows an error rather than clashing
+    return null
   }
 
   const parseBulk = async (text: string) => {
@@ -862,6 +862,23 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       const primaryBatch = batches.find(b => b.id === row.batchId)
       if (!primaryBatch) continue
 
+      // Auto-assign room FIRST — so slot validation also checks room availability
+      const centreRooms = classrooms.filter(r => r.centre_id === primaryBatch.centre_id && r.is_active)
+      const assignedRoomId = await pickFreeRoom(centreRooms, primaryBatch.centre_id, row.date, row.time!, row.duration)
+      if (assignedRoomId) {
+        row.classroomId = assignedRoomId
+        row.roomAutoAssigned = true
+      } else if (centreRooms.length === 0) {
+        row.status = 'error'
+        row.errors.push('No active classrooms found at this centre')
+        continue
+      } else {
+        // All rooms busy — mark error with clear message
+        row.status = 'error'
+        row.errors.push(`No free room at ${primaryBatch.centre_id ? centres.find(c => c.id === primaryBatch.centre_id)?.name ?? 'this centre' : 'this centre'} at ${row.time} on ${row.date} — all ${centreRooms.length} room(s) are booked`)
+        continue
+      }
+
       const clash = await validateTestSlot(supabase, {
         batchId: row.batchId!, date: row.date, startTime: row.time!, durationMinutes: row.duration,
         facultyId: row.facultyId, classroomId: row.classroomId
@@ -878,17 +895,6 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       if (classClash) {
         row.status = 'shift'
         row.clashNote = `Clashes with ${classClash.subject_name} (${formatTime(classClash.start_time)}) — lectures will shift to buffers`
-      }
-
-      // Auto-assign room — use classrooms state (not formRooms which is form-specific)
-      const centreRooms = classrooms.filter(r => r.centre_id === primaryBatch.centre_id && r.is_active)
-      const assignedRoomId = await pickFreeRoom(centreRooms, primaryBatch.centre_id, row.date, row.time!, row.duration)
-      if (assignedRoomId) {
-        row.classroomId = assignedRoomId
-        row.roomAutoAssigned = true
-      } else if (centreRooms.length > 0) {
-        row.classroomId = centreRooms[0].id
-        row.roomAutoAssigned = true
       }
 
       // Syllabus completion check for Part tests

@@ -239,25 +239,33 @@ export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot,
   const weeklyClash = async (col: string, val: string, label: string) => {
     const { data } = await supabase.from('batch_schedules').select('start_time, end_time').eq(col, val).eq('day_of_week', dow)
     for (const r of (data ?? []) as { start_time: string; end_time: string }[]) {
-      if (overlaps(s, e, toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5)))) return label
+      if (overlaps(s, e, toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5))))
+        return `${label} — recurring slot ${r.start_time.slice(0, 5)}–${r.end_time.slice(0, 5)}`
     }
     return null
   }
   const plannerClash = async (col: string, val: string, label: string) => {
-    const { data } = await supabase.from('batch_planners').select('start_time, duration_minutes').eq(col, val).eq('planned_date', slot.date).not('start_time', 'is', null)
-    for (const r of (data ?? []) as { start_time: string; duration_minutes: number }[]) {
+    const { data } = await supabase.from('batch_planners').select('start_time, duration_minutes, topic_name').eq(col, val).eq('planned_date', slot.date).not('start_time', 'is', null)
+    for (const r of (data ?? []) as { start_time: string; duration_minutes: number; topic_name: string }[]) {
       const rs = toMinutes(r.start_time.slice(0, 5))
-      if (overlaps(s, e, rs, rs + r.duration_minutes)) return label
+      if (overlaps(s, e, rs, rs + r.duration_minutes)) {
+        const clashEnd = hhmm(rs + r.duration_minutes)
+        return `${label} — "${r.topic_name}" at ${r.start_time.slice(0, 5)}–${clashEnd}`
+      }
     }
     return null
   }
   const testClash = async (col: string, val: string, label: string) => {
-    let q = supabase.from('test_schedules').select('id, start_time, duration_minutes').eq(col, val).eq('test_date', slot.date)
+    let q = supabase.from('test_schedules').select('id, name, start_time, duration_minutes').eq(col, val).eq('test_date', slot.date)
     if (slot.ignoreTestId) q = q.neq('id', slot.ignoreTestId)
     const { data } = await q
-    for (const r of (data ?? []) as { id: string; start_time: string; duration_minutes: number }[]) {
+    for (const r of (data ?? []) as { id: string; name: string; start_time: string; duration_minutes: number }[]) {
       const rs = toMinutes(r.start_time.slice(0, 5))
-      if (overlaps(s, e, rs, rs + r.duration_minutes)) return label
+      if (overlaps(s, e, rs, rs + r.duration_minutes)) {
+        const clashTime = r.start_time.slice(0, 5)
+        const clashEnd = hhmm(rs + r.duration_minutes)
+        return `${label} — "${r.name}" is at ${clashTime}–${clashEnd} (${r.duration_minutes}m)`
+      }
     }
     return null
   }

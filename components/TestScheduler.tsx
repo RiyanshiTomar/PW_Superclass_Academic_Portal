@@ -1478,7 +1478,14 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                             {row.errors.length > 0 ? (
                               <div className="space-y-1">
                                 {row.errors.map((error, idx) => (
-                                  <div key={idx} className="text-red-600 text-xs">• {error}</div>
+                                  <div key={idx} className="text-red-600 text-xs">
+                                    <span className="font-medium">•</span> {error}
+                                    {/already has another test/i.test(error) && <span className="text-orange-600 block ml-3">→ Change the date or time in CSV</span>}
+                                    {/room is booked/i.test(error) && <span className="text-orange-600 block ml-3">→ All rooms busy at this time — change time or date</span>}
+                                    {/No free room/i.test(error) && <span className="text-orange-600 block ml-3">→ Change time or date so a room is free</span>}
+                                    {/not found in GTT/i.test(error) && <span className="text-orange-600 block ml-3">→ Check chapter names in Admin → Syllabus</span>}
+                                    {/not found/i.test(error) && !/GTT/i.test(error) && <span className="text-orange-600 block ml-3">→ Check spelling in CSV matches exactly</span>}
+                                  </div>
                                 ))}
                               </div>
                             ) : row.clashNote ? (

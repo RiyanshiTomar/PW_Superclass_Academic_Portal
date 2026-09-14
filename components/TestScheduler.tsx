@@ -971,12 +971,15 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       }
     }
     setBulkBusy(false)
-    setBulkRows([...bulkRows]) // trigger re-render to show updated error rows
-    setBulkMsg({ type: created > 0 ? 'success' : 'error', text: `Import complete: ${created} created, ${skipped} skipped (errors), ${errCount} failed.` })
-    if (created > 0) {
-      setBulkRows([])
-      await loadData()
-    }
+    // Keep failed rows visible so user can see what went wrong
+    const failedRows = bulkRows.filter(r => r.status === 'error' && r.errors.length > 0)
+    setBulkRows(failedRows.length > 0 ? failedRows : [])
+    setBulkMsg({
+      type: errCount > 0 ? (created > 0 ? 'info' : 'error') : 'success',
+      text: `Import complete: ${created} created, ${skipped} skipped (errors), ${errCount} failed.` +
+        (failedRows.length > 0 ? ` ↓ Failed rows shown below with reasons.` : '')
+    })
+    await loadData()
   }
   // ---- Filtering / Search ---------------------------------------------------
   const filteredTests = useMemo(() => {

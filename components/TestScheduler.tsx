@@ -209,7 +209,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       setTests(tRes.data as TestRow[])
       const ids = (tRes.data as TestRow[]).map((t) => t.id)
       if (ids.length) {
-        const { data: tc } = await supabase.from('test_chapters').select('test_id, chapter_id, chapters(name)').in('test_id', ids)
+        const { data: tc } = await supabase.from('test_chapters').select('test_id, chapter_id, chapters(name, subject_id)').in('test_id', ids)
         const rows = (tc ?? []) as unknown as (TestChapterRow & { chapter_id: string })[]
         setTestChapters(rows as TestChapterRow[])
         const map: Record<string, string[]> = {}
@@ -369,6 +369,74 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     }
   }
   
+  // ---- Export filtered tests as bulk-import-compatible CSV ----------------
+  const exportTestsCSV = (tests: TestRow[]) => {
+    const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v)
+    const headers = ['Centre', 'Batch', 'Multiple Batches (same centre)', 'Subject', 'Test Name', 'Date', 'Time', 'Duration', 'Type', 'Scope', 'Chapters (GTT names; use || between subjects)', 'Room', 'Invigilator Email']
+
+    const rows = tests.map((t) => {
+      const batch  = batches.find((b) => b.id === t.batch_id)
+      const centre = centres.find((c) => c.id === batch?.centre_id)
+
+      let subjectCol = ''
+      let chaptersCol = ''
+
+      if (t.part_type === 'Part') {
+        // testChapters now includes chapters(name, subject_id)
+        type TCRow = { test_id: string; chapter_id: string; chapters: { name: string; subject_id: string | null } | { name: string; subject_id: string | null }[] | null }
+        const tcRows = (testChapters as unknown as TCRow[]).filter((tc) => tc.test_id === t.id)
+
+        if (t.subject_id) {
+          // Single subject
+          const subj = subjects.find((s) => s.id === t.subject_id)
+          subjectCol = subj?.name ?? ''
+          chaptersCol = tcRows
+            .map((tc) => (Array.isArray(tc.chapters) ? tc.chapters[0]?.name : tc.chapters?.name) ?? '')
+            .filter(Boolean).join(';')
+        } else {
+          // Multi-subject — group chapters by subject_id
+          const subjectGroups = new Map<string, { subjectName: string; chapters: string[] }>()
+          for (const tc of tcRows) {
+            const chap = Array.isArray(tc.chapters) ? tc.chapters[0] : tc.chapters
+            if (!chap) continue
+            const sid = chap.subject_id ?? 'unknown'
+            const subj = subjects.find((s) => s.id === sid)
+            if (!subjectGroups.has(sid)) subjectGroups.set(sid, { subjectName: subj?.name ?? sid, chapters: [] })
+            subjectGroups.get(sid)!.chapters.push(chap.name)
+          }
+          const groups = Array.from(subjectGroups.values())
+          subjectCol  = groups.map((g) => g.subjectName).join(';')
+          chaptersCol = groups.map((g) => g.chapters.join(';')).join('||')
+        }
+      }
+
+      return [
+        centre?.name ?? '',
+        batch?.name ?? '',
+        '',                          // Multiple Batches — user fills for target batch
+        subjectCol,
+        t.name,
+        t.test_date,                 // YYYY-MM-DD — parseBulk handles it
+        t.start_time.slice(0, 5),    // HH:MM 24hr
+        String(t.duration_minutes),
+        t.test_type,
+        t.part_type,
+        chaptersCol,
+        '',                          // Room — auto-assign for new batch
+        '',                          // Invigilator — blank
+      ]
+    })
+
+    const batchName = batches.find((b) => b.id === filterBatchId)?.name ?? 'tests'
+    const csv = [headers, ...rows].map((r) => r.map(esc).join(',')).join('\n')
+    const url = URL.createObjectURL(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${batchName.replace(/[^a-z0-9]/gi, '_')}_tests.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const resetForm = () => {
     setShowForm(false); setEditingId(null); setFormCentre('')
     setBatchId(''); setSelectedBatches(new Set()); setName(''); setTestDate(''); setStartTime('10:00'); setDuration('60')
@@ -1540,7 +1608,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       )}
 
       {/* ---- Test List Filters ------------------------------------------------ */}
-      <div className="flex gap-4 mb-6 flex-wrap">
+      <div className="flex gap-4 mb-6 flex-wrap items-end">
         <div>
           <label className="block text-sm font-medium mb-1">Centre</label>
           <select
@@ -1575,6 +1643,18 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
             className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
           />
         </div>
+
+        {/* Export CSV — only shown when a batch is selected */}
+        {filterBatchId && filteredTests.length > 0 && (
+          <div className="ml-auto self-end">
+            <button
+              onClick={() => exportTestsCSV(filteredTests)}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg flex items-center gap-2"
+            >
+              ⬇ Export CSV
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ---- Test List — Excel Table ---------------------------------------- */}

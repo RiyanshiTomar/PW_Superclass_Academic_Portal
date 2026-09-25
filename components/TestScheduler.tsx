@@ -464,11 +464,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     setCascadeLoading(false)
     if (!res.ok) { setCascadeMsg({ type: 'error', text: res.error ?? 'Preview failed.' }); return }
     setCascadePreview(res.preview)
-    // Pre-fill the last test's auto-calculated date so user can confirm or change it
-    if (res.preview.length > 0) {
-      const last = res.preview[res.preview.length - 1]
-      setCascadeLastDate(last.newDate || '')
-    }
+    // Last test's newDate will be empty (user must always provide it)
+    // Don't pre-fill — force user to explicitly enter the date
+    setCascadeLastDate('')
   }
 
   const applyCascade = async () => {
@@ -1880,27 +1878,27 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                   </table>
                 </div>
 
-                {/* Last test date — always ask user to confirm/change */}
+                {/* Last test date — always required from user */}
                 {cascadePreview.length > 0 && (() => {
                   const last = cascadePreview[cascadePreview.length - 1]
-                  const hasAutoSlot = !!last.newDate
                   return (
-                    <div className={`mb-4 p-3 rounded-lg border ${hasAutoSlot ? 'bg-blue-50 border-blue-200' : 'bg-amber-50 border-amber-200'}`}>
-                      <p className={`text-sm font-semibold mb-1 ${hasAutoSlot ? 'text-blue-700' : 'text-amber-700'}`}>
-                        📅 Last test: <span className="font-bold">{last.testName}</span>
+                    <div className="mb-4 p-3 rounded-lg border bg-blue-50 border-blue-200">
+                      <p className="text-sm font-semibold mb-1 text-blue-700">
+                        📅 Last test new date: <span className="font-bold">{last.testName}</span>
                       </p>
-                      <p className={`text-xs mb-2 ${hasAutoSlot ? 'text-blue-600' : 'text-amber-600'}`}>
-                        {hasAutoSlot
-                          ? `Auto-suggested date: ${new Date(last.newDate + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })} — confirm or change below:`
-                          : 'No free slot found automatically — please enter the date manually:'}
+                      <p className="text-xs mb-2 text-blue-600">
+                        Currently on <span className="font-medium">{new Date(last.oldDate + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</span> — enter its new date:
                       </p>
                       <input
                         type="date"
                         value={cascadeLastDate}
                         onChange={(e) => setCascadeLastDate(e.target.value)}
                         min={last.oldDate}
-                        className={`px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 ${hasAutoSlot ? 'border-blue-300 focus:ring-blue-400' : 'border-amber-300 focus:ring-amber-400'}`}
+                        className="px-3 py-2 border border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
                       />
+                      {!cascadeLastDate && (
+                        <p className="text-xs text-red-500 mt-1">⚠ Required — enter the new date for the last test</p>
+                      )}
                     </div>
                   )
                 })()}

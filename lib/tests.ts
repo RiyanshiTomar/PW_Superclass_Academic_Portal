@@ -696,71 +696,65 @@ export async function cascadeShiftTests(
     return { ok: true, preview: [], unresolved: 0 }
   }
 
-  // 2. Build the preview — for each test find its new slot
-  //    Each test shifts to the slot vacated by the previous test (cascade).
-  //    The cancelled test's slot becomes the first "freed" date — test[0] moves
-  //    to it, test[1] moves to test[0]'s old date, etc.
+  // 2. Build the preview — shift each test FORWARD to the next test's date.
+  //    test[0] → test[1]'s old date
+  //    test[1] → test[2]'s old date
+  //    ...
+  //    test[last] → user-provided date (always asked)
   const preview: CascadeShiftPreviewItem[] = []
-  // Track which test IDs we've already "placed" so they don't block each other
   const placedIds: string[] = [args.cancelledTestId]
-
-  // Each test gets the previous test's OLD date as its new date (simple 1-slot shift).
-  // We also validate room availability on that date.
-  let prevOldDate = cancelledRow.test_date
 
   for (let i = 0; i < tests.length; i++) {
     const t = tests[i]
-    const targetDate = prevOldDate  // this test shifts to the previous test's old date
     const isLast = i === tests.length - 1
 
-    // Check if target date has a free room and no batch test clash
-    const slot = await findNextFreeSlot(supabase, {
-      batchId: args.batchId,
-      centreId: args.centreId,
-      fromDate: targetDate,
-      startTime: t.start_time.slice(0, 5),
-      durationMinutes: t.duration_minutes,
-      excludeTestIds: [...placedIds, t.id],
-      maxDaysAhead: 1,  // only try the exact target date (cascade = 1 slot shift)
-    })
+    // Each test moves to the NEXT test's old date (forward shift)
+    // Last test has no "next" — user provides the date
+    const targetDate = isLast
+      ? (args.lastTestNewDate ?? '')
+      : tests[i + 1].test_date
 
-    let resolvedDate = slot?.date ?? ''
-    let resolvedRoom = slot?.roomId ?? t.classroom_id
-    let roomFound = !!slot
+    let resolvedDate = ''
+    let resolvedRoom: string | null = t.classroom_id
+    let roomFound = false
 
-    // If the exact 1-day shift doesn't work, search forward
-    if (!slot) {
-      const wider = await findNextFreeSlot(supabase, {
+    if (targetDate) {
+      // Try to find a free room on the target date
+      const slot = await findNextFreeSlot(supabase, {
         batchId: args.batchId,
         centreId: args.centreId,
         fromDate: targetDate,
         startTime: t.start_time.slice(0, 5),
         durationMinutes: t.duration_minutes,
         excludeTestIds: [...placedIds, t.id],
-        maxDaysAhead: 90,
+        maxDaysAhead: 1,  // exact target date only
       })
-      if (wider) {
-        resolvedDate = wider.date
-        resolvedRoom = wider.roomId
+      if (slot) {
+        resolvedDate = slot.date
+        resolvedRoom = slot.roomId
         roomFound = true
+      } else {
+        // Target date room busy — search forward up to 7 days
+        const wider = await findNextFreeSlot(supabase, {
+          batchId: args.batchId,
+          centreId: args.centreId,
+          fromDate: targetDate,
+          startTime: t.start_time.slice(0, 5),
+          durationMinutes: t.duration_minutes,
+          excludeTestIds: [...placedIds, t.id],
+          maxDaysAhead: 7,
+        })
+        if (wider) {
+          resolvedDate = wider.date
+          resolvedRoom = wider.roomId
+          roomFound = true
+        } else {
+          // Keep target date, room stays same — flag as room not verified
+          resolvedDate = targetDate
+          resolvedRoom = t.classroom_id
+          roomFound = false
+        }
       }
-    }
-
-    // Last test: user-supplied date always overrides auto-calculated date
-    if (isLast && args.lastTestNewDate) {
-      resolvedDate = args.lastTestNewDate
-      // Try to find a free room on the user-provided date
-      const userSlot = await findNextFreeSlot(supabase, {
-        batchId: args.batchId,
-        centreId: args.centreId,
-        fromDate: args.lastTestNewDate,
-        startTime: t.start_time.slice(0, 5),
-        durationMinutes: t.duration_minutes,
-        excludeTestIds: [...placedIds, t.id],
-        maxDaysAhead: 1,
-      })
-      resolvedRoom = userSlot?.roomId ?? t.classroom_id
-      roomFound = !!userSlot
     }
 
     preview.push({
@@ -771,11 +765,14 @@ export async function cascadeShiftTests(
       newTime: t.start_time.slice(0, 5),
       roomId: resolvedRoom,
       roomFound,
-      error: resolvedDate ? null : `No free slot found within 90 days${isLast ? ' — please enter a date manually' : ''}`,
+      error: (!targetDate && isLast)
+        ? 'Please enter the new date for this test'
+        : (!roomFound && resolvedDate)
+          ? 'Room could not be auto-assigned — will keep existing room'
+          : null,
     })
 
     placedIds.push(t.id)
-    prevOldDate = t.test_date  // next test cascades off this test's old date
   }
 
   const unresolved = preview.filter((p) => !p.newDate).length

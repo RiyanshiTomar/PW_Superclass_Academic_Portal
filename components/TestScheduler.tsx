@@ -456,7 +456,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     const batch = batches.find((b) => b.id === t.batch_id)
     if (!batch) { setCascadeLoading(false); return }
     const res = await cascadeShiftTests(supabase, {
-      cancelledTestId: t.id,
+      shiftFromTestId: t.id,
       batchId: t.batch_id,
       centreId: batch.centre_id,
       dryRun: true,
@@ -464,8 +464,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     setCascadeLoading(false)
     if (!res.ok) { setCascadeMsg({ type: 'error', text: res.error ?? 'Preview failed.' }); return }
     setCascadePreview(res.preview)
-    // Last test's newDate will be empty (user must always provide it)
-    // Don't pre-fill — force user to explicitly enter the date
+    // Last test's date is empty in dry run — user must fill it
     setCascadeLastDate('')
   }
 
@@ -476,13 +475,13 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
 
     // Last test date is always required from user
     if (cascadePreview.length > 0 && !cascadeLastDate) {
-      setCascadeMsg({ type: 'error', text: 'Please confirm the date for the last test.' })
+      setCascadeMsg({ type: 'error', text: 'Please enter the new date for the last test.' })
       return
     }
 
     setCascadeApplying(true); setCascadeMsg(null)
     const res = await cascadeShiftTests(supabase, {
-      cancelledTestId: cascadeTest.id,
+      shiftFromTestId: cascadeTest.id,
       batchId: cascadeTest.batch_id,
       centreId: batch.centre_id,
       dryRun: false,
@@ -490,8 +489,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     })
     setCascadeApplying(false)
     if (!res.ok) { setCascadeMsg({ type: 'error', text: res.error ?? 'Apply failed.' }); return }
-    const shifted = res.preview.filter((p) => p.newDate).length
-    setCascadeMsg({ type: 'success', text: `Done — "${cascadeTest.name}" cancelled, ${shifted} test(s) shifted.` })
+    setCascadeMsg({ type: 'success', text: `Done — ${res.preview.length} test(s) shifted forward.` })
     await loadData()
     setTimeout(() => { setCascadeTest(null); setCascadeMsg(null) }, 1500)
   }
@@ -1797,7 +1795,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                           : <>
                               <button onClick={() => startEdit(t)} className="text-xs font-semibold text-violet-600 hover:text-violet-800 mr-3">Edit</button>
                               {t.stage !== 'Cancelled' && (
-                                <button onClick={() => openCascade(t)} className="text-xs font-semibold text-orange-500 hover:text-orange-700 mr-3">Cancel & Shift</button>
+                                <button onClick={() => openCascade(t)} className="text-xs font-semibold text-orange-500 hover:text-orange-700 mr-3">Shift Forward</button>
                               )}
                               {isPrivileged && (
                                 <button onClick={() => deleteTest(t)} className="text-xs font-semibold text-red-500 hover:text-red-700">Delete</button>
@@ -1817,17 +1815,17 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <Card className="w-full max-w-2xl max-h-[90vh] overflow-auto">
             <div className="flex justify-between items-center mb-4">
-              <h3 className="text-xl font-semibold">Cancel Test & Shift Schedule</h3>
+              <h3 className="text-xl font-semibold">Shift Tests Forward</h3>
               <button onClick={() => setCascadeTest(null)} className="text-gray-500 hover:text-gray-700 text-xl">×</button>
             </div>
 
             {cascadeMsg && <Alert type={cascadeMsg.type}>{cascadeMsg.text}</Alert>}
 
-            {/* Cancelled test info */}
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-              <p className="text-sm font-semibold text-red-700">🚫 Cancelling: {cascadeTest.name}</p>
-              <p className="text-xs text-red-500 mt-1">
-                {new Date(cascadeTest.test_date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })} at {formatTime(cascadeTest.start_time)}
+            {/* Selected test info */}
+            <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+              <p className="text-sm font-semibold text-blue-700">📅 Shifting from: {cascadeTest.name}</p>
+              <p className="text-xs text-blue-500 mt-1">
+                {new Date(cascadeTest.test_date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })} at {formatTime(cascadeTest.start_time)} — this test and all tests after it will shift forward one slot each.
               </p>
             </div>
 
@@ -1840,7 +1838,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
             ) : (
               <>
                 <p className="text-sm text-neutral-500 mb-3">
-                  The following tests will shift forward. Each test moves to the slot freed by the test before it.
+                  Each test shifts to the next test's current date. The last test needs a new date from you.
                 </p>
                 <div className="overflow-x-auto mb-4">
                   <table className="w-full text-sm border-collapse border border-gray-200">
@@ -1911,7 +1909,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                 disabled={cascadeApplying || cascadeLoading || (cascadePreview.length > 0 && !cascadeLastDate)}
                 className="bg-orange-600 hover:bg-orange-700"
               >
-                {cascadeApplying ? 'Applying…' : cascadePreview.length === 0 ? 'Confirm Cancel' : `Confirm — Cancel & Shift ${cascadePreview.length} Test(s)`}
+                {cascadeApplying ? 'Shifting…' : cascadePreview.length === 0 ? 'Confirm' : `Confirm — Shift ${cascadePreview.length} Test(s) Forward`}
               </BtnPrimary>
               <BtnSecondary onClick={() => setCascadeTest(null)}>Discard</BtnSecondary>
             </div>

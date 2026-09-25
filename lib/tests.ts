@@ -743,12 +743,24 @@ export async function cascadeShiftTests(
         resolvedDate = wider.date
         resolvedRoom = wider.roomId
         roomFound = true
-      } else if (isLast && args.lastTestNewDate) {
-        // User provided a manual date for the last test
-        resolvedDate = args.lastTestNewDate
-        resolvedRoom = t.classroom_id
-        roomFound = false  // room not auto-verified for manual date
       }
+    }
+
+    // Last test: user-supplied date always overrides auto-calculated date
+    if (isLast && args.lastTestNewDate) {
+      resolvedDate = args.lastTestNewDate
+      // Try to find a free room on the user-provided date
+      const userSlot = await findNextFreeSlot(supabase, {
+        batchId: args.batchId,
+        centreId: args.centreId,
+        fromDate: args.lastTestNewDate,
+        startTime: t.start_time.slice(0, 5),
+        durationMinutes: t.duration_minutes,
+        excludeTestIds: [...placedIds, t.id],
+        maxDaysAhead: 1,
+      })
+      resolvedRoom = userSlot?.roomId ?? t.classroom_id
+      roomFound = !!userSlot
     }
 
     preview.push({

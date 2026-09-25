@@ -464,6 +464,11 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     setCascadeLoading(false)
     if (!res.ok) { setCascadeMsg({ type: 'error', text: res.error ?? 'Preview failed.' }); return }
     setCascadePreview(res.preview)
+    // Pre-fill the last test's auto-calculated date so user can confirm or change it
+    if (res.preview.length > 0) {
+      const last = res.preview[res.preview.length - 1]
+      setCascadeLastDate(last.newDate || '')
+    }
   }
 
   const applyCascade = async () => {
@@ -471,10 +476,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     const batch = batches.find((b) => b.id === cascadeTest.batch_id)
     if (!batch) return
 
-    // Check if last test still unresolved and user hasn't provided a date
-    const lastUnresolved = cascadePreview.find((p) => !p.newDate)
-    if (lastUnresolved && !cascadeLastDate) {
-      setCascadeMsg({ type: 'error', text: `"${lastUnresolved.testName}" has no auto slot — please enter a date for it below.` })
+    // Last test date is always required from user
+    if (cascadePreview.length > 0 && !cascadeLastDate) {
+      setCascadeMsg({ type: 'error', text: 'Please confirm the date for the last test.' })
       return
     }
 
@@ -491,7 +495,6 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     const shifted = res.preview.filter((p) => p.newDate).length
     setCascadeMsg({ type: 'success', text: `Done — "${cascadeTest.name}" cancelled, ${shifted} test(s) shifted.` })
     await loadData()
-    // Close after 1.5s
     setTimeout(() => { setCascadeTest(null); setCascadeMsg(null) }, 1500)
   }
 
@@ -1877,31 +1880,40 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                   </table>
                 </div>
 
-                {/* Manual date input if last test has no auto slot */}
-                {cascadePreview.some((p) => !p.newDate) && (
-                  <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-                    <p className="text-sm font-semibold text-amber-700 mb-2">
-                      ⚠ "{cascadePreview.find((p) => !p.newDate)?.testName}" — no free slot found automatically
-                    </p>
-                    <p className="text-xs text-amber-600 mb-2">Enter the new date for this test manually:</p>
-                    <input
-                      type="date"
-                      value={cascadeLastDate}
-                      onChange={(e) => setCascadeLastDate(e.target.value)}
-                      className="px-3 py-2 border border-amber-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
-                    />
-                  </div>
-                )}
+                {/* Last test date — always ask user to confirm/change */}
+                {cascadePreview.length > 0 && (() => {
+                  const last = cascadePreview[cascadePreview.length - 1]
+                  const hasAutoSlot = !!last.newDate
+                  return (
+                    <div className={`mb-4 p-3 rounded-lg border ${hasAutoSlot ? 'bg-blue-50 border-blue-200' : 'bg-amber-50 border-amber-200'}`}>
+                      <p className={`text-sm font-semibold mb-1 ${hasAutoSlot ? 'text-blue-700' : 'text-amber-700'}`}>
+                        📅 Last test: <span className="font-bold">{last.testName}</span>
+                      </p>
+                      <p className={`text-xs mb-2 ${hasAutoSlot ? 'text-blue-600' : 'text-amber-600'}`}>
+                        {hasAutoSlot
+                          ? `Auto-suggested date: ${new Date(last.newDate + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })} — confirm or change below:`
+                          : 'No free slot found automatically — please enter the date manually:'}
+                      </p>
+                      <input
+                        type="date"
+                        value={cascadeLastDate}
+                        onChange={(e) => setCascadeLastDate(e.target.value)}
+                        min={last.oldDate}
+                        className={`px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 ${hasAutoSlot ? 'border-blue-300 focus:ring-blue-400' : 'border-amber-300 focus:ring-amber-400'}`}
+                      />
+                    </div>
+                  )
+                })()}
               </>
             )}
 
             <div className="flex gap-3 pt-2 border-t">
               <BtnPrimary
                 onClick={applyCascade}
-                disabled={cascadeApplying || cascadeLoading || (cascadePreview.some((p) => !p.newDate) && !cascadeLastDate)}
+                disabled={cascadeApplying || cascadeLoading || (cascadePreview.length > 0 && !cascadeLastDate)}
                 className="bg-orange-600 hover:bg-orange-700"
               >
-                {cascadeApplying ? 'Applying…' : cascadePreview.length === 0 ? 'Confirm Cancel' : `Confirm — Cancel & Shift ${cascadePreview.filter(p => p.newDate || cascadeLastDate).length} Test(s)`}
+                {cascadeApplying ? 'Applying…' : cascadePreview.length === 0 ? 'Confirm Cancel' : `Confirm — Cancel & Shift ${cascadePreview.length} Test(s)`}
               </BtnPrimary>
               <BtnSecondary onClick={() => setCascadeTest(null)}>Discard</BtnSecondary>
             </div>

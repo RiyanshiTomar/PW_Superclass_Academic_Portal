@@ -8,7 +8,7 @@ import { notify } from '@/lib/notifications'
 // (faculty, room, and the batch's own class planner + other tests).
 // ============================================================
 
-export const TEST_STAGES = ['Draft', 'Faculty Assigned', 'Confirmed', 'Rework'] as const
+export const TEST_STAGES = ['Draft', 'Faculty Assigned', 'Confirmed', 'Rework', 'Cancelled'] as const
 
 export type EligibleChapter = {
   chapter_id: string
@@ -530,7 +530,265 @@ export async function rescheduleTest(
   return { ok: true }
 }
 
-// --- Free faculty for a slot (for the invigilator dropdown) ---------------
+// --- Cascade shift tests -------------------------------------------------
+
+export type CascadeShiftPreviewItem = {
+  testId: string
+  testName: string
+  oldDate: string
+  newDate: string          // empty string means no slot found within maxDate
+  newTime: string
+  roomId: string | null
+  roomFound: boolean
+  error: string | null
+}
+
+export type CascadeShiftResult = {
+  ok: boolean
+  preview: CascadeShiftPreviewItem[]
+  unresolved: number       // tests that couldn't find a free slot
+  error?: string
+}
+
+/** Find the next date ≥ fromDate where the batch has no other test at startTime
+ *  and at least one room at the centre is free. Advances one calendar day at a
+ *  time. Returns null when no slot is found within maxDaysAhead. */
+async function findNextFreeSlot(
+  supabase: SupabaseClient,
+  args: {
+    batchId: string
+    centreId: string
+    fromDate: string        // start searching from this date (inclusive)
+    startTime: string       // HH:MM
+    durationMinutes: number
+    excludeTestIds: string[] // already-placed tests to ignore
+    maxDaysAhead?: number
+  }
+): Promise<{ date: string; roomId: string } | null> {
+  const maxDays = args.maxDaysAhead ?? 90
+  const s = toMinutes(args.startTime.slice(0, 5))
+  const e = s + args.durationMinutes
+  let d = new Date(args.fromDate + 'T12:00:00')
+
+  // Get all active rooms at this centre once
+  const { data: roomData } = await supabase
+    .from('classrooms')
+    .select('id')
+    .eq('centre_id', args.centreId)
+    .eq('is_active', true)
+  const centreRoomIds = (roomData ?? []).map((r: { id: string }) => r.id)
+  if (centreRoomIds.length === 0) return null
+
+  for (let i = 0; i < maxDays; i++, d.setDate(d.getDate() + 1)) {
+    const dateStr = d.toISOString().split('T')[0]
+    const dow = d.getDay()
+
+    // 1. Batch must not already have a test at this time on this date
+    //    (excluding the tests we're in the process of placing)
+    let batchQ = supabase
+      .from('test_schedules')
+      .select('id, start_time, duration_minutes')
+      .eq('batch_id', args.batchId)
+      .eq('test_date', dateStr)
+      .neq('stage', 'Cancelled')
+    if (args.excludeTestIds.length > 0) batchQ = batchQ.not('id', 'in', `(${args.excludeTestIds.join(',')})`)
+    const { data: batchTests } = await batchQ
+    const batchClash = (batchTests ?? []).some((t: { start_time: string; duration_minutes: number }) => {
+      const ts = toMinutes(t.start_time.slice(0, 5))
+      return s < ts + t.duration_minutes && e > ts
+    })
+    if (batchClash) continue
+
+    // 2. Find a free room — check weekly schedules, planner lectures, and tests
+    const busyRooms = new Set<string>()
+
+    // Weekly class in the room on this day
+    const { data: wk } = await supabase
+      .from('batch_schedules')
+      .select('classroom_id, start_time, end_time')
+      .in('classroom_id', centreRoomIds)
+      .eq('day_of_week', dow)
+    for (const r of (wk ?? []) as { classroom_id: string; start_time: string; end_time: string }[]) {
+      if (overlaps(s, e, toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5)))) {
+        busyRooms.add(r.classroom_id)
+      }
+    }
+
+    // Planner lecture in the room on this date
+    const { data: pl } = await supabase
+      .from('batch_planners')
+      .select('classroom_id, start_time, duration_minutes')
+      .in('classroom_id', centreRoomIds)
+      .eq('planned_date', dateStr)
+      .not('start_time', 'is', null)
+    for (const r of (pl ?? []) as { classroom_id: string; start_time: string; duration_minutes: number }[]) {
+      const rs = toMinutes(r.start_time.slice(0, 5))
+      if (overlaps(s, e, rs, rs + r.duration_minutes)) busyRooms.add(r.classroom_id)
+    }
+
+    // Another test in the room on this date
+    let roomTestQ = supabase
+      .from('test_schedules')
+      .select('classroom_id, start_time, duration_minutes')
+      .in('classroom_id', centreRoomIds)
+      .eq('test_date', dateStr)
+      .neq('stage', 'Cancelled')
+    if (args.excludeTestIds.length > 0) roomTestQ = roomTestQ.not('id', 'in', `(${args.excludeTestIds.join(',')})`)
+    const { data: rt } = await roomTestQ
+    for (const r of (rt ?? []) as { classroom_id: string; start_time: string; duration_minutes: number }[]) {
+      const rs = toMinutes(r.start_time.slice(0, 5))
+      if (overlaps(s, e, rs, rs + r.duration_minutes)) busyRooms.add(r.classroom_id)
+    }
+
+    const freeRoom = centreRoomIds.find((id: string) => !busyRooms.has(id))
+    if (freeRoom) return { date: dateStr, roomId: freeRoom }
+  }
+  return null
+}
+
+/** Preview OR apply a cascade shift:
+ *  - Marks the cancelled test as 'Cancelled'.
+ *  - Shifts all subsequent tests (by date) in the batch forward to the next
+ *    free slot, each keeping their original start_time.
+ *  - `dryRun = true`  → only returns the preview, no DB writes.
+ *  - `dryRun = false` → applies all shifts and marks the cancelled test.
+ *  - `lastTestNewDate` → override the new date for the LAST test in the chain
+ *    (used when there's no auto slot and the user manually picks a date).
+ */
+export async function cascadeShiftTests(
+  supabase: SupabaseClient,
+  args: {
+    cancelledTestId: string
+    batchId: string
+    centreId: string
+    dryRun: boolean
+    lastTestNewDate?: string   // user-supplied date for the last test if auto fails
+  }
+): Promise<CascadeShiftResult> {
+  // 1. Fetch all non-cancelled future tests for this batch, sorted by date asc
+  const { data: cancelledRow } = await supabase
+    .from('test_schedules')
+    .select('test_date, start_time, duration_minutes, name')
+    .eq('id', args.cancelledTestId)
+    .single<{ test_date: string; start_time: string; duration_minutes: number; name: string }>()
+  if (!cancelledRow) return { ok: false, preview: [], unresolved: 0, error: 'Cancelled test not found.' }
+
+  const { data: laterTests } = await supabase
+    .from('test_schedules')
+    .select('id, name, test_date, start_time, duration_minutes, classroom_id')
+    .eq('batch_id', args.batchId)
+    .gt('test_date', cancelledRow.test_date)
+    .neq('stage', 'Cancelled')
+    .order('test_date', { ascending: true })
+    .order('start_time', { ascending: true })
+
+  const tests = (laterTests ?? []) as {
+    id: string; name: string; test_date: string
+    start_time: string; duration_minutes: number; classroom_id: string | null
+  }[]
+
+  if (tests.length === 0) {
+    // Nothing to shift — just cancel the test
+    if (!args.dryRun) {
+      const { error } = await supabase.from('test_schedules').update({ stage: 'Cancelled' }).eq('id', args.cancelledTestId)
+      if (error) return { ok: false, preview: [], unresolved: 0, error: error.message }
+    }
+    return { ok: true, preview: [], unresolved: 0 }
+  }
+
+  // 2. Build the preview — for each test find its new slot
+  //    Each test shifts to the slot vacated by the previous test (cascade).
+  //    The cancelled test's slot becomes the first "freed" date — test[0] moves
+  //    to it, test[1] moves to test[0]'s old date, etc.
+  const preview: CascadeShiftPreviewItem[] = []
+  // Track which test IDs we've already "placed" so they don't block each other
+  const placedIds: string[] = [args.cancelledTestId]
+
+  // Each test gets the previous test's OLD date as its new date (simple 1-slot shift).
+  // We also validate room availability on that date.
+  let prevOldDate = cancelledRow.test_date
+
+  for (let i = 0; i < tests.length; i++) {
+    const t = tests[i]
+    const targetDate = prevOldDate  // this test shifts to the previous test's old date
+    const isLast = i === tests.length - 1
+
+    // Check if target date has a free room and no batch test clash
+    const slot = await findNextFreeSlot(supabase, {
+      batchId: args.batchId,
+      centreId: args.centreId,
+      fromDate: targetDate,
+      startTime: t.start_time.slice(0, 5),
+      durationMinutes: t.duration_minutes,
+      excludeTestIds: [...placedIds, t.id],
+      maxDaysAhead: 1,  // only try the exact target date (cascade = 1 slot shift)
+    })
+
+    let resolvedDate = slot?.date ?? ''
+    let resolvedRoom = slot?.roomId ?? t.classroom_id
+    let roomFound = !!slot
+
+    // If the exact 1-day shift doesn't work, search forward
+    if (!slot) {
+      const wider = await findNextFreeSlot(supabase, {
+        batchId: args.batchId,
+        centreId: args.centreId,
+        fromDate: targetDate,
+        startTime: t.start_time.slice(0, 5),
+        durationMinutes: t.duration_minutes,
+        excludeTestIds: [...placedIds, t.id],
+        maxDaysAhead: 90,
+      })
+      if (wider) {
+        resolvedDate = wider.date
+        resolvedRoom = wider.roomId
+        roomFound = true
+      } else if (isLast && args.lastTestNewDate) {
+        // User provided a manual date for the last test
+        resolvedDate = args.lastTestNewDate
+        resolvedRoom = t.classroom_id
+        roomFound = false  // room not auto-verified for manual date
+      }
+    }
+
+    preview.push({
+      testId: t.id,
+      testName: t.name,
+      oldDate: t.test_date,
+      newDate: resolvedDate,
+      newTime: t.start_time.slice(0, 5),
+      roomId: resolvedRoom,
+      roomFound,
+      error: resolvedDate ? null : `No free slot found within 90 days${isLast ? ' — please enter a date manually' : ''}`,
+    })
+
+    placedIds.push(t.id)
+    prevOldDate = t.test_date  // next test cascades off this test's old date
+  }
+
+  const unresolved = preview.filter((p) => !p.newDate).length
+
+  // 3. Apply if not a dry run and no unresolved items (or user forced it)
+  if (!args.dryRun) {
+    // Mark the cancelled test
+    const { error: cErr } = await supabase
+      .from('test_schedules')
+      .update({ stage: 'Cancelled' })
+      .eq('id', args.cancelledTestId)
+    if (cErr) return { ok: false, preview, unresolved, error: cErr.message }
+
+    // Apply each shift
+    for (const p of preview) {
+      if (!p.newDate) continue  // skip unresolved
+      const patch: Record<string, unknown> = { test_date: p.newDate }
+      if (p.roomId) patch.classroom_id = p.roomId
+      const { error } = await supabase.from('test_schedules').update(patch).eq('id', p.testId)
+      if (error) return { ok: false, preview, unresolved, error: `Failed to shift "${p.testName}": ${error.message}` }
+    }
+  }
+
+  return { ok: true, preview, unresolved }
+}
 
 /** Of the given candidate faculty, which ones are free (no weekly class, no
  *  planned lecture, no other test) at this exact date/time. */

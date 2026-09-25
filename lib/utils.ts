@@ -141,6 +141,8 @@ export function stageBadgeClass(stage: string): string {
       return 'bg-emerald-50 text-emerald-700 ring-emerald-200'
     case 'Rework':
       return 'bg-amber-50 text-amber-700 ring-amber-200'
+    case 'Cancelled':
+      return 'bg-red-50 text-red-600 ring-red-200'
     default:
       return 'bg-neutral-100 text-neutral-600 ring-neutral-200'
   }

@@ -5,8 +5,9 @@ import { createClient } from '@/lib/supabase/client'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import {
   createTest, updateTest, setTestStage, getEligibleChapters, getTestCompletion, getBatchFreeWindows, validateTestSlot,
-  getFreeFacultyIds, getClashingClass, getFreeClassrooms, revertTestShift, type ClashingClass,
-  type EligibleChapter, type TestInput, type TestCompletion, type FreeWindow, type FreeClassroom,
+  getFreeFacultyIds, getClashingClass, getFreeClassrooms, revertTestShift, cascadeShiftTests,
+  type ClashingClass, type EligibleChapter, type TestInput, type TestCompletion,
+  type FreeWindow, type FreeClassroom, type CascadeShiftPreviewItem,
 } from '@/lib/tests'
 import { stageBadgeClass, formatTime, toMinutes } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
@@ -180,6 +181,14 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const [bulkRows, setBulkRows] = useState<BulkRow[]>([])
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkMsg, setBulkMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
+
+  // Cascade shift modal
+  const [cascadeTest, setCascadeTest] = useState<TestRow | null>(null)
+  const [cascadePreview, setCascadePreview] = useState<CascadeShiftPreviewItem[]>([])
+  const [cascadeLoading, setCascadeLoading] = useState(false)
+  const [cascadeApplying, setCascadeApplying] = useState(false)
+  const [cascadeMsg, setCascadeMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
+  const [cascadeLastDate, setCascadeLastDate] = useState('')  // manual date for last unresolved test
 
   const isPrivileged = scope === 'central' || scope === 'admin'
   // branch heads can add/edit tests but cannot delete
@@ -435,6 +444,55 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     a.download = `${batchName.replace(/[^a-z0-9]/gi, '_')}_tests.csv`
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  // ---- Cascade shift -------------------------------------------------------
+  const openCascade = async (t: TestRow) => {
+    setCascadeTest(t)
+    setCascadeMsg(null)
+    setCascadeLastDate('')
+    setCascadePreview([])
+    setCascadeLoading(true)
+    const batch = batches.find((b) => b.id === t.batch_id)
+    if (!batch) { setCascadeLoading(false); return }
+    const res = await cascadeShiftTests(supabase, {
+      cancelledTestId: t.id,
+      batchId: t.batch_id,
+      centreId: batch.centre_id,
+      dryRun: true,
+    })
+    setCascadeLoading(false)
+    if (!res.ok) { setCascadeMsg({ type: 'error', text: res.error ?? 'Preview failed.' }); return }
+    setCascadePreview(res.preview)
+  }
+
+  const applyCascade = async () => {
+    if (!cascadeTest) return
+    const batch = batches.find((b) => b.id === cascadeTest.batch_id)
+    if (!batch) return
+
+    // Check if last test still unresolved and user hasn't provided a date
+    const lastUnresolved = cascadePreview.find((p) => !p.newDate)
+    if (lastUnresolved && !cascadeLastDate) {
+      setCascadeMsg({ type: 'error', text: `"${lastUnresolved.testName}" has no auto slot — please enter a date for it below.` })
+      return
+    }
+
+    setCascadeApplying(true); setCascadeMsg(null)
+    const res = await cascadeShiftTests(supabase, {
+      cancelledTestId: cascadeTest.id,
+      batchId: cascadeTest.batch_id,
+      centreId: batch.centre_id,
+      dryRun: false,
+      lastTestNewDate: cascadeLastDate || undefined,
+    })
+    setCascadeApplying(false)
+    if (!res.ok) { setCascadeMsg({ type: 'error', text: res.error ?? 'Apply failed.' }); return }
+    const shifted = res.preview.filter((p) => p.newDate).length
+    setCascadeMsg({ type: 'success', text: `Done — "${cascadeTest.name}" cancelled, ${shifted} test(s) shifted.` })
+    await loadData()
+    // Close after 1.5s
+    setTimeout(() => { setCascadeTest(null); setCascadeMsg(null) }, 1500)
   }
 
   const resetForm = () => {
@@ -1737,6 +1795,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                           ? <span className="text-xs text-neutral-400">…</span>
                           : <>
                               <button onClick={() => startEdit(t)} className="text-xs font-semibold text-violet-600 hover:text-violet-800 mr-3">Edit</button>
+                              {t.stage !== 'Cancelled' && (
+                                <button onClick={() => openCascade(t)} className="text-xs font-semibold text-orange-500 hover:text-orange-700 mr-3">Cancel & Shift</button>
+                              )}
                               {isPrivileged && (
                                 <button onClick={() => deleteTest(t)} className="text-xs font-semibold text-red-500 hover:text-red-700">Delete</button>
                               )}
@@ -1748,6 +1809,103 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
               })}
             </tbody>
           </table>
+        </div>
+      )}
+      {/* ---- Cascade Shift Modal -------------------------------------------- */}
+      {cascadeTest && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <Card className="w-full max-w-2xl max-h-[90vh] overflow-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-semibold">Cancel Test & Shift Schedule</h3>
+              <button onClick={() => setCascadeTest(null)} className="text-gray-500 hover:text-gray-700 text-xl">×</button>
+            </div>
+
+            {cascadeMsg && <Alert type={cascadeMsg.type}>{cascadeMsg.text}</Alert>}
+
+            {/* Cancelled test info */}
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+              <p className="text-sm font-semibold text-red-700">🚫 Cancelling: {cascadeTest.name}</p>
+              <p className="text-xs text-red-500 mt-1">
+                {new Date(cascadeTest.test_date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })} at {formatTime(cascadeTest.start_time)}
+              </p>
+            </div>
+
+            {cascadeLoading ? (
+              <div className="py-8 text-center text-neutral-400">Computing new schedule…</div>
+            ) : cascadePreview.length === 0 ? (
+              <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-700">
+                No subsequent tests found for this batch — this test will simply be marked as Cancelled.
+              </div>
+            ) : (
+              <>
+                <p className="text-sm text-neutral-500 mb-3">
+                  The following tests will shift forward. Each test moves to the slot freed by the test before it.
+                </p>
+                <div className="overflow-x-auto mb-4">
+                  <table className="w-full text-sm border-collapse border border-gray-200">
+                    <thead>
+                      <tr className="bg-gray-50 text-xs font-semibold text-neutral-500 uppercase">
+                        <th className="border border-gray-200 px-3 py-2 text-left">Test</th>
+                        <th className="border border-gray-200 px-3 py-2 text-left">Current Date</th>
+                        <th className="border border-gray-200 px-3 py-2 text-left">New Date</th>
+                        <th className="border border-gray-200 px-3 py-2 text-left">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cascadePreview.map((p) => (
+                        <tr key={p.testId} className={p.newDate ? 'bg-green-50' : 'bg-amber-50'}>
+                          <td className="border border-gray-200 px-3 py-2 font-medium">{p.testName}</td>
+                          <td className="border border-gray-200 px-3 py-2 text-neutral-500">
+                            {new Date(p.oldDate + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}
+                          </td>
+                          <td className="border border-gray-200 px-3 py-2">
+                            {p.newDate
+                              ? <span className="text-green-700 font-medium">
+                                  {new Date(p.newDate + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}
+                                  {' '}<span className="text-xs text-neutral-400">at {p.newTime}</span>
+                                </span>
+                              : <span className="text-amber-600 text-xs">No auto slot — enter date below</span>}
+                          </td>
+                          <td className="border border-gray-200 px-3 py-2 text-xs">
+                            {p.newDate
+                              ? <span className="text-green-600">✅ {p.roomFound ? 'Room auto-assigned' : 'Room kept'}</span>
+                              : <span className="text-amber-600">⚠️ Needs manual date</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Manual date input if last test has no auto slot */}
+                {cascadePreview.some((p) => !p.newDate) && (
+                  <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                    <p className="text-sm font-semibold text-amber-700 mb-2">
+                      ⚠ "{cascadePreview.find((p) => !p.newDate)?.testName}" — no free slot found automatically
+                    </p>
+                    <p className="text-xs text-amber-600 mb-2">Enter the new date for this test manually:</p>
+                    <input
+                      type="date"
+                      value={cascadeLastDate}
+                      onChange={(e) => setCascadeLastDate(e.target.value)}
+                      className="px-3 py-2 border border-amber-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+                    />
+                  </div>
+                )}
+              </>
+            )}
+
+            <div className="flex gap-3 pt-2 border-t">
+              <BtnPrimary
+                onClick={applyCascade}
+                disabled={cascadeApplying || cascadeLoading || (cascadePreview.some((p) => !p.newDate) && !cascadeLastDate)}
+                className="bg-orange-600 hover:bg-orange-700"
+              >
+                {cascadeApplying ? 'Applying…' : cascadePreview.length === 0 ? 'Confirm Cancel' : `Confirm — Cancel & Shift ${cascadePreview.filter(p => p.newDate || cascadeLastDate).length} Test(s)`}
+              </BtnPrimary>
+              <BtnSecondary onClick={() => setCascadeTest(null)}>Discard</BtnSecondary>
+            </div>
+          </Card>
         </div>
       )}
     </div>

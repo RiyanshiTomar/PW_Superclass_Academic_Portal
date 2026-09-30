@@ -332,9 +332,12 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   // the card. Only future tests matter (past ones already happened).
   useEffect(() => {
     if (visibleTests.length === 0) { setCompletions({}); return }
+    // Wait until chaptersByTest is populated for Part tests before computing
+    const partTests = visibleTests.filter((t) => t.part_type === 'Part')
+    const anyPartTestMissingChapters = partTests.some((t) => !chaptersByTest[t.id])
+    if (partTests.length > 0 && anyPartTestMissingChapters) return  // chaptersByTest not ready yet
     let cancelled = false
-    const today = new Date().toISOString().split('T')[0]
-    const testsToCompute = visibleTests.filter((t) => t.part_type === 'Part')
+    const testsToCompute = partTests
     ;(async () => {
       const out: Record<string, TestCompletion> = {}
       for (const t of testsToCompute) {

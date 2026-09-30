@@ -1060,7 +1060,7 @@ export async function getBatchProgress(
   
   // Calculate lecture metrics
   const totalLecturesPlanned = lectures.length
-  const lecturesCompleted = lectures.filter(l => l.status === 'conducted' || l.planned_date < today).length
+  const lecturesCompleted = lectures.filter(l => l.status === 'conducted').length
   const lecturesExpected = Math.floor((progressPercentage / 100) * totalLecturesPlanned)
   const completionPercentage = totalLecturesPlanned > 0 ? (lecturesCompleted / totalLecturesPlanned) * 100 : 0
   

@@ -338,9 +338,6 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     ;(async () => {
       const out: Record<string, TestCompletion> = {}
       for (const t of upcoming) {
-    ;(async () => {
-      const out: Record<string, TestCompletion> = {}
-      for (const t of upcoming) {
         const b = batches.find((x) => x.id === t.batch_id)
         const comp = await getTestCompletion(supabase, {
           batchId: t.batch_id,

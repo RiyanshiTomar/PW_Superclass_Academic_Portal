@@ -95,7 +95,9 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
         supabase.from('batch_schedules')
           .select('start_time, end_time, classroom_id, batch_id, subjects(name), app_users(full_name)')
           .in('batch_id', batchIds)
-          .eq('day_of_week', weekday),
+          .eq('day_of_week', weekday)
+          .lte('effective_from', date)   // segment must have started by this date
+          .or(`effective_to.is.null,effective_to.gte.${date}`),  // segment must not have ended yet
         supabase.from('batch_planners')
           .select('start_time, duration_minutes, classroom_id, topic_name, batch_id, subjects(name), app_users!batch_planners_faculty_id_fkey(full_name)')
           .in('batch_id', batchIds)

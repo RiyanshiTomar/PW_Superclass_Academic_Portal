@@ -136,12 +136,33 @@ export async function getTestCompletion(
   const threshold = args.threshold ?? 60
 
   if (args.partType === 'Part') {
-    if (!args.subjectId || !args.chapterIds || args.chapterIds.length === 0) {
+    if (!args.chapterIds || args.chapterIds.length === 0) {
       return { pct: 0, topics_total: 0, topics_covered: 0, chapters: 0, warn: false, threshold, hasData: false }
     }
-    const all = await getEligibleChapters(supabase, { batchId: args.batchId, subjectId: args.subjectId, byDate: args.byDate, threshold })
+
+    // Single-subject: use subjectId directly
+    if (args.subjectId) {
+      const all = await getEligibleChapters(supabase, { batchId: args.batchId, subjectId: args.subjectId, byDate: args.byDate, threshold })
+      const ids = new Set(args.chapterIds)
+      return aggregateCompletion(all.filter((c) => ids.has(c.chapter_id)), threshold)
+    }
+
+    // Multi-subject (subjectId is null): resolve subject IDs from chapter IDs
+    const { data: chapRows } = await supabase
+      .from('chapters')
+      .select('id, subject_id')
+      .in('id', args.chapterIds)
+    const subjectIds = [...new Set((chapRows ?? []).map((c: { subject_id: string }) => c.subject_id).filter(Boolean))]
+    if (subjectIds.length === 0) {
+      return { pct: 0, topics_total: 0, topics_covered: 0, chapters: 0, warn: false, threshold, hasData: false }
+    }
+    const allRows: EligibleChapter[] = []
     const ids = new Set(args.chapterIds)
-    return aggregateCompletion(all.filter((c) => ids.has(c.chapter_id)), threshold)
+    for (const sid of subjectIds) {
+      const rows = await getEligibleChapters(supabase, { batchId: args.batchId, subjectId: sid, byDate: args.byDate, threshold })
+      allRows.push(...rows.filter((c) => ids.has(c.chapter_id)))
+    }
+    return aggregateCompletion(allRows, threshold)
   }
 
   // Full syllabus — resolve the batch's subjects (program first, planner fallback).

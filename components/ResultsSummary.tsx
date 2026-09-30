@@ -23,6 +23,7 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
   const [facultyBatchIds, setFacultyBatchIds] = useState<Set<string>>(new Set())
   const [tests, setTests] = useState<TestRow[]>([])
   const [batchId, setBatchId] = useState('')
+  const [filterCentre, setFilterCentre] = useState('')
   const [results, setResults] = useState<Result[]>([])
   const [studentCount, setStudentCount] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -68,6 +69,16 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
   }, [batches, isPrivileged, scope, appUser, allowedCentreIds, facultyBatchIds])
 
   const batchTests = useMemo(() => tests.filter((t) => t.batch_id === batchId), [tests, batchId])
+
+  const filteredBatches = useMemo(() => {
+    if (!filterCentre) return visibleBatches
+    return visibleBatches.filter((b) => b.centre_id === filterCentre)
+  }, [visibleBatches, filterCentre])
+
+  const visibleCentres = useMemo(() => {
+    if (isPrivileged) return centres
+    return centres.filter((c) => allowedCentreIds.has(c.id))
+  }, [centres, isPrivileged, allowedCentreIds])
 
   useEffect(() => {
     if (!batchId) { setResults([]); setStudentCount(0); return }
@@ -131,11 +142,20 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
       <PageHeader title="Results" description="Batch-wise performance across all tests — averages, pass %, and top performers." />
 
       <div className="flex flex-wrap items-end gap-3 mb-6">
+        {isPrivileged && (
+          <div>
+            <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Centre</label>
+            <select value={filterCentre} onChange={(e) => { setFilterCentre(e.target.value); setBatchId('') }} className="h-11 min-w-[200px] px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" disabled={loading}>
+              <option value="">All centres</option>
+              {visibleCentres.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+        )}
         <div>
           <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Batch</label>
           <select value={batchId} onChange={(e) => setBatchId(e.target.value)} className="h-11 min-w-[240px] px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" disabled={loading}>
             <option value="">{loading ? 'Loading…' : 'Select a batch'}</option>
-            {visibleBatches.map((b) => <option key={b.id} value={b.id}>{b.name}{isPrivileged ? ` — ${centreName(b.centre_id)}` : ''}</option>)}
+            {filteredBatches.map((b) => <option key={b.id} value={b.id}>{b.name}{isPrivileged ? ` — ${centreName(b.centre_id)}` : ''}</option>)}
           </select>
         </div>
       </div>

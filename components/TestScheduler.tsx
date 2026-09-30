@@ -1810,7 +1810,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                         ? <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${completion.pct >= 60 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                             {completion.pct}%{completion.pct < 60 ? ' ⚠' : ''}
                           </span>
-                        : <span className="text-neutral-300 text-xs">—</span>}
+                        : t.part_type === 'Part' && (chaptersByTest[t.id]?.length ?? 0) > 0
+                          ? <span className="text-xs text-amber-600 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200">0% ⚠</span>
+                          : <span className="text-neutral-300 text-xs">—</span>}
                     </td>
                     {canSchedule && (
                       <td className="px-3 py-2 text-right whitespace-nowrap">

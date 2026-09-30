@@ -333,9 +333,11 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   useEffect(() => {
     if (visibleTests.length === 0) { setCompletions({}); return }
     let cancelled = false
+    const today = new Date().toISOString().split('T')[0]
+    const testsToCompute = visibleTests.filter((t) => t.part_type === 'Part')
     ;(async () => {
       const out: Record<string, TestCompletion> = {}
-      for (const t of visibleTests) {
+      for (const t of testsToCompute) {
         const b = batches.find((x) => x.id === t.batch_id)
         const comp = await getTestCompletion(supabase, {
           batchId: t.batch_id,

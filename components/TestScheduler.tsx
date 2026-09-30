@@ -218,7 +218,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       setTests(tRes.data as TestRow[])
       const ids = (tRes.data as TestRow[]).map((t) => t.id)
       if (ids.length) {
-        const { data: tc } = await supabase.from('test_chapters').select('test_id, chapter_id, chapters(name, subject_id)').in('test_id', ids)
+        const { data: tc } = await supabase.from('test_chapters').select('test_id, chapter_id, chapters(name, subject_id)').in('test_id', ids).limit(5000)
         const rows = (tc ?? []) as unknown as (TestChapterRow & { chapter_id: string })[]
         setTestChapters(rows as TestChapterRow[])
         const map: Record<string, string[]> = {}

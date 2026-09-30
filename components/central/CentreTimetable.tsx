@@ -306,6 +306,33 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
 
                 {columns.map((col) => {
                   const colBlocks = blocks.filter((b) => b.roomId === col.id)
+
+                  // Assign sub-columns to overlapping blocks so they render side-by-side
+                  // instead of on top of each other.
+                  type PlacedBlock = Block & { subCol: number; totalCols: number }
+                  const placed: PlacedBlock[] = []
+                  // Process blocks in start-time order
+                  const sorted = [...colBlocks].sort((a, b) => a.startMin - b.startMin || a.endMin - b.endMin)
+                  for (const b of sorted) {
+                    // Find which sub-columns are free for this block's time range
+                    const usedCols = new Set<number>()
+                    for (const p of placed) {
+                      if (p.startMin < b.endMin && p.endMin > b.startMin) usedCols.add(p.subCol)
+                    }
+                    let subCol = 0
+                    while (usedCols.has(subCol)) subCol++
+                    placed.push({ ...b, subCol, totalCols: 1 })
+                  }
+                  // Second pass: update totalCols — each block gets the max sub-col count
+                  // among all blocks it overlaps with (including itself)
+                  for (const b of placed) {
+                    let maxCol = b.subCol
+                    for (const p of placed) {
+                      if (p.startMin < b.endMin && p.endMin > b.startMin) maxCol = Math.max(maxCol, p.subCol)
+                    }
+                    b.totalCols = maxCol + 1
+                  }
+
                   return (
                     <div key={col.id} className="shrink-0 w-44 border-r border-neutral-100 last:border-r-0">
                       <div className="h-9 px-2 flex items-center justify-center text-xs font-semibold text-neutral-700 border-b border-neutral-100 bg-neutral-50 text-center truncate" title={col.label}>{col.label}</div>
@@ -313,11 +340,19 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
                         {hours.map((h) => (
                           <div key={h} className="absolute left-0 right-0 border-t border-neutral-100" style={{ top: (h * 60 - rangeStart) * PX_PER_MIN }} />
                         ))}
-                        {colBlocks.map((b) => {
+                        {placed.map((b) => {
                           const top = (b.startMin - rangeStart) * PX_PER_MIN
                           const height = Math.max((b.endMin - b.startMin) * PX_PER_MIN, 32)
+                          // Side-by-side: divide column width equally among overlapping blocks
+                          const colW = 100 / b.totalCols
+                          const leftPct = b.subCol * colW
                           return (
-                            <div key={b.key} className={`absolute left-1 right-1 rounded-lg border px-1.5 py-1 overflow-hidden ${blockClass(b)}`} style={{ top, height }} title={`${formatTime(minToHHMM(b.startMin))}–${formatTime(minToHHMM(b.endMin))} · ${b.batch} · ${b.subject}${b.topic ? ` · ${b.topic}` : ''} · ${b.faculty}`}>
+                            <div
+                              key={b.key}
+                              className={`absolute rounded-lg border px-1.5 py-1 overflow-hidden ${blockClass(b)}`}
+                              style={{ top, height, left: `${leftPct}%`, width: `${colW}%` }}
+                              title={`${formatTime(minToHHMM(b.startMin))}–${formatTime(minToHHMM(b.endMin))} · ${b.batch} · ${b.subject}${b.topic ? ` · ${b.topic}` : ''} · ${b.faculty}`}
+                            >
                               <div className="flex items-center gap-1 text-[10px] font-bold leading-tight">
                                 {formatTime(minToHHMM(b.startMin))}
                                 {b.tag && <span className={`px-1 rounded text-[8px] uppercase tracking-wide ${b.kind === 'test' ? 'bg-white/25' : 'bg-black/10'}`}>{b.tag}</span>}

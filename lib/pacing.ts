@@ -52,9 +52,11 @@ export async function computeBatchPacing(
 
   const { data: lecs } = await supabase
   .from('batch_planners')
-  .select('subject_id, chapter, planned_date, duration_minutes, subjects(name)')
+  .select('subject_id, chapter, planned_date, duration_minutes, status, subjects(name)')
   .eq('batch_id', batchId)
   .eq('is_buffer', false)
+  // Never count lectures beyond the batch end date
+  .lte('planned_date', endDate)
 
 // NEW — fetch each chapter's syllabus order from Concept Tags
 const subjectIds = [...new Set((lecs ?? []).map((r) => r.subject_id).filter((id): id is string => !!id))]
@@ -66,7 +68,7 @@ for (const c of chapterDefs ?? []) {
   seqMap.set(`${c.subject_id}::${(c.name ?? '').trim().toLowerCase()}`, c.sequence_no ?? 999)
 }
 
-  type Row = { subject_id: string | null; chapter: string | null; planned_date: string; duration_minutes: number; subjects: { name: string } | { name: string }[] | null }
+  type Row = { subject_id: string | null; chapter: string | null; planned_date: string; duration_minutes: number; status: string | null; subjects: { name: string } | { name: string }[] | null }
   const bySubject = new Map<string, { name: string; rows: Row[] }>()
   for (const r of (lecs ?? []) as Row[]) {
     const sid = r.subject_id
@@ -79,7 +81,8 @@ for (const c of chapterDefs ?? []) {
   const subjects: SubjectPace[] = []
   for (const [subjectId, { name, rows }] of bySubject) {
     const totalLectures = rows.length
-    const done = rows.filter((r) => r.planned_date < todayISO)
+    // "Done" = explicitly marked as conducted by central team audit (not date-based)
+    const done = rows.filter((r) => r.status === 'conducted')
     const doneLectures = done.length
     const totalHours = Math.round((rows.reduce((s, r) => s + (r.duration_minutes || 0), 0) / 60) * 10) / 10
     const doneHours = Math.round((done.reduce((s, r) => s + (r.duration_minutes || 0), 0) / 60) * 10) / 10
@@ -95,7 +98,7 @@ const chapters = [...byChapter.entries()]
   .map(([key, { display, rows: chapterRows }]) => ({
     name: display,
     totalLectures: chapterRows.length,
-    doneLectures: chapterRows.filter((row) => row.planned_date < todayISO).length,
+    doneLectures: chapterRows.filter((row) => row.status === 'conducted').length,
     seq: seqMap.get(`${subjectId}::${key}`) ?? 999,
   }))
   .sort((a, b2) => a.seq - b2.seq || a.name.localeCompare(b2.name))

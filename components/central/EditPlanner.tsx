@@ -445,8 +445,9 @@ export default function EditPlanner() {
         return
       }
       const from = liveBoundsRef.current.start > todayISO ? liveBoundsRef.current.start : todayISO
-      const searchEnd = new Date(from + 'T12:00:00')
-      searchEnd.setFullYear(searchEnd.getFullYear() + 2)
+      const batchEndDate = liveBoundsRef.current.end
+      // Never search beyond the batch's end date
+      const searchEnd = new Date((batchEndDate && batchEndDate > from ? batchEndDate : from) + 'T12:00:00')
       const d = new Date(from + 'T12:00:00')
       let newDate = '', newSlot: { start: string; duration: number; classroom: string | null } | null = null
       while (d <= searchEnd) {
@@ -1016,9 +1017,15 @@ export default function EditPlanner() {
                               type="date"
                               value={r.planned_date}
                               disabled={r.status === 'conducted'}
+                              max={liveBoundsRef.current.end || undefined}
                               onChange={(e) => {
                                 const newDate = e.target.value
                                 if (!newDate) return
+                                // Enforce batch end date
+                                if (liveBoundsRef.current.end && newDate > liveBoundsRef.current.end) {
+                                  setMessage({ type: 'error', text: `Cannot schedule beyond batch end date (${liveBoundsRef.current.end}).` })
+                                  return
+                                }
                                 const check = resolveLiveSlot(r.subject_id, newDate, r.key)
                                 if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
                                 setMessage(null)
@@ -1134,7 +1141,7 @@ export default function EditPlanner() {
           <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl border border-neutral-200" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-bold text-neutral-950 mb-1">Schedule this class</h3>
             <p className="text-sm text-neutral-500 mb-4">Keep the current date, or move it to a new one — either way it'll be marked Scheduled.</p>
-            <input type="date" value={confirmDate} onChange={(e) => setConfirmDate(e.target.value)} className="w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 mb-4" />
+            <input type="date" value={confirmDate} max={liveBoundsRef.current.end || undefined} onChange={(e) => setConfirmDate(e.target.value)} className="w-full h-10 px-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 mb-4" />
             <div className="flex gap-3">
               <BtnPrimary className="flex-1" onClick={applyConfirmed} disabled={!confirmDate}>Schedule</BtnPrimary>
               <BtnSecondary className="flex-1" onClick={() => setConfirmKey(null)}>Cancel</BtnSecondary>

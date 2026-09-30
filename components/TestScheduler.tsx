@@ -332,15 +332,15 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   // the card. Only future tests matter (past ones already happened).
   useEffect(() => {
     if (visibleTests.length === 0) { setCompletions({}); return }
-    // Wait until chaptersByTest is populated for Part tests before computing
-    const partTests = visibleTests.filter((t) => t.part_type === 'Part')
-    const anyPartTestMissingChapters = partTests.some((t) => !chaptersByTest[t.id])
-    if (partTests.length > 0 && anyPartTestMissingChapters) return  // chaptersByTest not ready yet
     let cancelled = false
-    const testsToCompute = partTests
+    const today = new Date().toISOString().split('T')[0]
+    const upcoming = visibleTests.filter((t) => t.test_date >= today && t.part_type === 'Part')
     ;(async () => {
       const out: Record<string, TestCompletion> = {}
-      for (const t of testsToCompute) {
+      for (const t of upcoming) {
+    ;(async () => {
+      const out: Record<string, TestCompletion> = {}
+      for (const t of upcoming) {
         const b = batches.find((x) => x.id === t.batch_id)
         const comp = await getTestCompletion(supabase, {
           batchId: t.batch_id,
@@ -1809,13 +1809,11 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                       {invigilator ? `${invigilator.full_name}${invigilator.faculty_type ? ` (${invigilator.faculty_type})` : ''}` : '—'}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {completion && completion.hasData
+                      {completion && isUpcoming && completion.hasData
                         ? <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${completion.pct >= 60 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                             {completion.pct}%{completion.pct < 60 ? ' ⚠' : ''}
                           </span>
-                        : t.part_type === 'Part' && (chaptersByTest[t.id]?.length ?? 0) > 0
-                          ? <span className="text-xs text-amber-600 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200">0% ⚠</span>
-                          : <span className="text-neutral-300 text-xs">—</span>}
+                        : <span className="text-neutral-300 text-xs">—</span>}
                     </td>
                     {canSchedule && (
                       <td className="px-3 py-2 text-right whitespace-nowrap">

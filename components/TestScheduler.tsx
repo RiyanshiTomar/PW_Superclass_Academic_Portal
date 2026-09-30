@@ -333,11 +333,9 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   useEffect(() => {
     if (visibleTests.length === 0) { setCompletions({}); return }
     let cancelled = false
-    const today = new Date().toISOString().split('T')[0]
-    const upcoming = visibleTests.filter((t) => t.test_date >= today)
     ;(async () => {
       const out: Record<string, TestCompletion> = {}
-      for (const t of upcoming) {
+      for (const t of visibleTests) {
         const b = batches.find((x) => x.id === t.batch_id)
         const comp = await getTestCompletion(supabase, {
           batchId: t.batch_id,
@@ -1749,6 +1747,21 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                 const chapters   = testChapterNames(t.id)
                 const completion = completions[t.id]
                 const isUpcoming = t.test_date >= new Date().toISOString().split('T')[0]
+
+                // Build per-subject chapter groups for multi-subject tests
+                type TCWithSubj = { test_id: string; chapters: { name: string; subject_id: string | null } | { name: string; subject_id: string | null }[] | null }
+                const tcRows = (testChapters as unknown as TCWithSubj[]).filter((tc) => tc.test_id === t.id)
+                const subjectGroups = new Map<string, { subjectName: string; chapterNames: string[] }>()
+                for (const tc of tcRows) {
+                  const chap = Array.isArray(tc.chapters) ? tc.chapters[0] : tc.chapters
+                  if (!chap) continue
+                  const sid = chap.subject_id ?? 'unknown'
+                  const subj = subjects.find((s) => s.id === sid)
+                  const sName = subj?.name ?? (subject?.name ?? '—')
+                  if (!subjectGroups.has(sid)) subjectGroups.set(sid, { subjectName: sName, chapterNames: [] })
+                  subjectGroups.get(sid)!.chapterNames.push(chap.name)
+                }
+                const subjectGroupList = Array.from(subjectGroups.values())
                 return (
                   <tr key={t.id} className={`hover:bg-neutral-50 ${!isUpcoming ? 'opacity-60' : ''}`}>
                     <td className="px-3 py-2 whitespace-nowrap font-medium">
@@ -1772,17 +1785,26 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                     <td className="px-3 py-2 max-w-[180px]">
                       {t.part_type === 'Full'
                         ? <span className="text-xs text-neutral-400">Full syllabus</span>
-                        : <div>
-                            <span className="text-xs font-medium">{subject?.name}</span>
-                            {chapters.length > 0 && <p className="text-xs text-neutral-400 truncate" title={chapters.join(', ')}>{chapters.join(', ')}</p>}
-                          </div>}
+                        : subjectGroupList.length > 1
+                          ? <div className="space-y-0.5">
+                              {subjectGroupList.map((g) => (
+                                <div key={g.subjectName}>
+                                  <span className="text-xs font-medium">{g.subjectName}</span>
+                                  {g.chapterNames.length > 0 && <p className="text-xs text-neutral-400 truncate" title={g.chapterNames.join(', ')}>{g.chapterNames.join(', ')}</p>}
+                                </div>
+                              ))}
+                            </div>
+                          : <div>
+                              <span className="text-xs font-medium">{subjectGroupList[0]?.subjectName ?? subject?.name}</span>
+                              {chapters.length > 0 && <p className="text-xs text-neutral-400 truncate" title={chapters.join(', ')}>{chapters.join(', ')}</p>}
+                            </div>}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap text-neutral-600">{classroom ? roomLabel(classroom) : '—'}</td>
                     <td className="px-3 py-2 whitespace-nowrap text-neutral-600">
                       {invigilator ? `${invigilator.full_name}${invigilator.faculty_type ? ` (${invigilator.faculty_type})` : ''}` : '—'}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {completion && isUpcoming && completion.hasData
+                      {completion && completion.hasData
                         ? <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${completion.pct >= 60 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                             {completion.pct}%{completion.pct < 60 ? ' ⚠' : ''}
                           </span>

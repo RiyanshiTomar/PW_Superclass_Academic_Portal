@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { Fragment, useState, useEffect, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
@@ -148,7 +148,7 @@ export default function DailyLectureAudit() {
     // slot active on the date (its segment + batch dates), matched to the
     // planner row of that batch+subject. A slot whose planner row is a BUFFER
     // (or that has no planner row at all) is still a real class — it shows up
-    // as "Not in planner" so it can be audited; a cancelled row hides it.
+    // as a "Buffer class" so it can be audited; a cancelled row hides it.
     // Planner rows on a date with no active slot for their subject are NOT
     // shown — same as the Calendar, which only shows what is scheduled now.
     const dow = new Date(date + 'T12:00:00').getDay()
@@ -360,12 +360,13 @@ export default function DailyLectureAudit() {
     [batches, filterCentre]
   )
 
+  // Planned lectures first; buffer classes (scheduled, no topic planned) after.
   const filtered = useMemo(() => {
-    return lectures.filter(l => {
-      if (filterStatus && l.audit_status !== filterStatus) return false
-      return true
-    })
+    const list = lectures.filter(l => !filterStatus || l.audit_status === filterStatus)
+    return [...list.filter(l => l.kind === 'planned'), ...list.filter(l => l.kind !== 'planned')]
   }, [lectures, filterStatus])
+  const firstBufferKey = filtered.find(l => l.kind !== 'planned')?.key
+  const bufferCount = filtered.filter(l => l.kind !== 'planned').length
 
   // Group by date — with single-date load this is just one group, but keeps the structure clean
   const dateGroups = useMemo((): DateGroup[] => {
@@ -414,13 +415,13 @@ export default function DailyLectureAudit() {
     const taughtChapter = e.chapter.trim(), taughtTopic = e.topic.trim()
     if (lecture.kind !== 'planned') {
       if (e.topic_check && (!taughtChapter || !taughtTopic)) {
-        setMessage({ type: 'error', text: 'This class is not in the planner — enter the chapter and topic that were taught before ticking Topic ✓.' })
+        setMessage({ type: 'error', text: 'This is a buffer class — enter the chapter and topic that were taught (or tap “Revision / Doubt”) before ticking Topic ✓.' })
         setSaving(''); return
       }
       const fields = {
         is_buffer: false,
-        chapter: taughtChapter || 'Not in planner',
-        topic_name: taughtTopic || 'Not in planner',
+        chapter: taughtChapter || 'Buffer class',
+        topic_name: taughtTopic || 'Buffer class',
         start_time: lecture.start_time,
         duration_minutes: lecture.duration_minutes ?? 60,
         classroom_id: lecture.classroom_id,
@@ -507,7 +508,7 @@ export default function DailyLectureAudit() {
       })
       // Update local state (a not-in-planner class is now a real lecture)
       const nowPlanned = lecture.kind !== 'planned'
-        ? { kind: 'planned' as const, planner_id: pid, key: pid, chapter: taughtChapter || 'Not in planner', topic_name: taughtTopic || 'Not in planner' }
+        ? { kind: 'planned' as const, planner_id: pid, key: pid, chapter: taughtChapter || 'Buffer class', topic_name: taughtTopic || 'Buffer class' }
         : {}
       setLectures(prev => prev.map(l =>
         l.key !== key ? l : { ...l, audit_status, ...e, ...nowPlanned }
@@ -692,7 +693,15 @@ export default function DailyLectureAudit() {
                   lecture.audit_status === 'flagged' ? 'bg-red-50/40' : ''
 
                 return (
-                  <tr key={lecture.key} className={rowBg + ' hover:bg-neutral-50/60'}>
+                  <Fragment key={lecture.key}>
+                  {lecture.key === firstBufferKey && (
+                    <tr>
+                      <td colSpan={13} className="px-3 py-2.5 bg-sky-50/70 border-y border-sky-100 text-xs text-sky-900">
+                        <b>Buffer classes · {bufferCount}</b> — the batch has a class at this time as per its schedule, but the planner kept it free (a buffer day for revision, doubts or catch-up). Note what was taught, or tap <b>Revision / Doubt</b>, then audit as usual.
+                      </td>
+                    </tr>
+                  )}
+                  <tr className={rowBg + ' hover:bg-neutral-50/60'}>
                     <td className={tdCls + ' whitespace-nowrap font-medium'}>
                       {fmt(lecture.start_time)}
                       {lecture.duration_minutes && <span className="text-neutral-400 text-xs ml-1">({lecture.duration_minutes}m)</span>}
@@ -709,10 +718,17 @@ export default function DailyLectureAudit() {
                         </>
                       ) : (
                         <div className="space-y-1">
-                          <span className="inline-block px-1.5 py-0.5 text-[10px] font-bold uppercase rounded bg-amber-100 text-amber-800 border border-amber-300"
-                            title={lecture.kind === 'buffer' ? 'Weekly class on a buffer slot — no topic was planned for it.' : 'Weekly class with no planner lecture on this date.'}>
-                            Not in planner{lecture.kind === 'buffer' ? ' · buffer slot' : ''}
-                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="inline-block px-1.5 py-0.5 text-[10px] font-bold uppercase rounded bg-sky-100 text-sky-800 border border-sky-200"
+                              title="Scheduled class with no topic planned (buffer day)">
+                              Buffer class
+                            </span>
+                            <button type="button"
+                              onClick={() => setEdits(prev => ({ ...prev, [lecture.key]: { ...prev[lecture.key], chapter: 'Revision', topic: 'Revision / doubt class' } }))}
+                              className="text-[10px] font-semibold px-1.5 py-0.5 rounded border border-neutral-200 text-neutral-600 hover:bg-neutral-50">
+                              Revision / Doubt
+                            </button>
+                          </div>
                           <input type="text" value={e.chapter} placeholder="Chapter taught"
                             onChange={ev => setEdits(prev => ({ ...prev, [lecture.key]: { ...prev[lecture.key], chapter: ev.target.value } }))}
                             className={inputCls} />
@@ -759,6 +775,7 @@ export default function DailyLectureAudit() {
                       </button>
                     </td>
                   </tr>
+                  </Fragment>
                 )
               })}
             </tbody>

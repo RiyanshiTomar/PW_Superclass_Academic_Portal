@@ -5,12 +5,14 @@ import { createClient } from '@/lib/supabase/client'
 import { getAppUser, getUserCentreIds } from '@/lib/auth'
 import { checkWeeklyScheduleOverlap, checkClassroomScheduleOverlap } from '@/lib/scheduling'
 import { assignPlanner } from '@/lib/planners'
+import { realignBatchPlanner, type RealignResult } from '@/lib/realign'
 import { computeBatchPacing, type BatchPacing } from '@/lib/pacing'
 import { mergeBatch } from '@/lib/merge'
 import { validateBatchDates, validateTimeRange } from '@/lib/validation'
 import { getBatchProgress, type BatchProgressData } from '@/lib/tests'
 import { DAYS, timesOverlap, daysBetween, toMinutes, addDaysToDate } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 
 type Program = { id: string; name: string }
 type Centre = { id: string; name: string }
@@ -152,6 +154,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
   const [attachPlanner, setAttachPlanner] = useState('')
   const [attaching, setAttaching] = useState(false)
 
+  const [aligningId, setAligningId] = useState<string | null>(null)
   // Merge-batches modal
   const [mergeOpen, setMergeOpen] = useState(false)
   const [survivorId, setSurvivorId] = useState('')
@@ -351,7 +354,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
       supabase.from('planners').select('id, name').order('created_at', { ascending: false }),
       supabase.from('batch_planner_links').select('id, batch_id, planner_id, faculty_id, stage, planners(name)'),
       supabase.from('faculty_subjects').select('faculty_id, subject_id'),
-      supabase.from('batch_planners').select('batch_id, planned_date, is_buffer'),
+      fetchAll<{ batch_id: string; planned_date: string; is_buffer: boolean }>((from, to) => supabase.from('batch_planners').select('batch_id, planned_date, is_buffer').eq('is_buffer', false).neq('status', 'cancelled').order('id').range(from, to)),
     ])
 
     if (batchesRes.error) setMessage({ type: 'error', text: batchesRes.error.message })
@@ -500,150 +503,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
 
   const updateDayTime = (rowIndex: number, dayIndex: number, patch: Partial<DaySlot>) =>
     setScheduleRows((prev) => prev.map((r, i) => (i !== rowIndex ? r : { ...r, days: r.days.map((d, di) => (di === dayIndex ? { ...d, ...patch } : d)) })))
-  
-  // After a schedule change, existing materialised classes (batch_planners) keep
-// whatever time/room they inherited when created — they do NOT auto-follow a
-// later schedule edit. This re-syncs ONLY the time/duration/room of FUTURE,
-// non-conducted rows to match the new weekly slot for their subject+weekday.
-// Topic, chapter, faculty, and status are never touched — this can't scramble
-// a live plan, it only fixes stale times/rooms.
-// Also adds buffer slots for any new schedule days that don't yet have
-// a batch_planners row — so central team can use + add row immediately.
-async function syncMaterialisedTimes(
-  supabase: ReturnType<typeof createClient>,
-  batchId: string,
-  flat: FlatSchedule[]
-): Promise<{ updated: number; unmatchedCount: number; newBuffers: number }> {
-  const today = new Date().toISOString().split('T')[0]
-  const { data, error } = await supabase
-    .from('batch_planners')
-    .select('id, subject_id, planned_date, start_time, duration_minutes, classroom_id, status')
-    .eq('batch_id', batchId)
-    .eq('is_buffer', false)
-    .gte('planned_date', today)
-  if (error || !data) return { updated: 0, unmatchedCount: 0, newBuffers: 0 }
 
-  const bySubjDay = new Map<string, { start: string; end: string; classroom: string | null; from: string | null; to: string | null }[]>()
-  for (const f of flat) {
-    if (!f.subject_id) continue
-    const key = `${f.subject_id}:${f.day_of_week}`
-    const arr = bySubjDay.get(key) ?? []
-    arr.push({ start: f.start_time, end: f.end_time, classroom: f.classroom_id, from: f.effective_from, to: f.effective_to })
-    bySubjDay.set(key, arr)
-  }
-
-  let updated = 0
-  let unmatchedCount = 0
-  for (const row of data as { id: string; subject_id: string | null; planned_date: string; start_time: string | null; duration_minutes: number; classroom_id: string | null; status?: string }[]) {
-    if (row.status === 'conducted' || !row.subject_id) continue
-    const dow = new Date(row.planned_date + 'T12:00:00').getDay()
-    const candidates = bySubjDay.get(`${row.subject_id}:${dow}`) ?? []
-    const slot = candidates.find((s) => (!s.from || row.planned_date >= s.from) && (!s.to || row.planned_date <= s.to)) ?? candidates[0]
-    if (!slot) { unmatchedCount++; continue }
-    const newStart = slot.start.slice(0, 5)
-    const newDur = Math.max(0, toMinutes(slot.end.slice(0, 5)) - toMinutes(slot.start.slice(0, 5)))
-    const curStart = row.start_time ? row.start_time.slice(0, 5) : null
-    if (curStart !== newStart || row.duration_minutes !== newDur || row.classroom_id !== slot.classroom) {
-      const { error: upErr } = await supabase.from('batch_planners').update({ start_time: slot.start, duration_minutes: newDur, classroom_id: slot.classroom }).eq('id', row.id)
-      if (!upErr) updated++
-    }
-  }
-
-  // --- New: Create buffer slots for schedule days that have no coverage ---
-  // For each (subject, weekday) slot, walk every date from today to end_date.
-  // If that date has no batch_planner row for this subject, insert a buffer.
-  let newBuffers = 0
-  try {
-    const { data: batchInfo } = await supabase
-      .from('batches').select('end_date').eq('id', batchId).single<{ end_date: string }>()
-    const endDate = batchInfo?.end_date ?? today
-
-    // Get existing link_id for this batch (needed to insert buffer rows)
-    const { data: linkData } = await supabase
-      .from('batch_planner_links').select('id, stage')
-      .eq('batch_id', batchId).limit(1).maybeSingle()
-    if (!linkData) return { updated, unmatchedCount, newBuffers: 0 }
-
-    // All existing batch_planners dates per subject (buffer + real, future only)
-    const { data: allRows } = await supabase
-      .from('batch_planners')
-      .select('subject_id, planned_date')
-      .eq('batch_id', batchId)
-      .gte('planned_date', today)
-    const existingBySubjDate = new Set<string>(
-      (allRows ?? []).map((r: { subject_id: string | null; planned_date: string }) =>
-        `${r.subject_id ?? ''}:${r.planned_date}`
-      )
-    )
-
-    // Get faculty_id per subject from existing real lectures (buffer inherits same faculty)
-    const { data: facSample } = await supabase
-      .from('batch_planners')
-      .select('subject_id, faculty_id')
-      .eq('batch_id', batchId)
-      .eq('is_buffer', false)
-      .not('faculty_id', 'is', null)
-    const facultyBySubject = new Map<string, string>()
-    for (const r of (facSample ?? []) as { subject_id: string | null; faculty_id: string | null }[]) {
-      if (r.subject_id && r.faculty_id && !facultyBySubject.has(r.subject_id))
-        facultyBySubject.set(r.subject_id, r.faculty_id)
-    }
-
-    const toInsert: Record<string, unknown>[] = []
-    // Walk each (subject, weekday) combination in the new schedule
-    const uniqueSubjDays = new Map<string, { subjectId: string; dow: number; slots: typeof bySubjDay extends Map<string, infer V> ? V : never }>()
-    for (const [key, slots] of bySubjDay.entries()) {
-      const [subjectId, dowStr] = key.split(':')
-      uniqueSubjDays.set(key, { subjectId, dow: parseInt(dowStr), slots })
-    }
-
-    for (const { subjectId, dow, slots } of uniqueSubjDays.values()) {
-      const d = new Date(today + 'T12:00:00')
-      const end = new Date(endDate + 'T12:00:00')
-      while (d <= end) {
-        if (d.getDay() === dow) {
-          const dateStr = d.toISOString().split('T')[0]
-          const slot = slots.find(sl => (!sl.from || dateStr >= sl.from) && (!sl.to || dateStr <= sl.to)) ?? slots[0]
-          if (slot && !existingBySubjDate.has(`${subjectId}:${dateStr}`)) {
-            const dur = Math.max(0, toMinutes(slot.end.slice(0, 5)) - toMinutes(slot.start.slice(0, 5)))
-            const facultyId = facultyBySubject.get(subjectId) ?? null
-            if (!facultyId) { d.setDate(d.getDate() + 1); continue } // skip if no faculty known yet
-            toInsert.push({
-              batch_id: batchId,
-              link_id: linkData.id,
-              subject_id: subjectId,
-              faculty_id: facultyId,
-              planned_date: dateStr,
-              start_time: slot.start,
-              duration_minutes: dur,
-              classroom_id: slot.classroom,
-              is_buffer: true,
-              stage: linkData.stage || 'Draft',
-              chapter: '',
-              topic_name: '',
-            })
-            // Mark as existing to avoid duplicate inserts within this pass
-            existingBySubjDate.add(`${subjectId}:${dateStr}`)
-          }
-        }
-        d.setDate(d.getDate() + 1)
-      }
-    }
-
-    if (toInsert.length > 0) {
-      // Insert in chunks to avoid payload limits
-      const CHUNK = 200
-      for (let i = 0; i < toInsert.length; i += CHUNK) {
-        const { error: insErr } = await supabase.from('batch_planners').insert(toInsert.slice(i, i + CHUNK))
-        if (!insErr) newBuffers += Math.min(CHUNK, toInsert.length - i)
-      }
-    }
-  } catch (_) {
-    // Non-critical — just return without new buffers
-  }
-
-  return { updated, unmatchedCount, newBuffers }
-}
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
     setMessage(null)
@@ -762,27 +622,38 @@ async function syncMaterialisedTimes(
 
     let syncNote = ''
     if (batchId) {
-      await supabase.from('batch_schedules').delete().eq('batch_id', batchId)
+      // Insert the new schedule FIRST, then remove the old rows — if the insert
+      // fails, the batch keeps its previous schedule instead of losing it.
+      const { data: oldRows } = await supabase.from('batch_schedules').select('id').eq('batch_id', batchId)
       if (flat.length > 0) {
         const rows = flat.map((s) => ({ batch_id: batchId, day_of_week: s.day_of_week, start_time: s.start_time, end_time: s.end_time, faculty_id: s.faculty_id, subject_id: s.subject_id, classroom_id: s.classroom_id, effective_from: s.effective_from, effective_to: s.effective_to }))
         const { error } = await supabase.from('batch_schedules').insert(rows)
         if (error) {
           const msg = /foreign key|batch_id_fkey/i.test(error.message)
             ? 'The batch record went missing while saving the schedule (it may have been deleted elsewhere). The list will refresh — please try again.'
-            : error.message
+            : `${error.message} — the previous schedule is unchanged.`
           await loadData()
           return fail(msg)
         }
       }
-      // Existing planner classes keep the time/room they inherited when made —
-      // re-sync any future (non-conducted) ones to the new slot so a schedule
-      // edit doesn't leave a stale duplicate sitting at the old time.
-      if (editingBatch) {
-        const sync = await syncMaterialisedTimes(supabase, batchId, flat)
-        if (sync.updated) syncNote = ` ${sync.updated} already-scheduled class(es) were moved to the new time/room.`
-        if (sync.newBuffers) syncNote += ` ${sync.newBuffers} new buffer slot(s) added for new schedule days.`
-        if (sync.unmatchedCount) syncNote += ` ${sync.unmatchedCount} class(es) no longer have a matching weekly slot on their day — check them in Edit Planner.`
+      const oldIds = (oldRows ?? []).map((r) => r.id as string)
+      for (let i = 0; i < oldIds.length; i += 150) {
+        const { error } = await supabase.from('batch_schedules').delete().in('id', oldIds.slice(i, i + 150))
+        if (error) { await loadData(); return fail(`New schedule saved, but the old rows could not be removed: ${error.message}. Open the batch again and re-save.`) }
       }
+      // Record who changed which batch's timetable (Admin → Audit Log).
+      {
+        const { data: { user } } = await supabase.auth.getUser()
+        const au = user ? await getAppUser(supabase, user) : null
+        await supabase.from('audit_log').insert({
+          user_id: au?.id ?? null, action: editingBatch ? `Schedule updated — ${trimmedName}` : `Batch created — ${trimmedName}`,
+          entity_type: 'batch', entity_id: batchId, details: { slots: flat.length },
+        })
+      }
+      // The planner must follow the schedule: upcoming lectures that no longer
+      // sit on a class of their subject would turn into hidden "ghost" rows.
+      // Preview the re-alignment and apply it once confirmed.
+      if (editingBatch) syncNote = ' ' + (await alignPlanner(batchId, trimmedName, true))
     }
 
     setMessage({ type: 'success', text: (editingBatch ? 'Batch updated.' : 'Batch created.') + syncNote })
@@ -794,6 +665,39 @@ async function syncMaterialisedTimes(
       setMessage({ type: 'error', text })
       setSaving(false)
     }
+  }
+
+  function realignSummary(r: RealignResult) {
+    const parts: string[] = []
+    if (r.moved) parts.push(`${r.moved} lecture(s) move to the next class-date of their subject (topic order kept)`)
+    if (r.retimed) parts.push(`${r.retimed} lecture(s) get the new time/room`)
+    if (r.buffersAdded || r.buffersRemoved) parts.push(`buffer slots re-matched to free class-dates (+${r.buffersAdded} / −${r.buffersRemoved})`)
+    if (r.unplaced) parts.push(`${r.unplaced} lecture(s) do NOT fit before the batch end date with this schedule — they stay where they are; add classes or extend the batch`)
+    return parts
+  }
+
+  // Dry-run → confirm → apply. Returns a one-line note for the status message.
+  async function alignPlanner(batchId: string, batchName: string, afterSave = false): Promise<string> {
+    const preview = await realignBatchPlanner(supabase, batchId, { dryRun: true })
+    if (!preview.ok) return `Planner check failed: ${preview.error}`
+    const changes = preview.moved + preview.retimed + preview.buffersAdded + preview.buffersRemoved
+    if (!changes) return preview.unplaced ? `Planner: ${preview.unplaced} lecture(s) don't fit before the batch end date — add classes or extend the batch.` : afterSave ? '' : 'Planner already matches the schedule.'
+    const lines = realignSummary(preview)
+    const sample = preview.samples.length ? `\n\nFor example:\n${preview.samples.slice(0, 5).join('\n')}` : ''
+    if (!confirm(`${afterSave ? 'Schedule saved. ' : ''}Align "${batchName}"'s planner to its current schedule?\n\n• ${lines.join('\n• ')}${sample}\n\nConducted and past classes are never touched.`)) {
+      return 'Planner NOT aligned — some upcoming lectures are not on a scheduled class. Use "Align planner" on the batch card when ready.'
+    }
+    const res = await realignBatchPlanner(supabase, batchId)
+    if (!res.ok) return `Planner alignment failed: ${res.error}`
+    return `Planner aligned: ${realignSummary(res).join('; ')}.`
+  }
+
+  async function handleAlign(batch: Batch) {
+    setMessage(null)
+    setAligningId(batch.id)
+    const note = await alignPlanner(batch.id, batch.name)
+    setAligningId(null)
+    setMessage({ type: /failed/i.test(note) ? 'error' : 'success', text: note })
   }
 
   async function handleDelete(batch: Batch) {
@@ -1283,6 +1187,7 @@ async function syncMaterialisedTimes(
                   </div>
                   <div className="flex gap-2 mt-auto">
                     <BtnSecondary className="flex-1" onClick={() => handleEdit(b)}>Edit</BtnSecondary>
+                    {bl.length > 0 && <button onClick={() => handleAlign(b)} disabled={aligningId === b.id} title="Put every upcoming lecture on a scheduled class of its subject" className="flex-1 px-3 py-2 border rounded-lg text-sm font-medium bg-sky-50 hover:bg-sky-100 text-sky-700 border-sky-200 disabled:opacity-50">{aligningId === b.id ? 'Checking…' : 'Align planner'}</button>}
                     {!isBranch && <button onClick={() => openAttach(b)} disabled={bl.length > 0} title={bl.length > 0 ? 'A planner is already attached to this batch' : 'Attach a planner'} className={`flex-1 px-3 py-2 border rounded-lg text-sm font-medium ${bl.length > 0 ? 'bg-neutral-100 text-neutral-400 border-neutral-200 cursor-not-allowed' : 'bg-violet-50 hover:bg-violet-100 text-violet-700 border-violet-200'}`}>{bl.length > 0 ? 'Planner attached' : 'Attach Planner'}</button>}
                     {!isBranch && <button onClick={() => handleDelete(b)} className="px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-lg text-sm font-medium">Delete</button>}
                   </div>

@@ -65,6 +65,10 @@ export default function RescheduleRequestsPage() {
   const [filter, setFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending')
   const [reviewingId, setReviewingId] = useState<string | null>(null)
   const [reviewNotes, setReviewNotes] = useState('')
+  // Which request the typed notes belong to — kept apart from reviewingId
+  // (the "busy" flag), so typing a remark never disables the buttons.
+  const [notesFor, setNotesFor] = useState<string | null>(null)
+  const notesOf = (id: string) => (notesFor === id ? reviewNotes : '')
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
   // Cancel-with-substitute review
   const [cancelReview, setCancelReview] = useState<RescheduleRequest | null>(null)
@@ -97,6 +101,8 @@ export default function RescheduleRequestsPage() {
   async function approveRequest(req: RescheduleRequest) {
     setReviewingId(req.id)
     setMessage(null)
+    const reviewNotes = notesOf(req.id)
+    let cancelInfo = ''
     const { data: { user } } = await supabase.auth.getUser()
     const appUser = user ? await getAppUser(supabase, user) : null
     if (!appUser) { setReviewingId(null); setMessage({ type: 'error', text: 'Session expired.' }); return }
@@ -140,7 +146,22 @@ export default function RescheduleRequestsPage() {
           : undefined
         result = await addExtraLecture(supabase, req.planner_id, req.requested_date!, req.requested_start_time ?? null, dur && dur > 0 ? dur : undefined, { topic_name: req.extra_topic ?? null, chapter: req.extra_chapter ?? null })
       } else if (isCancellation(req)) {
-        result = await cascadeCancel(supabase, req.planner_id)
+        // The lecture may have moved since the faculty asked (e.g. a test shift):
+        // never cancel a different day's class than the one requested.
+        const { data: cur } = await supabase.from('batch_planners').select('planned_date').eq('id', req.planner_id).maybeSingle<{ planned_date: string }>()
+        const today = new Date().toISOString().split('T')[0]
+        let c: Awaited<ReturnType<typeof cascadeCancel>>
+        if (cur && req.original_date && cur.planned_date !== req.original_date.slice(0, 10)) {
+          c = { ok: false, shifted: 0, error: `This lecture has moved from ${fmt(req.original_date)} to ${fmt(cur.planned_date)} since the request was raised, so cancelling it now would cancel a different day's class. Reject this request and ask the faculty to raise a fresh one if needed.` }
+        } else if (req.original_date && req.original_date.slice(0, 10) < today) {
+          c = { ok: false, shifted: 0, error: `${fmt(req.original_date)} has already passed — a past class can't be cancelled. Reject the request, or mark what happened in the Daily Lecture Audit.` }
+        } else {
+          c = await cascadeCancel(supabase, req.planner_id)
+        }
+        result = c
+        cancelInfo = c.topicUnplaced
+          ? 'Class cancelled. No buffer slot is left before the batch end date, so its topic is NOT re-placed — add it again from Edit Planner.'
+          : c.shifted > 0 ? `Class cancelled — its topic moved to the next class; ${c.shifted} lecture(s) shifted forward onto the buffer.` : 'Class cancelled.'
       } else if (isPrepone(req)) {
         // Prepone the WHOLE chapter from the faculty's chosen start date: its
         // classes move to the front of the subject's class-dates from there.
@@ -191,7 +212,7 @@ export default function RescheduleRequestsPage() {
     setReviewNotes('')
     if (error) { setMessage({ type: 'error', text: 'Failed to record approval: ' + error.message }); return }
     await notify(supabase, req.requested_by, { type: 'reschedule', title: 'Request approved', body: 'Your request was approved by Central.', link: isTest(req) ? '/faculty/tests' : '/faculty/calendar' })
-    setMessage({ type: 'success', text: isTest(req) ? 'Approved — test moved to the new slot.' : isExtra(req) ? 'Approved — extra class added to the faculty calendar.' : isPrepone(req) ? 'Approved — chapter preponed; other chapters slid after it.' : isCancellation(req) ? 'Cancelled — later lectures shifted up.' : 'Approved — class moved to the requested slot.' })
+    setMessage({ type: 'success', text: isTest(req) ? 'Approved — test moved to the new slot.' : isExtra(req) ? 'Approved — extra class added to the faculty calendar.' : isPrepone(req) ? 'Approved — chapter preponed; other chapters slid after it.' : isCancellation(req) ? (cancelInfo || 'Class cancelled.') : 'Approved — class moved to the requested slot.' })
     loadRequests()
   }
 
@@ -210,6 +231,7 @@ export default function RescheduleRequestsPage() {
 
   // Keep the class, just swap in a free substitute faculty (no cancellation).
   async function assignSubstitute(req: RescheduleRequest, facultyId: string, facultyName: string) {
+    const reviewNotes = notesOf(req.id)
     setSubBusy(true); setMessage(null)
     const { data: { user } } = await supabase.auth.getUser()
     const appUser = user ? await getAppUser(supabase, user) : null
@@ -225,6 +247,7 @@ export default function RescheduleRequestsPage() {
   }
 
   async function rejectRequest(req: RescheduleRequest) {
+    const reviewNotes = notesOf(req.id)
     setReviewingId(req.id)
     setMessage(null)
     const { data: { user } } = await supabase.auth.getUser()
@@ -307,7 +330,7 @@ export default function RescheduleRequestsPage() {
                   </div>
                   {req.status === 'pending' && (
                     <div className="w-52 shrink-0">
-                      <textarea value={reviewingId === req.id ? reviewNotes : ''} onChange={(e) => { setReviewingId(req.id); setReviewNotes(e.target.value) }} placeholder="Notes (optional)" rows={2} className="w-full px-2 py-1 border border-neutral-300 rounded text-xs mb-2" />
+                      <textarea value={notesFor === req.id ? reviewNotes : ''} onChange={(e) => { if (notesFor !== req.id) setNotesFor(req.id); setReviewNotes(e.target.value) }} placeholder="Notes (optional)" rows={2} className="w-full px-2 py-1 border border-neutral-300 rounded text-xs mb-2" />
                       <div className="flex gap-2">
                         <button onClick={() => (isCancellation(req) ? openCancelReview(req) : approveRequest(req))} disabled={reviewingId === req.id} className="h-8 px-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">{isCancellation(req) ? 'Review & Approve' : 'Approve'}</button>
                         <button onClick={() => rejectRequest(req)} disabled={reviewingId === req.id} className="h-8 px-3 bg-red-600 hover:bg-red-700 disabled:bg-neutral-300 text-white text-xs font-semibold rounded-lg">Reject</button>

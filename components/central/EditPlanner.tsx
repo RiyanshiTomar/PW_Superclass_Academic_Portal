@@ -6,6 +6,7 @@ import { rematerialiseLink } from '@/lib/planners'
 import { fetchMaster, type Master } from '@/lib/syllabus'
 import { toMinutes, DAYS } from '@/lib/utils'
 import { getTestsForBatch, type PlannerTest } from '@/lib/tests'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 import { Alert, BtnPrimary, BtnSecondary, Card } from '@/components/PortalShell'
 
 type Planner = { id: string; name: string; program_id: string | null }
@@ -80,16 +81,29 @@ export default function EditPlanner() {
   // For safe "+ add row" in live mode: the batch's weekly slots per subject,
   // its date bounds, and the dates/times tests occupy — so a new row lands on a
   // genuinely free class-date (no lecture, no test) and never overlaps.
-  const liveSchedRef = useRef<Map<string, Map<number, { start: string; duration: number; classroom: string | null }>>>(new Map())
+  // subject → weekday → that weekday's slot segments (timing can change mid-batch)
+  const liveSchedRef = useRef<Map<string, Map<number, { start: string; duration: number; classroom: string | null; from: string | null; to: string | null }[]>>>(new Map())
   const liveTestsRef = useRef<Map<string, [number, number][]>>(new Map())
   const liveBoundsRef = useRef<{ start: string; end: string }>({ start: '', end: '' })
   // Buffer slots per subject (sorted by date) — used by liveAddRow to consume
   // the next available buffer when central team adds a new class.
   type LiveBuffer = { id: string; planned_date: string; start_time: string | null; duration_minutes: number; classroom_id: string | null; subject_id: string | null }
   const liveBuffersRef = useRef<LiveBuffer[]>([])
+  // Same list as state, so the summary card re-renders when it changes.
+  const [liveBuffers, setLiveBuffers] = useState<LiveBuffer[]>([])
+  const [addLectureChapter, setAddLectureChapter] = useState('')
 
   const [activeSubject, setActiveSubject] = useState('')
   const [search, setSearch] = useState('')
+  // Column filters (on top of the free-text search) — narrow the board to the
+  // rows the team wants to check or edit.
+  const [fFaculty, setFFaculty] = useState('')
+  const [fStatus, setFStatus] = useState('')
+  const [fChapter, setFChapter] = useState('')
+  const [fFrom, setFFrom] = useState('')
+  const [fTo, setFTo] = useState('')
+  const filtersOn = !!(search || fFaculty || fStatus || fChapter || fFrom || fTo)
+  const clearFilters = () => { setSearch(''); setFFaculty(''); setFStatus(''); setFChapter(''); setFFrom(''); setFTo('') }
   const [reorderMode, setReorderMode] = useState<'rows' | 'chapters'>('rows')
   const [viewMode, setViewMode] = useState<'chapter' | 'date'>('date')
   const dragKeyRef = useRef<string | null>(null)
@@ -247,7 +261,8 @@ export default function EditPlanner() {
       const isBuffer = (l.is_buffer as boolean) ?? false
       // Buffers stay untouched in the DB (we never load them for edit, so a
       // per-row save can't disturb them).
-      if (isBuffer || !chapter.trim()) continue
+      // Cancelled classes are history, not editable lectures.
+      if (isBuffer || !chapter.trim() || l.status === 'cancelled') continue
       const id = l.id as string
       origIds.add(id)
       // Each row keeps its OWN inherited time/room (two subjects can share a
@@ -276,19 +291,23 @@ export default function EditPlanner() {
     // Extra context for safe "+ add row": weekly slots per subject, test-busy
     // dates, and the batch's date bounds.
     const [schedRes, testRes, batchRes] = await Promise.all([
-      supabase.from('batch_schedules').select('subject_id, day_of_week, start_time, end_time, classroom_id').eq('batch_id', filterBatch),
-      supabase.from('test_schedules').select('test_date, start_time, duration_minutes').eq('batch_id', filterBatch),
+      supabase.from('batch_schedules').select('subject_id, day_of_week, start_time, end_time, classroom_id, effective_from, effective_to').eq('batch_id', filterBatch),
+      // Own + multi-batch tests; a cancelled test frees its slot.
+      getTestsForBatch(supabase, filterBatch),
       supabase.from('batches').select('start_date, end_date').eq('id', filterBatch).single<{ start_date: string; end_date: string }>(),
     ])
-    const sched = new Map<string, Map<number, { start: string; duration: number; classroom: string | null }>>()
-    for (const s of (schedRes.data ?? []) as { subject_id: string | null; day_of_week: number; start_time: string; end_time: string; classroom_id: string | null }[]) {
+    const sched = new Map<string, Map<number, { start: string; duration: number; classroom: string | null; from: string | null; to: string | null }[]>>()
+    for (const s of (schedRes.data ?? []) as { subject_id: string | null; day_of_week: number; start_time: string; end_time: string; classroom_id: string | null; effective_from: string | null; effective_to: string | null }[]) {
       if (!s.subject_id) continue
       if (!sched.has(s.subject_id)) sched.set(s.subject_id, new Map())
       const m = sched.get(s.subject_id)!
-      if (!m.has(s.day_of_week)) m.set(s.day_of_week, { start: s.start_time.slice(0, 5), duration: toMinutes(s.end_time.slice(0, 5)) - toMinutes(s.start_time.slice(0, 5)), classroom: s.classroom_id ?? null })
+      const segs = m.get(s.day_of_week) ?? []
+      segs.push({ start: s.start_time.slice(0, 5), duration: toMinutes(s.end_time.slice(0, 5)) - toMinutes(s.start_time.slice(0, 5)), classroom: s.classroom_id ?? null, from: s.effective_from ?? null, to: s.effective_to ?? null })
+      m.set(s.day_of_week, segs)
     }
     const testsByDate = new Map<string, [number, number][]>()
-    for (const t of (testRes.data ?? []) as { test_date: string; start_time: string; duration_minutes: number }[]) {
+    for (const t of testRes) {
+      if (t.stage === 'Cancelled' || !t.start_time) continue
       const ts = toMinutes(t.start_time.slice(0, 5)); const arr = testsByDate.get(t.test_date) ?? []
       arr.push([ts, ts + t.duration_minutes]); testsByDate.set(t.test_date, arr)
     }
@@ -297,19 +316,20 @@ export default function EditPlanner() {
     liveBoundsRef.current = { start: batchRes.data?.start_date ?? todayISO, end: batchRes.data?.end_date ?? todayISO }
 
     // Load tests for this batch
-    const batchTests = await getTestsForBatch(supabase, filterBatch)
-    setTests(batchTests)
+    setTests(testRes)
 
     // Load buffer slots for this batch — sorted by date so liveAddRow always
     // picks the nearest future buffer first.
-    const { data: bufferData } = await supabase
+    const { data: bufferData } = await fetchAll<LiveBuffer>((from, to) => supabase
       .from('batch_planners')
       .select('id, subject_id, planned_date, start_time, duration_minutes, classroom_id')
       .eq('link_id', linkId)
       .eq('is_buffer', true)
       .gte('planned_date', todayISO)
-      .order('planned_date', { ascending: true })
-    liveBuffersRef.current = (bufferData ?? []) as LiveBuffer[]
+      .order('planned_date', { ascending: true }).order('id')
+      .range(from, to))
+    liveBuffersRef.current = bufferData
+    setLiveBuffers(bufferData)
 
     setRows(real); setKeptBuffers([])
     setActiveSubject(real[0]?.subject_id ?? '')
@@ -332,23 +352,52 @@ export default function EditPlanner() {
     const left = rows.filter((r) => r.subject_id === activeSubject && r.status !== 'conducted' && r.planned_date >= todayISO)
     const mins = left.reduce((a, r) => a + (r.duration_minutes || 60), 0)
     const done = rows.filter((r) => r.subject_id === activeSubject && r.status === 'conducted').length
-    return { lecturesLeft: left.length, hoursLeft: mins / 60, conducted: done }
+    // Free buffer slots of this subject from today to the batch end date (a
+    // buffer already taken by a row on the board doesn't count).
+    const taken = new Set(rows.map((r) => r.db_id).filter(Boolean))
+    const end = liveBoundsRef.current.end
+    const free = liveBuffers.filter((b) => b.subject_id === activeSubject && !taken.has(b.id) && b.planned_date >= todayISO && (!end || b.planned_date <= end))
+    return { lecturesLeft: left.length, hoursLeft: mins / 60, conducted: done, buffersLeft: free.length, nextBuffer: free[0]?.planned_date ?? null, endDate: end || null }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, activeSubject])
+  }, [rows, activeSubject, liveBuffers])
 
   // Rows for the active subject, filtered by search (teacher / topic / chapter),
   // grouped by chapter; chapters ordered by their earliest date, rows by date.
   // Tests are shown inline with lectures on their scheduled dates.
-  const chapterGroups = useMemo(() => {
+  const rowMatches = (r: EditRow) => {
+    if (r.subject_id !== activeSubject) return false
     const q = search.toLowerCase().trim()
-    const list = rows.filter((r) => r.subject_id === activeSubject && (!q || facName(r.faculty_id).toLowerCase().includes(q) || r.topic_name.toLowerCase().includes(q) || r.chapter.toLowerCase().includes(q)))
+    if (q && !(facName(r.faculty_id).toLowerCase().includes(q) || r.topic_name.toLowerCase().includes(q) || r.chapter.toLowerCase().includes(q))) return false
+    if (fFaculty && (fFaculty === '__none' ? !!r.faculty_id : r.faculty_id !== fFaculty)) return false
+    if (fStatus && r.status !== fStatus) return false
+    if (fChapter && r.chapter !== fChapter) return false
+    if (fFrom && r.planned_date < fFrom) return false
+    if (fTo && r.planned_date > fTo) return false
+    return true
+  }
+  // A test belongs on this subject's board when it is Full, or when the active
+  // subject is its own subject or one of its chapters' (multi-subject Part tests).
+  const testOnBoard = (t: PlannerTest) => {
+    if (!liveLinkId) return false
+    if (t.stage === 'Cancelled') return false
+    if (fFrom && t.test_date < fFrom) return false
+    if (fTo && t.test_date > fTo) return false
+    if (t.part_type === 'Full') return true
+    return t.subject_id === activeSubject || t.chapters.some((c) => c.subject_id === activeSubject)
+  }
+
+  // A test's syllabus for this board: its chapters in the active subject (all
+  // chapters for a Full test), or "Full syllabus" when none are tagged.
+  const testSyllabus = (t: PlannerTest) => {
+    const mine = t.chapters.filter((c) => !c.subject_id || c.subject_id === activeSubject || t.part_type === 'Full')
+    if (mine.length) return mine.map((c) => c.name).join(', ')
+    return t.part_type === 'Full' ? 'Full syllabus' : ''
+  }
+
+  const chapterGroups = useMemo(() => {
+    const list = rows.filter(rowMatches)
     
-    // Filter tests by active subject (or show all if Full test, or if no subject filter needed in live mode)
-    const relevantTests = tests.filter(t => {
-      if (!liveLinkId) return false  // Only show tests in live/batch mode
-      if (t.part_type === 'Full') return true  // Full tests apply to all subjects
-      return t.subject_id === activeSubject  // Part tests filter by subject
-    })
+    const relevantTests = tests.filter(testOnBoard)
     
     const byChap = new Map<string, EditRow[]>()
     for (const r of list) { if (!byChap.has(r.chapter)) byChap.set(r.chapter, []); byChap.get(r.chapter)!.push(r) }
@@ -357,23 +406,33 @@ export default function EditPlanner() {
     
     return { groups, tests: relevantTests }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, activeSubject, search, faculty, tests, liveLinkId])
+  }, [rows, activeSubject, search, faculty, tests, liveLinkId, fFaculty, fStatus, fChapter, fFrom, fTo])
 
   // Flat date-wise view: all rows + tests for the active subject sorted by date
   const dateSortedRows = useMemo(() => {
-    const q = search.toLowerCase().trim()
     const lectures = rows
-      .filter((r) => r.subject_id === activeSubject && (!q || facName(r.faculty_id).toLowerCase().includes(q) || r.topic_name.toLowerCase().includes(q) || r.chapter.toLowerCase().includes(q)))
+      .filter(rowMatches)
       .sort((a, b) => a.planned_date.localeCompare(b.planned_date) || (a.start_time ?? '').localeCompare(b.start_time ?? ''))
     // Relevant tests for date view (same filter as chapterGroups)
-    const relevantTests = tests.filter(t => {
-      if (!liveLinkId) return false
-      if (t.part_type === 'Full') return true
-      return t.subject_id === activeSubject
-    })
+    // Tests are hidden while a row-only filter (faculty/status/chapter/search) is on.
+    const rowOnly = !!(search || fFaculty || fStatus || fChapter)
+    const relevantTests = rowOnly ? [] : tests.filter(testOnBoard)
     return { lectures, tests: relevantTests }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, activeSubject, search, faculty, tests, liveLinkId])
+  }, [rows, activeSubject, search, faculty, tests, liveLinkId, fFaculty, fStatus, fChapter, fFrom, fTo])
+
+  // Options for the filter dropdowns (active subject only).
+  const filterOptions = useMemo(() => {
+    const subjRows = rows.filter((r) => r.subject_id === activeSubject)
+    const chapters = Array.from(new Set(subjRows.map((r) => r.chapter).filter(Boolean)))
+    const facIds = Array.from(new Set(subjRows.map((r) => r.faculty_id).filter(Boolean)))
+    return {
+      chapters,
+      faculty: facIds.map((id) => ({ id, name: facName(id) || 'Unknown' })).sort((a, b) => a.name.localeCompare(b.name)),
+      hasUnassigned: subjRows.some((r) => !r.faculty_id),
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, activeSubject, faculty])
   const availableChaptersToAdd = useMemo(() => {
     const subj = master?.subjects.find((s) => s.id === activeSubject)
     if (!subj) return []
@@ -452,7 +511,7 @@ export default function EditPlanner() {
       let newDate = '', newSlot: { start: string; duration: number; classroom: string | null } | null = null
       while (d <= searchEnd) {
         const dateStr = d.toISOString().split('T')[0]
-        const slot = sched.get(d.getDay())
+        const slot = liveSlotFor(subjectId, dateStr)
         if (slot && !usedDates.has(dateStr)) { newDate = dateStr; newSlot = slot; break }
         d.setDate(d.getDate() + 1)
       }
@@ -487,6 +546,7 @@ export default function EditPlanner() {
       }
       // Add to ref so save logic knows it was a buffer
       liveBuffersRef.current = [...liveBuffersRef.current, inserted as LiveBuffer]
+      setLiveBuffers(liveBuffersRef.current)
       anyBuffer = inserted as LiveBuffer
     }
 
@@ -551,18 +611,61 @@ export default function EditPlanner() {
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, status } : r)))
   }
 
+  // The subject's weekly slot that is actually running on `date` (its segment).
   const liveSlotFor = (subjectId: string, date: string) =>
-    liveSchedRef.current.get(subjectId)?.get(new Date(date + 'T12:00:00').getDay()) ?? null
+    (liveSchedRef.current.get(subjectId)?.get(new Date(date + 'T12:00:00').getDay()) ?? [])
+      .find((g) => (!g.from || date >= g.from) && (!g.to || date <= g.to)) ?? null
 
   // Validate a live (batch) date for a row. Past/conducted dates are history and
   // are never blocked. For TODAY ONWARDS the date must have a weekly slot for the
   // subject AND be free of every other upcoming class and every test — so a live
   // edit can never create an overlap.
-  const resolveLiveSlot = (subjectId: string, date: string, selfKey?: string): { ok: boolean; error?: string; slot?: { start: string; duration: number; classroom: string | null } } => {
+  // The subject's timetable from the Batch Scheduler, as readable lines:
+  // "Tue, Thu · 17:05–18:05 · 18 May 2026 → 30 Apr 2027" (one per segment).
+  const scheduleLines = (subjectId: string): string[] => {
+    const byDow = liveSchedRef.current.get(subjectId)
+    if (!byDow) return []
+    const groups = new Map<string, number[]>()
+    for (const [dow, segs] of byDow) {
+      for (const g of segs) {
+        const k = `${g.start}|${g.duration}|${g.from ?? ''}|${g.to ?? ''}`
+        groups.set(k, [...(groups.get(k) ?? []), dow])
+      }
+    }
+    const b = liveBoundsRef.current
+    const short = (d: string) => new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+    return Array.from(groups.entries())
+      .sort(([a], [z]) => a.split('|')[2].localeCompare(z.split('|')[2]))
+      .map(([k, dows]) => {
+        const [start, dur, from, to] = k.split('|')
+        const end = (() => { const m = toMinutes(start) + Number(dur); return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}` })()
+        const days = [...new Set(dows)].sort((x, y) => ((x + 6) % 7) - ((y + 6) % 7)).map((d) => DAYS[d]).join(', ')
+        return `${days} · ${start}–${end} · ${short(from || b.start)} → ${short(to || b.end)}`
+      })
+  }
+
+  // First date on/after `from` (up to the batch end) that has this subject's class.
+  const nextClassDate = (subjectId: string, from: string): string | null => {
+    const end = liveBoundsRef.current.end
+    const d = new Date(from + 'T12:00:00')
+    for (let i = 0; i < 400; i++) {
+      const ds = d.toISOString().split('T')[0]
+      if (end && ds > end) return null
+      if (liveSlotFor(subjectId, ds)) return ds
+      d.setDate(d.getDate() + 1)
+    }
+    return null
+  }
+
+  const resolveLiveSlot = (subjectId: string, date: string, selfKey?: string): { ok: boolean; error?: string; clashKey?: string; slot?: { start: string; duration: number; classroom: string | null } } => {
     if (!liveLinkId) return { ok: true }
     if (date < todayISO) return { ok: true } // past = already conducted → allowed as-is
     const weekly = liveSlotFor(subjectId, date)
-    if (!weekly) return { ok: false, error: `No weekly ${subjName(subjectId)} class on ${DAYS[new Date(date + 'T12:00:00').getDay()]} — add its slot or pick another day.` }
+    if (!weekly) {
+      const lines = scheduleLines(subjectId)
+      const next = nextClassDate(subjectId, date)
+      return { ok: false, error: `${subjName(subjectId)} has no class on ${fmtDate(date)}. As per the Batch Scheduler it runs only on: ${lines.length ? lines.join('; ') : 'no days yet'}.${next ? ` Next ${subjName(subjectId)} class date: ${fmtDate(next)}.` : ' No class date is left before the batch end.'} To use another day, change the schedule in Batch Scheduler first.` }
+    }
     const s = toMinutes(weekly.start), e = s + weekly.duration
     // Another upcoming class of THIS batch at the same date/time?
     for (const or of rows) {
@@ -570,7 +673,7 @@ export default function EditPlanner() {
       if (!or.start_time) continue
       const os = toMinutes(or.start_time.slice(0, 5))
       if (s < os + (or.duration_minutes || 60) && e > os) {
-        return { ok: false, error: `Clashes with ${subjName(or.subject_id)} “${or.topic_name || 'class'}” already at that time on ${fmtDate(date)}.` }
+        return { ok: false, clashKey: or.key, error: `Clashes with ${subjName(or.subject_id)} “${or.topic_name || 'class'}” already at that time on ${fmtDate(date)}.` }
       }
     }
     // A test that day at the same time?
@@ -833,8 +936,36 @@ export default function EditPlanner() {
               <div><div className="text-xs text-neutral-400 uppercase tracking-wider">After today</div><div className="text-lg font-bold text-neutral-950">{summary.lecturesLeft} lecture{summary.lecturesLeft === 1 ? '' : 's'} left</div></div>
               <div><div className="text-xs text-neutral-400 uppercase tracking-wider">Hours left</div><div className="text-lg font-bold text-violet-700">{summary.hoursLeft.toFixed(summary.hoursLeft % 1 === 0 ? 0 : 1)} hrs</div></div>
               <div><div className="text-xs text-neutral-400 uppercase tracking-wider">Conducted</div><div className="text-lg font-bold text-neutral-500">{summary.conducted}</div></div>
+              {liveLinkId && (
+                <>
+                  <div title="Free class slots of this subject (from today to the batch end) that an extra or shifted lecture can use">
+                    <div className="text-xs text-neutral-400 uppercase tracking-wider">Buffer slots left</div>
+                    <div className={`text-lg font-bold ${summary.buffersLeft === 0 ? 'text-red-600' : summary.buffersLeft < 3 ? 'text-amber-600' : 'text-emerald-600'}`}>{summary.buffersLeft}</div>
+                  </div>
+                  <div><div className="text-xs text-neutral-400 uppercase tracking-wider">Next buffer</div><div className="text-sm font-semibold text-neutral-700 mt-1">{summary.nextBuffer ? fmtDate(summary.nextBuffer) : '—'}</div></div>
+                  <div><div className="text-xs text-neutral-400 uppercase tracking-wider">Batch ends</div><div className="text-sm font-semibold text-neutral-700 mt-1">{summary.endDate ? fmtDate(summary.endDate) : '—'}</div></div>
+                </>
+              )}
               <div className="ml-auto text-xs text-neutral-400">for <b className="text-neutral-600">{subjName(activeSubject)}</b></div>
             </div>
+            {liveLinkId && (
+              <div className="mt-3 pt-3 border-t border-neutral-100 text-xs text-neutral-600">
+                <span className="font-semibold text-neutral-500 uppercase tracking-wider mr-2">{subjName(activeSubject)} classes</span>
+                {scheduleLines(activeSubject).length ? scheduleLines(activeSubject).map((l) => <span key={l} className="inline-block mr-3 px-2 py-0.5 rounded bg-violet-50 text-violet-800 border border-violet-100">{l}</span>) : <span className="text-amber-700">No weekly slot in the Batch Scheduler yet.</span>}
+                <div className="text-neutral-400 mt-1">Lecture dates can only be on these days and dates — they follow the Batch Scheduler. Change the schedule there to use other days.</div>
+              </div>
+            )}
+            {liveLinkId && (
+              <div className="mt-3 pt-3 border-t border-neutral-100 flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Add a lecture</span>
+                <select value={addLectureChapter} onChange={(e) => setAddLectureChapter(e.target.value)} className="h-9 min-w-[220px] px-2 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                  <option value="">Pick a chapter…</option>
+                  {filterOptions.chapters.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <button onClick={() => { if (addLectureChapter) void liveAddRow(activeSubject, addLectureChapter) }} disabled={!addLectureChapter} className="h-9 px-4 rounded-lg text-sm font-semibold bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-40">+ Add lecture</button>
+                <span className="text-xs text-neutral-400">Uses the next free buffer slot ({summary.nextBuffer ? fmtDate(summary.nextBuffer) : 'a new slot is found from the schedule'}) — never past the batch end. Save to keep it.</span>
+              </div>
+            )}
           </Card>
 
           {/* Toolbar: search + reorder mode */}
@@ -862,6 +993,50 @@ export default function EditPlanner() {
               <button onClick={() => { setAddChapterName(''); setAddChapterOpen(true) }} className="h-10 px-4 rounded-lg text-sm font-semibold bg-violet-50 text-violet-700 border border-violet-200 hover:bg-violet-100 whitespace-nowrap">+ add chapter</button>
             </div>
           </div>
+
+          {/* Column filters */}
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="min-w-[170px]">
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Faculty</label>
+              <select value={fFaculty} onChange={(e) => setFFaculty(e.target.value)} className="w-full h-10 px-2 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                <option value="">All faculty</option>
+                {filterOptions.faculty.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+                {filterOptions.hasUnassigned && <option value="__none">— Not assigned —</option>}
+              </select>
+            </div>
+            <div className="min-w-[150px]">
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Status</label>
+              <select value={fStatus} onChange={(e) => setFStatus(e.target.value)} className="w-full h-10 px-2 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                <option value="">All</option>
+                <option value="planned">Planned</option>
+                <option value="confirmed">Scheduled ✓</option>
+                <option value="conducted">Already conducted</option>
+              </select>
+            </div>
+            <div className="flex-1 min-w-[200px]">
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Chapter</label>
+              <select value={fChapter} onChange={(e) => setFChapter(e.target.value)} className="w-full h-10 px-2 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                <option value="">All chapters</option>
+                {filterOptions.chapters.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">From</label>
+              <input type="date" value={fFrom} onChange={(e) => setFFrom(e.target.value)} className="h-10 px-2 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">To</label>
+              <input type="date" value={fTo} onChange={(e) => setFTo(e.target.value)} className="h-10 px-2 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+            </div>
+            {filtersOn && (
+              <button onClick={clearFilters} className="h-10 px-4 rounded-lg text-sm font-semibold bg-white text-neutral-600 border border-neutral-200 hover:bg-neutral-50">Clear filters</button>
+            )}
+          </div>
+          {filtersOn && (
+            <p className="text-xs text-neutral-500 -mt-2">
+              Showing {dateSortedRows.lectures.length} of {rows.filter((r) => r.subject_id === activeSubject).length} {subjName(activeSubject)} lecture(s). Saving still saves the whole plan — hidden rows are kept as they are.
+            </p>
+          )}
 
           {/* ── DATE VIEW ── */}
           {viewMode === 'date' && (
@@ -906,7 +1081,10 @@ export default function EditPlanner() {
                             <tr key={`test-${t.id}-${idx}`} className="bg-violet-50/60">
                               <td className="px-3 py-2 whitespace-nowrap font-medium text-violet-700">{fmtDate(t.test_date)}</td>
                               <td className="px-3 py-2 whitespace-nowrap text-neutral-500">{t.start_time.slice(0,5)} <span className="text-xs">({t.duration_minutes}m)</span></td>
-                              <td className="px-3 py-2 text-xs font-semibold text-violet-700" colSpan={3}>📝 TEST: {t.name} · {t.test_type} · {t.part_type}</td>
+                              <td className="px-3 py-2 text-xs font-semibold text-violet-700" colSpan={3}>
+                                📝 TEST: {t.name} · {t.test_type} · {t.part_type}
+                                {testSyllabus(t) && <div className="mt-0.5 font-normal text-neutral-600">Syllabus: {testSyllabus(t)}</div>}
+                              </td>
                               <td className="px-3 py-2">
                                 <span className={`inline-block px-2 py-0.5 text-[10px] font-bold uppercase rounded-full border ${t.stage === 'Confirmed' ? 'bg-emerald-100 text-emerald-800 border-emerald-300' : 'bg-amber-100 text-amber-800 border-amber-300'}`}>{t.stage}</span>
                               </td>
@@ -1027,6 +1205,20 @@ export default function EditPlanner() {
                                   return
                                 }
                                 const check = resolveLiveSlot(r.subject_id, newDate, r.key)
+                                // Same subject already on that slot → swap the two lectures'
+                                // dates (each re-inherits its date's slot), so the move works
+                                // and nothing ever overlaps.
+                                const other = !check.ok && check.clashKey ? rows.find((x) => x.key === check.clashKey) : null
+                                if (other && other.subject_id === r.subject_id && other.status !== 'conducted' && r.planned_date >= todayISO) {
+                                  const slot = liveSlotFor(r.subject_id, newDate)
+                                  setRows((prev) => prev.map((x) => {
+                                    if (x.key === r.key) return withLiveSlot({ ...x, planned_date: newDate, ...(slot ? { start_time: slot.start, classroom_id: slot.classroom, duration_minutes: slot.duration } : {}) })
+                                    if (x.key === other.key) return withLiveSlot({ ...x, planned_date: r.planned_date })
+                                    return x
+                                  }))
+                                  setMessage({ type: 'info', text: `Swapped: “${r.topic_name || 'this lecture'}” → ${fmtDate(newDate)}, and “${other.topic_name || 'that lecture'}” → ${fmtDate(r.planned_date)}. Click Save to keep it.` })
+                                  return
+                                }
                                 if (!check.ok) { setMessage({ type: 'error', text: check.error ?? 'That date conflicts with an existing class.' }); return }
                                 setMessage(null)
                                 updateRow(r.key, { planned_date: newDate, ...(check.slot ? { start_time: check.slot.start, classroom_id: check.slot.classroom, duration_minutes: check.slot.duration } : {}) })
@@ -1067,6 +1259,7 @@ export default function EditPlanner() {
                             </div>
                             <div className="flex-1 min-w-[160px] h-9 px-2 flex items-center bg-neutral-50 border border-neutral-200 rounded-lg text-sm font-semibold text-violet-700">
                               🧪 TEST: {t.name}
+                              {testSyllabus(t) && <span className="ml-2 font-normal text-xs text-neutral-600 truncate" title={testSyllabus(t)}>· {testSyllabus(t)}</span>}
                             </div>
                             <div className="w-[160px] sm:shrink-0 h-9 px-2 flex items-center bg-neutral-50 border border-neutral-200 rounded-lg text-xs text-neutral-600">
                               {t.start_time.slice(0,5)} · {t.duration_minutes}m

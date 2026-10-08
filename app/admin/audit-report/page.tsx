@@ -3,6 +3,7 @@
 import { useEffect, useState, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -104,6 +105,11 @@ function downloadCSV(content: string, filename: string) {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
+type PlannerAuditRow = {
+  id: string; planned_date: string; start_time: string | null; duration_minutes: number; chapter: string; topic_name: string
+  batches: unknown; subjects: unknown; app_users: unknown; lecture_audits: unknown
+}
+
 export default function AuditReportPage() {
   const supabase = createClient()
 
@@ -130,7 +136,7 @@ export default function AuditReportPage() {
     setOwners((ct ?? []) as Owner[])
 
     // Fetch all batch_planners in date range with batch owner info
-    const { data: planners, error } = await supabase
+    const { data: planners, error } = await fetchAll<PlannerAuditRow>((from, to) => supabase
       .from('batch_planners')
       .select(`
         id, planned_date, start_time, duration_minutes, chapter, topic_name,
@@ -148,8 +154,10 @@ export default function AuditReportPage() {
       .lte('planned_date', filterTo)
       .order('planned_date', { ascending: true })
       .order('start_time',   { ascending: true })
+      .order('id')
+      .range(from, to) as unknown as PromiseLike<{ data: PlannerAuditRow[] | null; error: { message: string } | null }>)
 
-    if (error) { setMessage({ type: 'error', text: error.message }); setLoading(false); return }
+    if (error) { setMessage({ type: 'error', text: error }); setLoading(false); return }
 
     const merged: AuditRow[] = (planners ?? []).map(p => {
       const batch   = one(p.batches  as never) as { id: string; name: string; batch_owner_id: string | null; centres: unknown; app_users: unknown } | null

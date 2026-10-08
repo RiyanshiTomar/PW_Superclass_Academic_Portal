@@ -2,7 +2,8 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { addDaysToDate, daysBetween, toMinutes } from '@/lib/utils'
 import { isDateInRange } from '@/lib/validation'
 import { notifyUsers } from '@/lib/notifications'
-import { resolveTestConflicts } from '@/lib/tests'
+import { resolveTestConflicts, shiftSubjectForward } from '@/lib/tests'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 
 // ============================================================
 // Planner engine: create planners, assign (materialise) them onto
@@ -32,90 +33,79 @@ type RowResult = { imported: number; errors: string[]; moved: string[] }
 type WeeklyBusy = { day_of_week: number; start: number; end: number; from: string | null; to: string | null }
 type DatedBusy = { date: string; start: number; end: number }
 
-/** All of a faculty's committed time (weekly recurring + dated planners),
- *  excluding a set of batch_planners row ids (the rows being moved). */
-async function facultyBusyExcluding(
+/** All committed time of one faculty / one room: weekly recurring slots (only
+ *  while their segment & batch are running), dated planner lectures (buffers
+ *  and cancelled rows hold nothing) and non-cancelled tests. `excludeIds` are
+ *  batch_planners row ids being moved. Two DIFFERENT rooms at the same time are
+ *  fine — a clash is only ever the same faculty, or the same room, twice. */
+const todayISO = () => new Date().toISOString().split('T')[0]
+
+async function busyExcluding(
   supabase: SupabaseClient,
-  facultyId: string,
+  col: 'faculty_id' | 'classroom_id',
+  id: string,
   excludeIds: string[]
 ): Promise<{ weekly: WeeklyBusy[]; dated: DatedBusy[] }> {
-  const [weeklyRes, datedRes] = await Promise.all([
+  const [weeklyRes, datedRes, testRes] = await Promise.all([
     supabase
       .from('batch_schedules')
-      .select('day_of_week, start_time, end_time, effective_from, effective_to')
-      .eq('faculty_id', facultyId),
-    supabase
+      .select('day_of_week, start_time, end_time, effective_from, effective_to, batches(start_date, end_date, status)')
+      .eq(col, id),
+    fetchAll<{ id: string; planned_date: string; start_time: string; duration_minutes: number }>((from, to) => supabase
       .from('batch_planners')
       .select('id, planned_date, start_time, duration_minutes')
-      .eq('faculty_id', facultyId)
-      .not('start_time', 'is', null),
+      .eq(col, id)
+      .eq('is_buffer', false)
+      .neq('status', 'cancelled')
+      .gte('planned_date', todayISO())
+      .not('start_time', 'is', null)
+      .order('id').range(from, to)),
+    fetchAll<{ test_date: string; start_time: string | null; duration_minutes: number }>((from, to) => supabase
+      .from('test_schedules')
+      .select('test_date, start_time, duration_minutes')
+      .eq(col, id)
+      .neq('stage', 'Cancelled')
+      .gte('test_date', todayISO())
+      .order('id').range(from, to)),
   ])
 
-  const weekly: WeeklyBusy[] = (weeklyRes.data ?? []).map((r) => ({
-    day_of_week: r.day_of_week as number,
-    start: toMinutes((r.start_time as string).slice(0, 5)),
-    end: toMinutes((r.end_time as string).slice(0, 5)),
-    from: (r.effective_from as string | null) ?? null,
-    to: (r.effective_to as string | null) ?? null,
-  }))
+  const weekly: WeeklyBusy[] = (weeklyRes.data ?? [])
+    .filter((r) => {
+      const b = (Array.isArray(r.batches) ? r.batches[0] : r.batches) as { status?: string } | null
+      return b?.status !== 'Merged'
+    })
+    .map((r) => {
+      const b = (Array.isArray(r.batches) ? r.batches[0] : r.batches) as { start_date?: string; end_date?: string } | null
+      return {
+        day_of_week: r.day_of_week as number,
+        start: toMinutes((r.start_time as string).slice(0, 5)),
+        end: toMinutes((r.end_time as string).slice(0, 5)),
+        from: (r.effective_from as string | null) ?? b?.start_date ?? null,
+        to: (r.effective_to as string | null) ?? b?.end_date ?? null,
+      }
+    })
 
   const exclude = new Set(excludeIds)
-  const dated: DatedBusy[] = (datedRes.data ?? [])
+  const dated: DatedBusy[] = datedRes.data
     .filter((r) => !exclude.has(r.id as string))
     .map((r) => {
       const start = toMinutes((r.start_time as string).slice(0, 5))
-      return {
-        date: r.planned_date as string,
-        start,
-        end: start + (r.duration_minutes as number),
-      }
+      return { date: r.planned_date as string, start, end: start + (r.duration_minutes as number) }
     })
+  for (const t of testRes.data) {
+    if (!t.start_time) continue
+    const start = toMinutes((t.start_time as string).slice(0, 5))
+    dated.push({ date: t.test_date as string, start, end: start + ((t.duration_minutes as number) || 60) })
+  }
 
   return { weekly, dated }
 }
 
-/** All of a room's committed time (weekly recurring + dated planners),
- *  excluding a set of batch_planners row ids (the rows being moved). Mirrors
- *  facultyBusyExcluding — one classroom can only host one class at a time. */
-async function classroomBusyExcluding(
-  supabase: SupabaseClient,
-  classroomId: string,
-  excludeIds: string[]
-): Promise<{ weekly: WeeklyBusy[]; dated: DatedBusy[] }> {
-  const [weeklyRes, datedRes] = await Promise.all([
-    supabase
-      .from('batch_schedules')
-      .select('day_of_week, start_time, end_time, effective_from, effective_to')
-      .eq('classroom_id', classroomId),
-    supabase
-      .from('batch_planners')
-      .select('id, planned_date, start_time, duration_minutes')
-      .eq('classroom_id', classroomId)
-      .not('start_time', 'is', null),
-  ])
+const facultyBusyExcluding = (supabase: SupabaseClient, facultyId: string, excludeIds: string[]) =>
+  busyExcluding(supabase, 'faculty_id', facultyId, excludeIds)
 
-  const weekly: WeeklyBusy[] = (weeklyRes.data ?? []).map((r) => ({
-    day_of_week: r.day_of_week as number,
-    start: toMinutes((r.start_time as string).slice(0, 5)),
-    end: toMinutes((r.end_time as string).slice(0, 5)),
-    from: (r.effective_from as string | null) ?? null,
-    to: (r.effective_to as string | null) ?? null,
-  }))
-
-  const exclude = new Set(excludeIds)
-  const dated: DatedBusy[] = (datedRes.data ?? [])
-    .filter((r) => !exclude.has(r.id as string))
-    .map((r) => {
-      const start = toMinutes((r.start_time as string).slice(0, 5))
-      return {
-        date: r.planned_date as string,
-        start,
-        end: start + (r.duration_minutes as number),
-      }
-    })
-
-  return { weekly, dated }
-}
+const classroomBusyExcluding = (supabase: SupabaseClient, classroomId: string, excludeIds: string[]) =>
+  busyExcluding(supabase, 'classroom_id', classroomId, excludeIds)
 
 /** Does a proposed lecture conflict with the faculty's (or room's) other commitments? */
 function conflictReason(
@@ -144,7 +134,7 @@ function conflictReason(
   }
   for (const d of busy.dated) {
     if (d.date === date && start < d.end && end > d.start) {
-      return `overlaps another planned lecture on ${date}`
+      return `overlaps another lecture or test on ${date}`
     }
   }
   return null
@@ -718,72 +708,44 @@ export async function addExtraLecture(
   return { ok: true }
 }
 
-/** Cancel one materialised lecture and close the gap: later lectures of the
- *  same link slide earlier to the freed slot, preserving relative spacing. */
+/** Cancel one lecture (the class on that date doesn't happen). Its topic is
+ *  still owed, so it and the subject's following lectures each move forward
+ *  one class-date until a buffer date absorbs the shift — every moved lecture
+ *  rides its new date's weekly slot, so nothing can overlap, and nothing goes
+ *  past the batch end date. A "cancelled" marker stays on the cancelled date
+ *  so the audit/calendar know no class ran. If no buffer is left, the lecture
+ *  itself is just marked cancelled (its topic needs re-planning). */
 export async function cascadeCancel(
   supabase: SupabaseClient,
   rowId: string
-): Promise<{ ok: boolean; shifted: number; error?: string }> {
+): Promise<{ ok: boolean; shifted: number; error?: string; topicUnplaced?: boolean }> {
   const { data: target } = await supabase
     .from('batch_planners')
-    .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes')
+    .select('id, batch_id, subject_id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes, status, is_buffer, stage')
     .eq('id', rowId)
-    .single<TargetRow>()
+    .single<TargetRow & { batch_id: string; status: string; is_buffer: boolean; stage: string }>()
   if (!target) return { ok: false, shifted: 0, error: 'Lecture not found.' }
+  if (target.status === 'conducted') return { ok: false, shifted: 0, error: 'This class is already conducted — it can’t be cancelled.' }
+  if (target.status === 'cancelled') return { ok: true, shifted: 0 }
 
-  let subsequent: TargetRow[] = []
-  if (target.link_id && target.faculty_id) {
-    const { data } = await supabase
-      .from('batch_planners')
-      .select('id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes')
-      .eq('link_id', target.link_id)
-      .eq('faculty_id', target.faculty_id)
-      .gt('planned_date', target.planned_date)
-      .order('planned_date', { ascending: true })
-    subsequent = (data ?? []) as TargetRow[]
+  const res = target.subject_id && !target.is_buffer
+    ? await shiftSubjectForward(supabase, target.batch_id, target.subject_id, target.planned_date)
+    : { moved: 0, unmoved: 1 }
+
+  if (res.moved > 0) {
+    const { error } = await supabase.from('batch_planners').insert({
+      batch_id: target.batch_id, link_id: target.link_id, subject_id: target.subject_id,
+      faculty_id: target.faculty_id, classroom_id: target.classroom_id,
+      planned_date: target.planned_date, start_time: target.start_time, duration_minutes: target.duration_minutes,
+      chapter: '', topic_name: 'Class cancelled', is_buffer: false, status: 'cancelled', stage: target.stage || 'Confirmed',
+    })
+    if (error) return { ok: false, shifted: res.moved, error: `Lectures shifted, but the cancelled-day marker failed: ${error.message}` }
+    return { ok: true, shifted: res.moved }
   }
 
-  // Gap = distance to the next lecture; everything slides up by that much.
-  const delta = subsequent.length > 0 ? daysBetween(target.planned_date, subsequent[0].planned_date) : 0
-
-  if (subsequent.length > 0 && delta > 0 && target.faculty_id) {
-    const excludeIds = [target.id, ...subsequent.map((s) => s.id)]
-    const busy = await facultyBusyExcluding(supabase, target.faculty_id, excludeIds)
-    const roomBusyCache: Record<string, { weekly: WeeklyBusy[]; dated: DatedBusy[] }> = {}
-    const updates: { id: string; planned_date: string }[] = []
-    for (const row of subsequent) {
-      const propDate = addDaysToDate(row.planned_date, -delta)
-      if (row.start_time) {
-        const reason = conflictReason(propDate, row.start_time, row.duration_minutes, busy)
-        if (reason) return { ok: false, shifted: 0, error: `Cannot cancel & shift: ${reason}.` }
-
-        let roomBusy: { weekly: WeeklyBusy[]; dated: DatedBusy[] } | null = null
-        if (row.classroom_id) {
-          if (!roomBusyCache[row.classroom_id]) roomBusyCache[row.classroom_id] = await classroomBusyExcluding(supabase, row.classroom_id, excludeIds)
-          roomBusy = roomBusyCache[row.classroom_id]
-          const rReason = conflictReason(propDate, row.start_time, row.duration_minutes, roomBusy)
-          if (rReason) return { ok: false, shifted: 0, error: `Cannot cancel & shift: room ${rReason}.` }
-        }
-
-        const slot = { date: propDate, start: toMinutes(row.start_time.slice(0, 5)), end: toMinutes(row.start_time.slice(0, 5)) + row.duration_minutes }
-        busy.dated.push(slot)
-        if (roomBusy) roomBusy.dated.push(slot)
-      }
-      updates.push({ id: row.id, planned_date: propDate })
-    }
-    for (const u of updates) {
-      const { error } = await supabase
-        .from('batch_planners')
-        .update({ planned_date: u.planned_date })
-        .eq('id', u.id)
-      if (error) return { ok: false, shifted: 0, error: error.message }
-    }
-  }
-
-  const { error: delErr } = await supabase.from('batch_planners').delete().eq('id', target.id)
-  if (delErr) return { ok: false, shifted: 0, error: delErr.message }
-
-  return { ok: true, shifted: subsequent.length }
+  const { error } = await supabase.from('batch_planners').update({ status: 'cancelled' }).eq('id', target.id)
+  if (error) return { ok: false, shifted: 0, error: error.message }
+  return { ok: true, shifted: 0, topicUnplaced: !target.is_buffer }
 }
 
 /** Prepone an ENTIRE chapter for a subject: move that chapter's upcoming

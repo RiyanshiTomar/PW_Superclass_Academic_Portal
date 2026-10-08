@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import {
   createTest, updateTest, setTestStage, getEligibleChapters, getTestCompletion, getBatchFreeWindows, validateTestSlot,
@@ -206,7 +207,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       supabase.from('classrooms').select('id, name, room_no, centre_id, is_active').order('room_no'),
       supabase.rpc('list_active_faculty', { p_centre_id: null }),
       supabase.from('user_centres').select('user_id, centre_id'),
-      supabase.from('test_schedules').select('id, batch_id, subject_id, classroom_id, faculty_id, name, test_date, start_time, duration_minutes, test_type, part_type, stage').order('test_date', { ascending: false }),
+      fetchAll<TestRow>((from, to) => supabase.from('test_schedules').select('id, batch_id, subject_id, classroom_id, faculty_id, name, test_date, start_time, duration_minutes, test_type, part_type, stage').order('test_date', { ascending: false }).order('id').range(from, to)),
     ])
     if (bRes.data) setBatches(bRes.data as Batch[])
     if (cRes.data) setCentres(cRes.data as Centre[])
@@ -218,15 +219,20 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
       setTests(tRes.data as TestRow[])
       const ids = (tRes.data as TestRow[]).map((t) => t.id)
       if (ids.length) {
-        const { data: tc } = await supabase.from('test_chapters').select('test_id, chapter_id, chapters(name, subject_id)').in('test_id', ids).limit(5000)
-        const rows = (tc ?? []) as unknown as (TestChapterRow & { chapter_id: string })[]
+        // Chunked + paged: hundreds of test ids in one .in() overflow the URL
+        // (Bad Request → no chapters, no mappings), and rows pass 1000.
+        const [{ data: tc }, { data: tbm }] = await Promise.all([
+          fetchAllIn<TestChapterRow & { chapter_id: string }>(ids, (chunk, from, to) =>
+            supabase.from('test_chapters').select('test_id, chapter_id, chapters(name, subject_id)').in('test_id', chunk).order('test_id').order('chapter_id').range(from, to) as unknown as PromiseLike<{ data: (TestChapterRow & { chapter_id: string })[] | null; error: { message: string } | null }>),
+          fetchAllIn<{ test_id: string; batch_id: string }>(ids, (chunk, from, to) =>
+            supabase.from('test_batch_mappings').select('test_id, batch_id').in('test_id', chunk).order('test_id').order('batch_id').range(from, to)),
+        ])
+        const rows = tc
         setTestChapters(rows as TestChapterRow[])
         const map: Record<string, string[]> = {}
         for (const r of rows) { (map[r.test_id] ??= []).push(r.chapter_id) }
         setChaptersByTest(map)
 
-        // Load multi-batch mappings for all tests
-        const { data: tbm } = await supabase.from('test_batch_mappings').select('test_id, batch_id').in('test_id', ids)
         const batchMappings: Record<string, string[]> = {}
         for (const mapping of (tbm ?? [])) {
           if (!batchMappings[mapping.test_id]) batchMappings[mapping.test_id] = []
@@ -1110,7 +1116,8 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const filteredTests = useMemo(() => {
     const fc = filterCentre, fb = filterBatchId, ts = testSearch.toLowerCase().trim()
     return visibleTests.filter((t) => {
-      if (fc && !batches.find((b) => b.id === t.batch_id && b.centre_id === fc)) return false
+      // A multi-batch test belongs to every centre any of its batches is at.
+      if (fc && ![t.batch_id, ...(testBatchMappings[t.id] || [])].some((id) => batches.find((b) => b.id === id && b.centre_id === fc))) return false
       if (fb && t.batch_id !== fb && !(testBatchMappings[t.id] || []).includes(fb)) return false
       if (ts && !t.name.toLowerCase().includes(ts)) return false
       return true

@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { activeBatchStudents } from '@/lib/students'
 
 // ============================================================
 // Test results: student roster (the batch's ASSIGNED students), saving
@@ -14,12 +15,9 @@ export async function fetchRoster(
   supabase: SupabaseClient,
   batchId: string
 ): Promise<{ students: RosterStudent[]; error?: string }> {
-  const { data, error } = await supabase
-    .from('students')
-    .select('regno, student_name')
-    .eq('batch_id', batchId)
-    .order('student_name')
-  if (error) return { students: [], error: error.message }
+  // Active students only — a discarded student (left the batch) gets no new marks.
+  const { data, error } = await activeBatchStudents(supabase, batchId)
+  if (error) return { students: [], error }
   if (!data || data.length === 0) return { students: [], error: 'No students assigned to this batch yet — the Branch Head assigns students under Students.' }
   return { students: data.map((r) => ({ regno: r.regno as string, name: (r.student_name as string) ?? '' })) }
 }

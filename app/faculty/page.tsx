@@ -6,6 +6,7 @@ import { getAppUser } from '@/lib/auth'
 import { minutesToHours } from '@/lib/utils'
 import { Card, PageHeader } from '@/components/PortalShell'
 import CountUp from '@/components/CountUp'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 
 type Row = {
   batch_id: string
@@ -45,12 +46,15 @@ export default function FacultyHome() {
       setName(appUser.full_name)
 
       const today = new Date().toISOString().split('T')[0]
-      const { data } = await supabase
+      const { data } = await fetchAll<Record<string, unknown>>((from, to) => supabase
         .from('batch_planners')
         .select('batch_id, planned_date, duration_minutes, stage, batches(name, centres(name))')
         .eq('faculty_id', appUser.id)
+        .eq('is_buffer', false)
+        .neq('status', 'cancelled')
         .in('stage', ['Faculty Assigned', 'Confirmed'])
-        .order('planned_date', { ascending: true })
+        .order('planned_date', { ascending: true }).order('id')
+        .range(from, to))
 
       const byBatch = new Map<string, BatchStat>()
       for (const r of (data ?? []) as unknown as Row[]) {

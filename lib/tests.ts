@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { toMinutes, addDaysToDate } from '@/lib/utils'
+import { toMinutes, addDaysToDate, weeklySlotActiveOn, WEEKLY_SLOT_COLS } from '@/lib/utils'
 import { notify } from '@/lib/notifications'
+import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 
 // ============================================================
 // Test scheduler engine: chapter completion (topics taught by a date),
@@ -21,6 +22,36 @@ export type EligibleChapter = {
 
 const overlaps = (aS: number, aE: number, bS: number, bE: number) => aS < bE && aE > bS
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().trim()
+
+// Real-world occupancy rules shared by every clash check below:
+//  • A weekly slot only occupies a date inside its own segment AND its batch's
+//    dates (a finished / not-yet-started / merged batch holds no room).
+//  • Buffer rows and cancelled lectures hold nothing; cancelled tests neither.
+//  • Two DIFFERENT rooms at the same time are fine. A clash is only the same
+//    room, the same faculty, or the same batch booked twice at once.
+
+type WeeklyRow = { start_time: string; end_time: string; effective_from: string | null; effective_to: string | null; batches: unknown }
+
+/** Live planner lectures only (buffers & cancelled hold no slot) — wraps a select. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const liveLectures = <Q extends { eq: any }>(q: Q): Q => q.eq('is_buffer', false).neq('status', 'cancelled')
+
+/** Non-cancelled tests that occupy a batch on a date — its own tests plus the
+ *  multi-batch tests it is mapped into as a secondary batch. */
+async function batchTestsOn(
+  supabase: SupabaseClient,
+  batchId: string,
+  date: string,
+  ignoreTestId?: string
+): Promise<{ id: string; name: string; start_time: string; duration_minutes: number }[]> {
+  const { data: maps } = await supabase.from('test_batch_mappings').select('test_id').eq('batch_id', batchId)
+  const mapped = (maps ?? []).map((r) => r.test_id as string)
+  let q = supabase.from('test_schedules').select('id, name, start_time, duration_minutes').eq('test_date', date).neq('stage', 'Cancelled')
+  q = mapped.length ? q.or(`batch_id.eq.${batchId},id.in.(${mapped.join(',')})`) : q.eq('batch_id', batchId)
+  if (ignoreTestId) q = q.neq('id', ignoreTestId)
+  const { data } = await q
+  return ((data ?? []) as { id: string; name: string; start_time: string; duration_minutes: number }[]).filter((r) => !!r.start_time)
+}
 
 // --- Chapter completion ---------------------------------------------------
 
@@ -205,16 +236,15 @@ export async function getBatchFreeWindows(
   const dow = new Date(args.date + 'T12:00:00').getDay()
   const busy: [number, number][] = []
 
-  const { data: wk } = await supabase.from('batch_schedules').select('start_time, end_time').eq('batch_id', args.batchId).eq('day_of_week', dow)
-  for (const r of (wk ?? []) as { start_time: string; end_time: string }[]) busy.push([toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5))])
+  const { data: wk } = await supabase.from('batch_schedules').select(`start_time, end_time, ${WEEKLY_SLOT_COLS}`).eq('batch_id', args.batchId).eq('day_of_week', dow)
+  for (const r of (wk ?? []) as WeeklyRow[]) {
+    if (weeklySlotActiveOn(r, args.date)) busy.push([toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5))])
+  }
 
-  const { data: pl } = await supabase.from('batch_planners').select('start_time, duration_minutes').eq('batch_id', args.batchId).eq('planned_date', args.date).not('start_time', 'is', null)
+  const { data: pl } = await liveLectures(supabase.from('batch_planners').select('start_time, duration_minutes').eq('batch_id', args.batchId).eq('planned_date', args.date).not('start_time', 'is', null))
   for (const r of (pl ?? []) as { start_time: string; duration_minutes: number }[]) { const s = toMinutes(r.start_time.slice(0, 5)); busy.push([s, s + (r.duration_minutes || 60)]) }
 
-  let q = supabase.from('test_schedules').select('id, start_time, duration_minutes').eq('batch_id', args.batchId).eq('test_date', args.date)
-  if (args.ignoreTestId) q = q.neq('id', args.ignoreTestId)
-  const { data: ts } = await q
-  for (const r of (ts ?? []) as { id: string; start_time: string; duration_minutes: number }[]) { const s = toMinutes(r.start_time.slice(0, 5)); busy.push([s, s + (r.duration_minutes || 60)]) }
+  for (const r of await batchTestsOn(supabase, args.batchId, args.date, args.ignoreTestId)) { const s = toMinutes(r.start_time.slice(0, 5)); busy.push([s, s + (r.duration_minutes || 60)]) }
 
   busy.sort((a, b) => a[0] - b[0])
   const merged: [number, number][] = []
@@ -258,15 +288,16 @@ export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot,
   const dow = new Date(slot.date + 'T12:00:00').getDay()
 
   const weeklyClash = async (col: string, val: string, label: string) => {
-    const { data } = await supabase.from('batch_schedules').select('start_time, end_time').eq(col, val).eq('day_of_week', dow)
-    for (const r of (data ?? []) as { start_time: string; end_time: string }[]) {
+    const { data } = await supabase.from('batch_schedules').select(`start_time, end_time, ${WEEKLY_SLOT_COLS}`).eq(col, val).eq('day_of_week', dow)
+    for (const r of (data ?? []) as WeeklyRow[]) {
+      if (!weeklySlotActiveOn(r, slot.date)) continue
       if (overlaps(s, e, toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5))))
         return `${label} — recurring slot ${r.start_time.slice(0, 5)}–${r.end_time.slice(0, 5)}`
     }
     return null
   }
   const plannerClash = async (col: string, val: string, label: string) => {
-    const { data } = await supabase.from('batch_planners').select('start_time, duration_minutes, topic_name').eq(col, val).eq('planned_date', slot.date).not('start_time', 'is', null)
+    const { data } = await liveLectures(supabase.from('batch_planners').select('start_time, duration_minutes, topic_name').eq(col, val).eq('planned_date', slot.date).not('start_time', 'is', null))
     for (const r of (data ?? []) as { start_time: string; duration_minutes: number; topic_name: string }[]) {
       const rs = toMinutes(r.start_time.slice(0, 5))
       if (overlaps(s, e, rs, rs + r.duration_minutes)) {
@@ -277,10 +308,16 @@ export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot,
     return null
   }
   const testClash = async (col: string, val: string, label: string) => {
-    let q = supabase.from('test_schedules').select('id, name, start_time, duration_minutes').eq(col, val).eq('test_date', slot.date)
-    if (slot.ignoreTestId) q = q.neq('id', slot.ignoreTestId)
-    const { data } = await q
-    for (const r of (data ?? []) as { id: string; name: string; start_time: string; duration_minutes: number }[]) {
+    let rows: { id: string; name: string; start_time: string; duration_minutes: number }[]
+    if (col === 'batch_id') {
+      rows = await batchTestsOn(supabase, val, slot.date, slot.ignoreTestId)
+    } else {
+      let q = supabase.from('test_schedules').select('id, name, start_time, duration_minutes').eq(col, val).eq('test_date', slot.date).neq('stage', 'Cancelled')
+      if (slot.ignoreTestId) q = q.neq('id', slot.ignoreTestId)
+      const { data } = await q
+      rows = (data ?? []) as typeof rows
+    }
+    for (const r of rows) {
       const rs = toMinutes(r.start_time.slice(0, 5))
       if (overlaps(s, e, rs, rs + r.duration_minutes)) {
         const clashTime = r.start_time.slice(0, 5)
@@ -329,69 +366,86 @@ export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot,
 
 // --- Test priority: shift the clashing planner forward -------------------
 
-/** Shift ONE subject's planner lectures (on/after `fromDate`) forward by one
- *  class-date each, freeing the slot; each moved lecture re-inherits its new
- *  day's time & room. Processes latest-first so no two collide mid-move. */
+/** Shift ONE subject's upcoming planner lectures (on/after `fromDate`) forward
+ *  by one class-date each, freeing the slot; each moved lecture re-inherits
+ *  its new day's time & room (the schedule segment active on that date). The
+ *  last one lands on a buffer date. Never past the batch's end date, never on
+ *  a test. All-or-nothing: if there aren't enough class-dates left, nothing
+ *  moves (moving only some would stack two lectures on one date). */
 export async function shiftSubjectForward(supabase: SupabaseClient, batchId: string, subjectId: string, fromDate: string, testId?: string): Promise<{ moved: number; unmoved: number }> {
   const { data: sched } = await supabase
     .from('batch_schedules')
-    .select('day_of_week, start_time, end_time, classroom_id')
+    .select(`day_of_week, start_time, end_time, classroom_id, ${WEEKLY_SLOT_COLS}`)
     .eq('batch_id', batchId).eq('subject_id', subjectId)
-  const slotByDay = new Map<number, { start: string; duration: number; classroom: string | null }>()
-  for (const s of (sched ?? []) as { day_of_week: number; start_time: string; end_time: string; classroom_id: string | null }[]) {
-    if (!slotByDay.has(s.day_of_week)) slotByDay.set(s.day_of_week, { start: s.start_time.slice(0, 5), duration: toMinutes(s.end_time.slice(0, 5)) - toMinutes(s.start_time.slice(0, 5)), classroom: s.classroom_id ?? null })
+  const segs = ((sched ?? []) as (WeeklyRow & { day_of_week: number; classroom_id: string | null })[]).map((s) => ({
+    row: s, dow: s.day_of_week, start: s.start_time.slice(0, 5),
+    duration: toMinutes(s.end_time.slice(0, 5)) - toMinutes(s.start_time.slice(0, 5)), classroom: s.classroom_id ?? null,
+  }))
+  if (segs.length === 0) return { moved: 0, unmoved: 0 }
+  const slotFor = (date: string) => {
+    const dow = new Date(date + 'T12:00:00').getDay()
+    return segs.find((g) => g.dow === dow && weeklySlotActiveOn(g.row, date)) ?? null
   }
-  if (slotByDay.size === 0) return { moved: 0, unmoved: 0 }
-  const days = Array.from(slotByDay.keys())
 
   const { data: b } = await supabase.from('batches').select('end_date').eq('id', batchId).single<{ end_date: string }>()
   const endDate = b?.end_date ?? fromDate
   // Class-dates are capped at the batch's OWN end date — a shift must reuse an
   // existing buffer date, never push the batch past its planned finish.
   const classDates: string[] = []
-  { const d = new Date(fromDate + 'T12:00:00'); const e = new Date(endDate + 'T12:00:00'); while (d <= e) { if (days.includes(d.getDay())) classDates.push(d.toISOString().split('T')[0]); d.setDate(d.getDate() + 1) } }
+  { const d = new Date(fromDate + 'T12:00:00'); const e = new Date(endDate + 'T12:00:00'); while (d <= e) { const ds = d.toISOString().split('T')[0]; if (slotFor(ds)) classDates.push(ds); d.setDate(d.getDate() + 1) } }
 
-  const { data: testsData } = await supabase
-    .from('test_schedules')
-    .select('test_date, start_time, duration_minutes')
-    .eq('batch_id', batchId).gte('test_date', fromDate)
+  // The batch's tests (own + multi-batch), cancelled ones excluded.
+  const { data: maps } = await supabase.from('test_batch_mappings').select('test_id').eq('batch_id', batchId)
+  const mapped = (maps ?? []).map((r) => r.test_id as string)
+  let tq = supabase.from('test_schedules').select('test_date, start_time, duration_minutes').gte('test_date', fromDate).neq('stage', 'Cancelled')
+  tq = mapped.length ? tq.or(`batch_id.eq.${batchId},id.in.(${mapped.join(',')})`) : tq.eq('batch_id', batchId)
+  const { data: testsData } = await tq
   const testsByDate = new Map<string, [number, number][]>()
   for (const t of (testsData ?? []) as { test_date: string; start_time: string; duration_minutes: number }[]) {
+    if (!t.start_time) continue
     const ts = toMinutes(t.start_time.slice(0, 5))
     const arr = testsByDate.get(t.test_date) ?? []
     arr.push([ts, ts + t.duration_minutes]); testsByDate.set(t.test_date, arr)
   }
   const slotFreeOfTest = (date: string) => {
-    const slot = slotByDay.get(new Date(date + 'T12:00:00').getDay())
+    const slot = slotFor(date)
     if (!slot) return false
     const s = toMinutes(slot.start), e = s + slot.duration
     return !(testsByDate.get(date) ?? []).some(([ts, te]) => s < te && e > ts)
   }
 
-  // Only REAL lectures move — buffer (reserved/empty) rows are exactly the
-  // free capacity a shifted lecture lands on, not something to move themselves.
+  // Only REAL upcoming lectures move — buffers are the free capacity a shifted
+  // lecture lands on; conducted history and cancelled markers stay put.
   const { data: lecs } = await supabase
     .from('batch_planners')
     .select('id, planned_date')
-    .eq('batch_id', batchId).eq('subject_id', subjectId).eq('is_buffer', false).gte('planned_date', fromDate)
+    .eq('batch_id', batchId).eq('subject_id', subjectId).eq('is_buffer', false)
+    .not('status', 'in', '(conducted,cancelled)')
+    .gte('planned_date', fromDate)
     .order('planned_date', { ascending: true })
   const lectures = (lecs ?? []) as { id: string; planned_date: string }[]
 
-  let moved = 0
+  // Plan every move first.
+  const plan: { id: string; from: string; to: string }[] = []
   let prevIdx = -1
   for (const l of lectures) {
+    // Past the displaced lecture(s), stop as soon as one no longer collides —
+    // the gap (a buffer date) before it has absorbed the shift.
+    if (plan.length && l.planned_date !== fromDate && l.planned_date > plan[plan.length - 1].to) break
     let j = prevIdx + 1
     while (j < classDates.length && (classDates[j] <= l.planned_date || !slotFreeOfTest(classDates[j]))) j++
-    if (j >= classDates.length) break // no buffer/class-date left within the batch's end date
-    const nd = classDates[j]
+    if (j >= classDates.length) return { moved: 0, unmoved: lectures.length }
+    plan.push({ id: l.id, from: l.planned_date, to: classDates[j] })
     prevIdx = j
-    const slot = slotByDay.get(new Date(nd + 'T12:00:00').getDay())
-    const patch: Record<string, unknown> = { planned_date: nd, start_time: slot?.start ?? null, duration_minutes: slot?.duration ?? 60, classroom_id: slot?.classroom ?? null }
-    if (testId) { patch.shifted_for_test_id = testId; patch.shifted_from_date = l.planned_date }
-    await supabase.from('batch_planners').update(patch).eq('id', l.id)
-    moved++
   }
-  return { moved, unmoved: lectures.length - moved }
+
+  for (const m of plan) {
+    const slot = slotFor(m.to)
+    const patch: Record<string, unknown> = { planned_date: m.to, start_time: slot?.start ?? null, duration_minutes: slot?.duration ?? 60, classroom_id: slot?.classroom ?? null }
+    if (testId) { patch.shifted_for_test_id = testId; patch.shifted_from_date = m.from }
+    await supabase.from('batch_planners').update(patch).eq('id', m.id)
+  }
+  return { moved: plan.length, unmoved: 0 }
 }
 
 /** Sweep a whole batch so NO class/lecture sits on any of its tests — every
@@ -606,15 +660,8 @@ async function findNextFreeSlot(
 
     // 1. Batch must not already have a test at this time on this date
     //    (excluding the tests we're in the process of placing)
-    let batchQ = supabase
-      .from('test_schedules')
-      .select('id, start_time, duration_minutes')
-      .eq('batch_id', args.batchId)
-      .eq('test_date', dateStr)
-      .neq('stage', 'Cancelled')
-    if (args.excludeTestIds.length > 0) batchQ = batchQ.not('id', 'in', `(${args.excludeTestIds.join(',')})`)
-    const { data: batchTests } = await batchQ
-    const batchClash = (batchTests ?? []).some((t: { start_time: string; duration_minutes: number }) => {
+    const batchTests = (await batchTestsOn(supabase, args.batchId, dateStr)).filter((t) => !args.excludeTestIds.includes(t.id))
+    const batchClash = batchTests.some((t) => {
       const ts = toMinutes(t.start_time.slice(0, 5))
       return s < ts + t.duration_minutes && e > ts
     })
@@ -626,22 +673,22 @@ async function findNextFreeSlot(
     // Weekly class in the room on this day
     const { data: wk } = await supabase
       .from('batch_schedules')
-      .select('classroom_id, start_time, end_time')
+      .select(`classroom_id, start_time, end_time, ${WEEKLY_SLOT_COLS}`)
       .in('classroom_id', centreRoomIds)
       .eq('day_of_week', dow)
-    for (const r of (wk ?? []) as { classroom_id: string; start_time: string; end_time: string }[]) {
-      if (overlaps(s, e, toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5)))) {
+    for (const r of (wk ?? []) as (WeeklyRow & { classroom_id: string })[]) {
+      if (weeklySlotActiveOn(r, dateStr) && overlaps(s, e, toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5)))) {
         busyRooms.add(r.classroom_id)
       }
     }
 
     // Planner lecture in the room on this date
-    const { data: pl } = await supabase
+    const { data: pl } = await liveLectures(supabase
       .from('batch_planners')
       .select('classroom_id, start_time, duration_minutes')
       .in('classroom_id', centreRoomIds)
       .eq('planned_date', dateStr)
-      .not('start_time', 'is', null)
+      .not('start_time', 'is', null))
     for (const r of (pl ?? []) as { classroom_id: string; start_time: string; duration_minutes: number }[]) {
       const rs = toMinutes(r.start_time.slice(0, 5))
       if (overlaps(s, e, rs, rs + r.duration_minutes)) busyRooms.add(r.classroom_id)
@@ -796,16 +843,16 @@ export async function getFreeFacultyIds(
   const busy = new Set<string>()
 
   const [wkRes, plRes, tsRes] = await Promise.all([
-    supabase.from('batch_schedules').select('faculty_id, start_time, end_time').in('faculty_id', args.candidateFacultyIds).eq('day_of_week', dow),
-    supabase.from('batch_planners').select('faculty_id, start_time, duration_minutes').in('faculty_id', args.candidateFacultyIds).eq('planned_date', args.date).not('start_time', 'is', null),
+    supabase.from('batch_schedules').select(`faculty_id, start_time, end_time, ${WEEKLY_SLOT_COLS}`).in('faculty_id', args.candidateFacultyIds).eq('day_of_week', dow),
+    liveLectures(supabase.from('batch_planners').select('faculty_id, start_time, duration_minutes').in('faculty_id', args.candidateFacultyIds).eq('planned_date', args.date).not('start_time', 'is', null)),
     (async () => {
-      let q = supabase.from('test_schedules').select('faculty_id, start_time, duration_minutes').in('faculty_id', args.candidateFacultyIds).eq('test_date', args.date)
+      let q = supabase.from('test_schedules').select('faculty_id, start_time, duration_minutes').in('faculty_id', args.candidateFacultyIds).eq('test_date', args.date).neq('stage', 'Cancelled')
       if (args.ignoreTestId) q = q.neq('id', args.ignoreTestId)
       return q
     })(),
   ])
-  for (const r of (wkRes.data ?? []) as { faculty_id: string | null; start_time: string; end_time: string }[]) {
-    if (r.faculty_id && overlaps(s, e, toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5)))) busy.add(r.faculty_id)
+  for (const r of (wkRes.data ?? []) as (WeeklyRow & { faculty_id: string | null })[]) {
+    if (r.faculty_id && weeklySlotActiveOn(r, args.date) && overlaps(s, e, toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5)))) busy.add(r.faculty_id)
   }
   for (const r of (plRes.data ?? []) as { faculty_id: string | null; start_time: string; duration_minutes: number }[]) {
     if (r.faculty_id) { const rs = toMinutes(r.start_time.slice(0, 5)); if (overlaps(s, e, rs, rs + r.duration_minutes)) busy.add(r.faculty_id) }
@@ -830,10 +877,10 @@ export async function getClashingClass(
 ): Promise<ClashingClass | null> {
   const s = toMinutes(args.startTime.slice(0, 5))
   const e = s + args.durationMinutes
-  const { data } = await supabase
+  const { data } = await liveLectures(supabase
     .from('batch_planners')
     .select('topic_name, start_time, duration_minutes, subjects(name), app_users(full_name)')
-    .eq('batch_id', args.batchId).eq('planned_date', args.date).not('start_time', 'is', null)
+    .eq('batch_id', args.batchId).eq('planned_date', args.date).not('start_time', 'is', null))
   for (const r of (data ?? []) as { topic_name: string; start_time: string; duration_minutes: number; subjects: { name: string } | { name: string }[] | null; app_users: { full_name: string } | { full_name: string }[] | null }[]) {
     const rs = toMinutes(r.start_time.slice(0, 5))
     if (overlaps(s, e, rs, rs + r.duration_minutes)) {
@@ -873,23 +920,23 @@ export async function getFreeClassrooms(
   // Check weekly schedules
   const { data: wk } = await supabase
     .from('batch_schedules')
-    .select('classroom_id, start_time, end_time')
+    .select(`classroom_id, start_time, end_time, ${WEEKLY_SLOT_COLS}`)
     .in('classroom_id', rooms.map(r => r.id))
     .eq('day_of_week', dow)
   
-  for (const r of (wk ?? []) as { classroom_id: string | null; start_time: string; end_time: string }[]) {
-    if (r.classroom_id && overlaps(s, e, toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5)))) {
+  for (const r of (wk ?? []) as (WeeklyRow & { classroom_id: string | null })[]) {
+    if (r.classroom_id && weeklySlotActiveOn(r, args.date) && overlaps(s, e, toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5)))) {
       busy.add(r.classroom_id)
     }
   }
   
   // Check planner lectures on that date
-  const { data: pl } = await supabase
+  const { data: pl } = await liveLectures(supabase
     .from('batch_planners')
     .select('classroom_id, start_time, duration_minutes')
     .in('classroom_id', rooms.map(r => r.id))
     .eq('planned_date', args.date)
-    .not('start_time', 'is', null)
+    .not('start_time', 'is', null))
   
   for (const r of (pl ?? []) as { classroom_id: string | null; start_time: string; duration_minutes: number }[]) {
     if (r.classroom_id) {
@@ -904,6 +951,7 @@ export async function getFreeClassrooms(
     .select('classroom_id, start_time, duration_minutes')
     .in('classroom_id', rooms.map(r => r.id))
     .eq('test_date', args.date)
+    .neq('stage', 'Cancelled')
   
   if (args.ignoreTestId) q = q.neq('id', args.ignoreTestId)
   
@@ -935,6 +983,8 @@ export type PlannerTest = {
   subject_id: string | null
   classroom_id: string | null
   faculty_id: string | null
+  /** The test's syllabus (test_chapters), each with its own subject. */
+  chapters: { name: string; subject_id: string | null }[]
 }
 
 /** Get all tests for a batch to display inline in the planner view.
@@ -972,6 +1022,21 @@ export async function getTestsForBatch(supabase: SupabaseClient, batchId: string
 
   const all = [...(primary ?? []), ...secondary] as PlannerTest[]
   all.sort((a, b) => a.test_date.localeCompare(b.test_date) || a.start_time.localeCompare(b.start_time))
+
+  // Attach each test's syllabus (chunked — a batch can have many tests).
+  const { data: tc } = await fetchAllIn<{ test_id: string; chapters: unknown }>(all.map((t) => t.id), (chunk, from, to) =>
+    supabase.from('test_chapters').select('test_id, chapters(name, subject_id, sequence_no)').in('test_id', chunk).order('test_id').order('chapter_id').range(from, to))
+  const byTest = new Map<string, { name: string; subject_id: string | null; seq: number }[]>()
+  for (const r of tc) {
+    const c = (Array.isArray(r.chapters) ? r.chapters[0] : r.chapters) as { name: string; subject_id: string | null; sequence_no: number | null } | null
+    if (!c) continue
+    const arr = byTest.get(r.test_id) ?? []
+    arr.push({ name: c.name, subject_id: c.subject_id, seq: c.sequence_no ?? 0 })
+    byTest.set(r.test_id, arr)
+  }
+  for (const t of all) {
+    t.chapters = (byTest.get(t.id) ?? []).sort((a, b) => a.seq - b.seq).map(({ name, subject_id }) => ({ name, subject_id }))
+  }
   return all
 }
 
@@ -1047,12 +1112,14 @@ export async function getBatchProgress(
   const progressPercentage = Math.min(100, Math.max(0, (elapsedDays / totalDays) * 100))
   
   // Get all planned lectures (non-buffer)
-  const { data: plannedLectures } = await supabase
+  const { data: plannedLectures } = await fetchAll<Record<string, unknown>>((from, to) => supabase
     .from('batch_planners')
     .select('subject_id, planned_date, status, is_buffer, subjects(name)')
     .eq('batch_id', batchId)
     .eq('is_buffer', false)
+    .neq('status', 'cancelled')
     .not('subject_id', 'is', null)
+    .order('id').range(from, to))
   
   const lectures = (plannedLectures ?? []) as unknown as Array<{
     subject_id: string
@@ -1063,11 +1130,12 @@ export async function getBatchProgress(
   }>
   
   // Get buffer slots info
-  const { data: bufferInfo } = await supabase
+  const { data: bufferInfo } = await fetchAll<Record<string, unknown>>((from, to) => supabase
     .from('batch_planners')
     .select('is_buffer, shifted_for_test_id')
     .eq('batch_id', batchId)
     .eq('is_buffer', true)
+    .order('id').range(from, to))
   
   const buffers = (bufferInfo ?? []) as Array<{
     is_buffer: boolean

@@ -9,6 +9,7 @@ const NAV = [
   { label: 'Tests', href: '/batch-manager/tests', icon: '📝' },
   { label: 'Marks Entry', href: '/batch-manager/marks-entry', icon: '✍️' },
   { label: 'Results', href: '/batch-manager/results', icon: '📊' },
+  { label: 'Student Overview', href: '/batch-manager/student-overview', icon: '🧑‍🎓' },
   { label: 'Attendance', href: '/batch-manager/attendance', icon: '🗓️' },
 ]
 

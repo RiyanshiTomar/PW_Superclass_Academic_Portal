@@ -8,6 +8,7 @@ import { minutesToTimeString } from '@/lib/validation'
 import { getBatchFreeWindows, type FreeWindow } from '@/lib/tests'
 import { notifyRoles } from '@/lib/notifications'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 
 type Lecture = {
   id: string
@@ -75,12 +76,15 @@ export default function FacultyCalendarPage() {
     const appUser = user ? await getAppUser(supabase, user) : null
     if (!appUser) { setLoading(false); return }
     const [lecRes, reqRes] = await Promise.all([
-      supabase
+      fetchAll<Record<string, unknown>>((from, to) => supabase
         .from('batch_planners')
         .select('id, batch_id, subject_id, planned_date, start_time, duration_minutes, topic_name, chapter, stage, batches(name, centres(name)), subjects(name), classrooms(name)')
         .eq('faculty_id', appUser.id)
         .eq('stage', 'Confirmed')   // calendar shows only what the faculty has confirmed
-        .order('planned_date', { ascending: true }),
+        .eq('is_buffer', false)
+        .neq('status', 'cancelled') // a cancelled class is no longer on the calendar
+        .order('planned_date', { ascending: true }).order('id')
+        .range(from, to)),
       // Faculty's own requests, so the calendar can flag pending/approved ones.
       supabase
         .from('reschedule_requests')

@@ -14,6 +14,7 @@ const NAV = [
   { label: 'Test Scheduler', href: '/central/tests', icon: '📝' },
   { label: 'Marks Entry', href: '/central/marks-entry', icon: '✍️' },
   { label: 'Results', href: '/central/results', icon: '📊' },
+  { label: 'Student Overview', href: '/central/student-overview', icon: '🧑‍🎓' },
   { label: 'Reschedule Requests', href: '/central/reschedule-requests', icon: '🔁' },
   { label: 'Attendance', href: '/central/attendance', icon: '🗓️' },
 ]

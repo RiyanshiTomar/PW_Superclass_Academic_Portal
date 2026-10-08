@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { getAppUser, getUserCentreIds } from '@/lib/auth'
 import { formatTime, stageBadgeClass, addDaysToDate } from '@/lib/utils'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
+import { fetchAllIn } from '@/lib/supabase/fetch-all'
 
 type Centre = { id: string; name: string; branch_head_id: string | null }
 type Batch = { id: string; name: string; centre_id: string }
@@ -79,14 +80,18 @@ export default function CentreWeekSchedule({ scope = 'branch' }: { scope?: 'cent
       if (cancelled) return
       setBatches(bs)
       if (bs.length === 0) { setLectures([]); setLoadingWeeks(false); return }
-      const { data: lRes, error } = await supabase
+      // Paged + chunked: a centre's lectures run into thousands of rows.
+      const { data: lRes, error } = await fetchAllIn<Lecture>(bs.map((b) => b.id), (chunk, from, to) => supabase
         .from('batch_planners')
         .select('id, batch_id, stage, topic_name, chapter, planned_date, start_time, duration_minutes, subjects(name), app_users(full_name), classrooms(name)')
-        .in('batch_id', bs.map((b) => b.id))
-        .order('planned_date', { ascending: true })
+        .in('batch_id', chunk)
+        .eq('is_buffer', false)
+        .neq('status', 'cancelled')
+        .order('planned_date', { ascending: true }).order('id')
+        .range(from, to) as unknown as PromiseLike<{ data: Lecture[] | null; error: { message: string } | null }>)
       if (cancelled) return
-      if (error) setErr(error.message)
-      setLectures((lRes ?? []) as unknown as Lecture[])
+      if (error) setErr(error)
+      setLectures([...lRes].sort((a, b) => a.planned_date.localeCompare(b.planned_date)))
       setLoadingWeeks(false)
     })()
     return () => { cancelled = true }

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { parseCSVWithHeaders } from '@/lib/utils'
 import { mergeSubject } from '@/lib/merge'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 
 type Program = { id: string; name: string }
 type Subject = { id: string; name: string }
@@ -114,7 +115,7 @@ export default function SyllabusPage() {
     const target = norm(chapterName)
     const [lecRes, bpRes] = await Promise.all([
       supabase.from('planner_lectures').select('planner_id, chapter, planners(name)').eq('subject_id', subjectId),
-      supabase.from('batch_planners').select('id, chapter').eq('subject_id', subjectId),
+      fetchAll<{ id: string; chapter: string }>((from, to) => supabase.from('batch_planners').select('id, chapter').eq('subject_id', subjectId).order('id').range(from, to)),
     ])
     const rows = (lecRes.data ?? []).filter((r) => norm((r as { chapter: string }).chapter) === target)
     const names = new Set<string>()

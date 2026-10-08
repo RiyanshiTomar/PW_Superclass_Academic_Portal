@@ -17,6 +17,28 @@ export function timesOverlap(startA: string, endA: string, startB: string, endB:
   return aStart < bEnd && aEnd > bStart
 }
 
+/** Columns a `batch_schedules` select needs so `weeklySlotActiveOn` can judge it. */
+export const WEEKLY_SLOT_COLS = 'effective_from, effective_to, batches(start_date, end_date, status)'
+
+/** Is a recurring weekly batch_schedules row actually running on `date`?
+ *  Its own segment (effective_from/to) wins; a NULL bound falls back to the
+ *  batch's start/end. A merged (archived) batch never occupies anything. */
+export function weeklySlotActiveOn(
+  row: { effective_from?: string | null; effective_to?: string | null; batches?: unknown },
+  date: string
+): boolean {
+  const b = (Array.isArray(row.batches) ? row.batches[0] : row.batches) as
+    | { start_date?: string; end_date?: string; status?: string }
+    | null
+    | undefined
+  if (b?.status === 'Merged') return false
+  const from = row.effective_from ?? b?.start_date ?? null
+  const to = row.effective_to ?? b?.end_date ?? null
+  if (from && date < from) return false
+  if (to && date > to) return false
+  return true
+}
+
 export function formatTime(t: string | null): string {
   if (!t) return 'TBA'
   const [h, m] = t.split(':')

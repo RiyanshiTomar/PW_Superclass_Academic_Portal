@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { activeBatchStudents } from '@/lib/students'
+import { fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import { DAYS_FULL } from '@/lib/utils'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
@@ -141,16 +143,16 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
   const loadBatchData = async (portalBatchId: string) => {
     setLoadingBatch(true)
     const since = iso(new Date(todayNoon().getTime() - 95 * 86400000))
-    const { data: studs } = await supabase.from('students').select('regno, student_name').eq('batch_id', portalBatchId).order('student_name')
-    const roster = (studs ?? []).map((s) => ({ regno: s.regno as string, name: (s.student_name as string) ?? '' }))
+    const { data: studs } = await activeBatchStudents(supabase, portalBatchId)
+    const roster = studs.map((s) => ({ regno: s.regno as string, name: (s.student_name as string) ?? '' }))
     setRoster(roster)
     const regnos = roster.map((r) => r.regno)
     const [attRes, schRes, planRes] = await Promise.all([
       regnos.length
-        ? supabase.from('attendance').select('regno, attendance_date, first_punch_in, last_punch_out').in('regno', regnos).gte('attendance_date', since)
+        ? fetchAllIn<AttRow>(regnos, (chunk, from, to) => supabase.from('attendance').select('regno, attendance_date, first_punch_in, last_punch_out').in('regno', chunk).gte('attendance_date', since).order('regno').order('attendance_date').range(from, to))
         : Promise.resolve({ data: [] as AttRow[] }),
       supabase.from('batch_schedules').select('day_of_week, start_time, end_time').eq('batch_id', portalBatchId),
-      supabase.from('batch_planners').select('planned_date, start_time, duration_minutes').eq('batch_id', portalBatchId).eq('is_buffer', false).gte('planned_date', since),
+      supabase.from('batch_planners').select('planned_date, start_time, duration_minutes').eq('batch_id', portalBatchId).eq('is_buffer', false).neq('status', 'cancelled').gte('planned_date', since),
     ])
     setRows((attRes.data ?? []) as AttRow[])
     setScheds((schRes.data ?? []) as Sched[])
@@ -192,17 +194,22 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
     return dayBounds[dow] ?? null
   }
 
-  // Active class days come straight from the BATCH SCHEDULE: every day in the
-  // window whose weekday is one the batch has classes on. Simple and effective —
-  // the schedule is the source of truth for when this batch meets.
+  // Days the biometric sheet actually has data for this batch. A scheduled
+  // day with NO record at all (today before the sheet is updated, a holiday,
+  // a day the sheet skipped) is not a class day — otherwise every student
+  // would show "absent" for it.
+  const recordedDates = useMemo(() => new Set(rows.map((r) => r.attendance_date)), [rows])
+  const dataTill = useMemo(() => rows.reduce((m, r) => (r.attendance_date > m ? r.attendance_date : m), ''), [rows])
+
+  // Active class days = the batch's scheduled weekdays that have attendance data.
   const activeDatesAll = useMemo(() => {
     const set = new Set<string>()
     const base = todayNoon()
     if (weekdays.size) {
-      for (let i = 0; i < 95; i++) { const d = new Date(base.getTime() - i * 86400000); if (weekdays.has(d.getDay())) set.add(iso(d)) }
+      for (let i = 0; i < 95; i++) { const d = new Date(base.getTime() - i * 86400000); const ds = iso(d); if (weekdays.has(d.getDay()) && recordedDates.has(ds)) set.add(ds) }
     }
     return Array.from(set).sort().reverse()
-  }, [weekdays])
+  }, [weekdays, recordedDates])
 
   const datesInWindow = (n: number) => {
     const cutoff = iso(new Date(todayNoon().getTime() - (n - 1) * 86400000))
@@ -329,10 +336,17 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
         <Card className="p-10 text-center text-neutral-400">Loading attendance…</Card>
       ) : roster.length === 0 ? (
         <Alert type="info">No students assigned to this batch yet — the Branch Head assigns them under Students. Attendance is measured against the batch’s assigned students.</Alert>
-      ) : activeDatesAll.length === 0 ? (
+      ) : weekdays.size === 0 ? (
         <Alert type="info">This batch has no weekly schedule, so there are no class days to measure against. Set up the batch’s schedule (Batch Scheduler) first.</Alert>
+      ) : activeDatesAll.length === 0 ? (
+        <Alert type="info">No attendance has been recorded in the biometric sheet for this batch’s students on their class days yet.</Alert>
       ) : (
         <div className="space-y-6">
+          {dataTill && (
+            <p className="text-xs text-neutral-500 -mb-2">
+              Biometric data available till <b>{fmtDate(dataTill)}</b>. Days with no data in the sheet (today until it&apos;s updated, holidays) are not counted as absences.
+            </p>
+          )}
           {/* Summary tiles */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className={`${tile} border-violet-100 bg-gradient-to-br from-violet-50 to-white`}>

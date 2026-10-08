@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { fetchAllIn } from '@/lib/supabase/fetch-all'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { stageBadgeClass, formatTime } from '@/lib/utils'
@@ -54,9 +55,10 @@ export default function FacultyTestsPage() {
     const upcoming = rows.filter((t) => t.test_date >= today)
     if (upcoming.length) {
       const ids = upcoming.map((t) => t.id)
-      const { data: tc } = await supabase.from('test_chapters').select('test_id, chapter_id').in('test_id', ids)
+      const { data: tc } = await fetchAllIn<{ test_id: string; chapter_id: string }>(ids, (chunk, from, to) =>
+        supabase.from('test_chapters').select('test_id, chapter_id').in('test_id', chunk).order('test_id').order('chapter_id').range(from, to))
       const chMap: Record<string, string[]> = {}
-      for (const r of (tc ?? []) as { test_id: string; chapter_id: string }[]) (chMap[r.test_id] ??= []).push(r.chapter_id)
+      for (const r of tc) (chMap[r.test_id] ??= []).push(r.chapter_id)
       const out: Record<string, TestCompletion> = {}
       for (const t of upcoming) {
         out[t.id] = await getTestCompletion(supabase, {

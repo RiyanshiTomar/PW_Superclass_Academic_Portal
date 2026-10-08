@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import { fetchRoster, fetchResults, saveMarks, setTestMarksConfig, summarize, type ResultRow, type MarkEntry, type RosterStudent } from '@/lib/results'
 import { parseCSVWithHeaders } from '@/lib/utils'
@@ -56,11 +57,11 @@ export default function MarksEntry({ scope = 'central' }: { scope?: Scope }) {
       const [bRes, cRes, tRes] = await Promise.all([
         supabase.from('batches').select('id, name, centre_id, batch_manager_id').neq('status', 'Merged').order('name'),
         supabase.from('centres').select('id, name, branch_head_id').order('name'),
-        supabase.from('test_schedules').select('id, batch_id, name, test_type, part_type, test_date, start_time, stage, subject_id, max_marks, pass_marks').order('test_date', { ascending: false }),
+        fetchAll<TestRow>((from, to) => supabase.from('test_schedules').select('id, batch_id, name, test_type, part_type, test_date, start_time, stage, subject_id, max_marks, pass_marks').order('test_date', { ascending: false }).order('id').range(from, to)),
       ])
       if (bRes.data) setBatches(bRes.data as Batch[])
       if (cRes.data) setCentres(cRes.data as Centre[])
-      if (tRes.data) setTests(tRes.data as TestRow[])
+      setTests(tRes.data)
       setLoading(false)
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -30,7 +30,7 @@ async function main() {
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
     sheetId: process.env.STUDENTS_SHEET_ID,
   })
-  console.log(`Done. ${summary.synced} students synced from ${summary.tab}.`)
+  console.log(`Done. ${summary.synced} students synced from the "${summary.tab}" tab.`)
 }
 
 main().catch((error) => { console.error(error); process.exit(1) })

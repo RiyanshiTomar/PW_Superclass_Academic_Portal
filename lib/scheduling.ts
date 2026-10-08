@@ -7,9 +7,11 @@ function batchName(value: unknown): string {
   return (value as { name?: string })?.name ?? 'another batch'
 }
 
-function batchOf(value: unknown): { name?: string; start_date?: string; end_date?: string } | null {
-  if (Array.isArray(value)) return (value[0] as { name?: string; start_date?: string; end_date?: string }) ?? null
-  return (value as { name?: string; start_date?: string; end_date?: string }) ?? null
+type BatchLite = { name?: string; start_date?: string; end_date?: string; status?: string }
+
+function batchOf(value: unknown): BatchLite | null {
+  if (Array.isArray(value)) return (value[0] as BatchLite) ?? null
+  return (value as BatchLite) ?? null
 }
 
 /** Two ISO date ranges intersect? NULL bound = open (the whole batch). ISO
@@ -35,7 +37,7 @@ export async function checkWeeklyScheduleOverlap(
 ): Promise<string | false> {
   let query = supabase
     .from('batch_schedules')
-    .select('start_time, end_time, effective_from, effective_to, batches(name, start_date, end_date)')
+    .select('start_time, end_time, effective_from, effective_to, batches(name, start_date, end_date, status)')
     .eq('faculty_id', facultyId)
     .eq('day_of_week', dayOfWeek)
 
@@ -47,6 +49,7 @@ export async function checkWeeklyScheduleOverlap(
   for (const row of data) {
     if (!timesOverlap(startTime, endTime, row.start_time.slice(0, 5), row.end_time.slice(0, 5))) continue
     const b = batchOf(row.batches)
+    if (b?.status === 'Merged') continue
     const exFrom = (row.effective_from as string | null) ?? b?.start_date ?? null
     const exTo = (row.effective_to as string | null) ?? b?.end_date ?? null
     if ((newFrom || newTo) && !rangesIntersect(newFrom ?? null, newTo ?? null, exFrom, exTo)) continue
@@ -70,7 +73,7 @@ export async function checkClassroomScheduleOverlap(
 ): Promise<string | false> {
   let query = supabase
     .from('batch_schedules')
-    .select('start_time, end_time, effective_from, effective_to, batches(name, start_date, end_date)')
+    .select('start_time, end_time, effective_from, effective_to, batches(name, start_date, end_date, status)')
     .eq('classroom_id', classroomId)
     .eq('day_of_week', dayOfWeek)
 
@@ -82,6 +85,7 @@ export async function checkClassroomScheduleOverlap(
   for (const row of data) {
     if (!timesOverlap(startTime, endTime, row.start_time.slice(0, 5), row.end_time.slice(0, 5))) continue
     const b = batchOf(row.batches)
+    if (b?.status === 'Merged') continue
     const exFrom = (row.effective_from as string | null) ?? b?.start_date ?? null
     const exTo = (row.effective_to as string | null) ?? b?.end_date ?? null
     if ((newFrom || newTo) && !rangesIntersect(newFrom ?? null, newTo ?? null, exFrom, exTo)) continue
@@ -107,6 +111,8 @@ export async function checkPlannerTimeOverlap(
     .select('start_time, duration_minutes, batches(name)')
     .eq('faculty_id', facultyId)
     .eq('planned_date', plannedDate)
+    .eq('is_buffer', false)
+    .neq('status', 'cancelled')
     .not('start_time', 'is', null)
 
   if (ignorePlannerId) query = query.neq('id', ignorePlannerId)
@@ -124,7 +130,31 @@ export async function checkPlannerTimeOverlap(
   return false
 }
 
-/** Full overlap check when assigning a planner time (weekly + other planners) */
+/** A faculty invigilating a (non-cancelled) test on that date at that time */
+export async function checkTestTimeOverlap(
+  supabase: SupabaseClient,
+  facultyId: string,
+  date: string,
+  startTime: string,
+  durationMinutes: number
+): Promise<string | false> {
+  const newStart = toMinutes(startTime.slice(0, 5))
+  const newEnd = newStart + durationMinutes
+  const { data } = await supabase
+    .from('test_schedules')
+    .select('name, start_time, duration_minutes')
+    .eq('faculty_id', facultyId)
+    .eq('test_date', date)
+    .neq('stage', 'Cancelled')
+  for (const row of data ?? []) {
+    if (!row.start_time) continue
+    const exStart = toMinutes((row.start_time as string).slice(0, 5))
+    if (newStart < exStart + ((row.duration_minutes as number) || 60) && newEnd > exStart) return `Test "${row.name}" on same date`
+  }
+  return false
+}
+
+/** Full overlap check when assigning a planner time (weekly + other planners + tests) */
 export async function checkFacultyAssignmentOverlap(
   supabase: SupabaseClient,
   facultyId: string,
@@ -159,6 +189,9 @@ export async function checkFacultyAssignmentOverlap(
   )
   if (planner) return `Overlap with ${planner}`
 
+  const test = await checkTestTimeOverlap(supabase, facultyId, plannedDate, startTime, durationMinutes)
+  if (test) return `Overlap with ${test}`
+
   return false
 }
 
@@ -187,6 +220,7 @@ export async function freeFacultyForSlot(
     if (weekly) return null
     const dated = await checkPlannerTimeOverlap(supabase, f.id, args.date, args.startTime, args.durationMinutes)
     if (dated) return null
+    if (await checkTestTimeOverlap(supabase, f.id, args.date, args.startTime, args.durationMinutes)) return null
     return { id: f.id, full_name: f.full_name, teachesSubject: teaches.has(f.id) }
   }))
   return checked

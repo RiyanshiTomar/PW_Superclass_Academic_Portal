@@ -7,6 +7,7 @@ import { computeBatchPacing, type BatchPacing } from '@/lib/pacing'
 import { notifyUsers } from '@/lib/notifications'
 import { stageBadgeClass, formatTime } from '@/lib/utils'
 import { Alert, Card } from '@/components/PortalShell'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 
 type Planner = { id: string; name: string }
 type Batch = { id: string; name: string; centre_id: string; start_date: string; end_date: string }
@@ -120,11 +121,12 @@ export default function AssignPlanner() {
   }
 
   const reloadLectures = async (linkId: string) => {
-    const { data } = await supabase
+    const { data } = await fetchAll<Record<string, unknown>>((from, to) => supabase
       .from('batch_planners')
       .select('id, faculty_id, subject_id, topic_name, chapter, planned_date, start_time, duration_minutes, stage, subjects(name), app_users(full_name), classrooms(name)')
       .eq('link_id', linkId)
-      .order('planned_date', { ascending: true })
+      .order('planned_date', { ascending: true }).order('id')
+      .range(from, to))
     setLecturesByLink((prev) => ({ ...prev, [linkId]: (data ?? []) as unknown as Lecture[] }))
     // Refresh the pacing snapshot for this batch (drives the scheduling warnings).
     const link = links.find((l) => l.id === linkId)

@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { activeBatchStudents } from '@/lib/students'
+import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import { summarize, type ResultRow } from '@/lib/results'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
@@ -26,6 +28,7 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
   const [filterCentre, setFilterCentre] = useState('')
   const [results, setResults] = useState<Result[]>([])
   const [studentCount, setStudentCount] = useState(0)
+  const [mappedByBatch, setMappedByBatch] = useState<Record<string, string[]>>({})
   const [loading, setLoading] = useState(true)
   const [loadingBatch, setLoadingBatch] = useState(false)
 
@@ -40,11 +43,16 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
       const [bRes, cRes, tRes] = await Promise.all([
         supabase.from('batches').select('id, name, centre_id, batch_manager_id').order('name'),
         supabase.from('centres').select('id, name, branch_head_id').order('name'),
-        supabase.from('test_schedules').select('id, batch_id, name, test_type, test_date, max_marks, pass_marks').order('test_date', { ascending: true }),
+        fetchAll<TestRow>((from, to) => supabase.from('test_schedules').select('id, batch_id, name, test_type, test_date, max_marks, pass_marks').neq('stage', 'Cancelled').order('test_date', { ascending: true }).order('id').range(from, to)),
       ])
       if (bRes.data) setBatches(bRes.data as Batch[])
       if (cRes.data) setCentres(cRes.data as Centre[])
-      if (tRes.data) setTests(tRes.data as TestRow[])
+      setTests(tRes.data)
+      // Multi-batch tests count for every batch they're mapped to.
+      const { data: maps } = await fetchAll<{ test_id: string; batch_id: string }>((from, to) => supabase.from('test_batch_mappings').select('test_id, batch_id').order('test_id').order('batch_id').range(from, to))
+      const m: Record<string, string[]> = {}
+      for (const r of maps) (m[r.batch_id] ??= []).push(r.test_id)
+      setMappedByBatch(m)
       if (scope === 'faculty' && au) {
         const { data: sch } = await supabase.from('batch_schedules').select('batch_id').eq('faculty_id', au.id)
         setFacultyBatchIds(new Set((sch ?? []).map((r) => r.batch_id as string)))
@@ -68,7 +76,10 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
     return batches.filter((b) => allowedCentreIds.has(b.centre_id))
   }, [batches, isPrivileged, scope, appUser, allowedCentreIds, facultyBatchIds])
 
-  const batchTests = useMemo(() => tests.filter((t) => t.batch_id === batchId), [tests, batchId])
+  const batchTests = useMemo(() => {
+    const mapped = new Set(mappedByBatch[batchId] ?? [])
+    return tests.filter((t) => t.batch_id === batchId || mapped.has(t.id))
+  }, [tests, batchId, mappedByBatch])
 
   const filteredBatches = useMemo(() => {
     if (!filterCentre) return visibleBatches
@@ -85,19 +96,24 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
     let cancelled = false
     ;(async () => {
       setLoadingBatch(true)
-      const testIds = tests.filter((t) => t.batch_id === batchId).map((t) => t.id)
+      const own = new Set(tests.filter((t) => t.batch_id === batchId).map((t) => t.id))
+      const testIds = batchTests.map((t) => t.id)
+      // Paged + chunked: a batch's marks easily pass PostgREST's 1000-row cap
+      // (77 students × 16 tests), which silently dropped later tests' results.
       const [rRes, sRes] = await Promise.all([
-        testIds.length ? supabase.from('test_results').select('test_id, regno, student_name, marks, absent, source').in('test_id', testIds) : Promise.resolve({ data: [] }),
-        supabase.from('students').select('id', { count: 'exact', head: true }).eq('batch_id', batchId),
+        fetchAllIn<Result>(testIds, (chunk, from, to) => supabase.from('test_results').select('test_id, regno, student_name, marks, absent, source').in('test_id', chunk).order('test_id').order('regno').range(from, to)),
+        activeBatchStudents(supabase, batchId),
       ])
       if (cancelled) return
-      setResults((rRes.data ?? []) as Result[])
-      setStudentCount((sRes as { count?: number }).count ?? 0)
+      // A multi-batch test holds every batch's students — keep this batch's only.
+      const regnos = new Set(sRes.data.map((r) => r.regno))
+      setResults(rRes.data.filter((r) => own.has(r.test_id) || regnos.has(r.regno)))
+      setStudentCount(sRes.data.length)
       setLoadingBatch(false)
     })()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [batchId])
+  }, [batchId, batchTests])
 
   // Per-test summary using each test's own max/pass.
   const perTest = useMemo(() => {

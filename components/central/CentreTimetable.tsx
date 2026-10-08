@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds } from '@/lib/auth'
 import { toMinutes, formatTime } from '@/lib/utils'
 import { Alert, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
@@ -105,9 +106,10 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
           .eq('is_buffer', false)
           .not('start_time', 'is', null),
         supabase.from('test_schedules')
-          .select('start_time, duration_minutes, classroom_id, name, test_type, batch_id, subjects(name), app_users!test_schedules_faculty_id_fkey(full_name)')
+          .select('id, start_time, duration_minutes, classroom_id, name, test_type, batch_id, subjects(name), app_users!test_schedules_faculty_id_fkey(full_name)')
           .in('batch_id', batchIds)
           .eq('test_date', date)
+          .neq('stage', 'Cancelled')
           .not('start_time', 'is', null),
       ])
       if (cancelled) return
@@ -119,16 +121,18 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
         .select('test_id')
         .in('batch_id', batchIds)
       if (mappedTestIds && mappedTestIds.length > 0) {
-        const existingIds = new Set((testRes.data ?? []).map((t: { batch_id: string }) => t.batch_id))
-        const newIds = mappedTestIds.map((m: { test_id: string }) => m.test_id)
+        const existingIds = new Set((testRes.data ?? []).map((t: { id: string }) => t.id))
+        const newIds = Array.from(new Set(mappedTestIds.map((m: { test_id: string }) => m.test_id))).filter((id) => !existingIds.has(id))
         if (newIds.length > 0) {
-          const { data: mappedTests } = await supabase
+          const { data: mappedTests } = await fetchAllIn<NonNullable<typeof testRes.data>[number]>(newIds, (chunk, from, to) => supabase
             .from('test_schedules')
-            .select('start_time, duration_minutes, classroom_id, name, test_type, batch_id, subjects(name), app_users!test_schedules_faculty_id_fkey(full_name)')
-            .in('id', newIds)
+            .select('id, start_time, duration_minutes, classroom_id, name, test_type, batch_id, subjects(name), app_users!test_schedules_faculty_id_fkey(full_name)')
+            .in('id', chunk)
             .eq('test_date', date)
+            .neq('stage', 'Cancelled')
             .not('start_time', 'is', null)
-          if (mappedTests) (testRes.data as unknown[]) = [...(testRes.data ?? []), ...mappedTests.filter((t: { batch_id: string }) => !existingIds.has(t.batch_id))]
+            .order('id').range(from, to))
+          if (mappedTests) (testRes.data as unknown[]) = [...(testRes.data ?? []), ...mappedTests]
         }
       }
 

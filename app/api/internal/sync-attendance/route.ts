@@ -17,6 +17,8 @@ export async function GET(request: Request) {
       serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
       sheetId: process.env.ATTENDANCE_SHEET_ID || undefined,
       tab: process.env.ATTENDANCE_SHEET_TAB || '',
+      // ?days=3 → only recent rows (the frequent daytime sync); no param = full sheet.
+      days: Number(new URL(request.url).searchParams.get('days')) || 0,
     })
     return NextResponse.json({ ok: true, ...summary })
   } catch (error) {

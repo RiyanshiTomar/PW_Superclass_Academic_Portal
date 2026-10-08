@@ -3,12 +3,19 @@
 import { useState, useEffect, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
+import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
+import { toMinutes, weeklySlotActiveOn } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type Lecture = {
-  planner_id: string
+  key: string                // planner id, or `slot:<schedule id>` when no planner row exists
+  planner_id: string | null
+  // planned   = a real planner lecture
+  // buffer    = the weekly class ran on a reserved buffer slot (no topic planned)
+  // unplanned = the weekly class has no planner row at all
+  kind: 'planned' | 'buffer' | 'unplanned'
   planned_date: string
   start_time: string | null
   duration_minutes: number | null
@@ -16,8 +23,12 @@ type Lecture = {
   batch_name: string
   batch_owner_id: string | null
   centre_name: string
+  subject_id: string | null
   subject_name: string
+  faculty_id: string | null
   faculty_name: string
+  classroom_id: string | null
+  link_id: string | null
   chapter: string | null
   topic_name: string | null
   // audit fields (null = not yet audited)
@@ -29,6 +40,22 @@ type Lecture = {
   remarks: string
   audit_status: 'pending' | 'audited' | 'flagged'
 }
+
+type PlannerRow = {
+  id: string; planned_date: string; start_time: string | null; duration_minutes: number; is_buffer: boolean; status: string
+  chapter: string | null; topic_name: string | null; batch_id: string; subject_id: string | null; faculty_id: string | null
+  classroom_id: string | null; link_id: string | null; batches: unknown; subjects: unknown; app_users: unknown
+}
+type SlotRow = {
+  id: string; batch_id: string; subject_id: string | null; faculty_id: string | null; classroom_id: string | null
+  start_time: string; end_time: string; effective_from: string | null; effective_to: string | null
+  batches: unknown; subjects: unknown; app_users: unknown
+}
+type AuditRow = {
+  id: string; batch_planner_id: string; lecture_link: string | null; topic_check: boolean; duration_check: boolean
+  ppt_check: boolean; remarks: string | null; audit_status: string
+}
+type PageRes<T> = PromiseLike<{ data: T[] | null; error: { message: string } | null }>
 
 type DateGroup = {
   date: string
@@ -85,13 +112,16 @@ export default function DailyLectureAudit() {
   const [filterOwner,  setFilterOwner]  = useState('')
   const [filterStatus, setFilterStatus] = useState('')
 
-  // Inline edit state keyed by planner_id
+  // Inline edit state keyed by lecture key. chapter/topic are only used for a
+  // class that isn't in the planner (what was actually taught).
   const [edits, setEdits] = useState<Record<string, {
     lecture_link: string
     topic_check: boolean
     duration_check: boolean
     ppt_check: boolean
     remarks: string
+    chapter: string
+    topic: string
   }>>({})
 
   // ─── Load ──────────────────────────────────────────────────────────────────
@@ -114,127 +144,165 @@ export default function DailyLectureAudit() {
       batchIdsToQuery = batches.filter(b => b.batch_owner_id === appUserId).map(b => b.id)
     }
 
-    // Fetch only the selected date's lectures
-    let query = supabase
-      .from('batch_planners')
-      .select(`
-        id, planned_date, start_time, duration_minutes,
-        chapter, topic_name, batch_id, subject_id,
+    // What actually runs on this date = what the Calendar shows: every weekly
+    // slot active on the date (its segment + batch dates), matched to the
+    // planner row of that batch+subject. A slot whose planner row is a BUFFER
+    // (or that has no planner row at all) is still a real class — it shows up
+    // as "Not in planner" so it can be audited; a cancelled row hides it.
+    // Planner rows on a date with no active slot for their subject are NOT
+    // shown — same as the Calendar, which only shows what is scheduled now.
+    const dow = new Date(date + 'T12:00:00').getDay()
+    const plannerCols = `
+        id, planned_date, start_time, duration_minutes, is_buffer, status,
+        chapter, topic_name, batch_id, subject_id, faculty_id, classroom_id, link_id,
         batches(id, name, centre_id, batch_owner_id, centres(id, name)),
         subjects(id, name),
         app_users!batch_planners_faculty_id_fkey(id, full_name)
-      `)
-      .eq('is_buffer', false)
-      .eq('planned_date', date)
-      .neq('status', 'cancelled')
-      .order('start_time', { ascending: true })
-
-    if (batchIdsToQuery && batchIdsToQuery.length > 0) {
-      query = query.in('batch_id', batchIdsToQuery)
+      `
+    const slotCols = `
+        id, batch_id, subject_id, faculty_id, classroom_id, start_time, end_time, effective_from, effective_to,
+        batches(id, name, centre_id, batch_owner_id, start_date, end_date, status, centres(id, name)),
+        subjects(id, name),
+        app_users(id, full_name)
+      `
+    const scoped = batchIdsToQuery && batchIdsToQuery.length > 0 ? batchIdsToQuery : null
+    if (batchIdsToQuery && batchIdsToQuery.length === 0) {
+      // A filter that matches no batch → nothing to audit.
+      setLectures([]); setEdits({}); setCarryPending(0); setLoading(false)
+      return
     }
+    const [pRes, sRes] = await Promise.all([
+      scoped
+        ? fetchAllIn<PlannerRow>(scoped, (chunk, from, to) => supabase.from('batch_planners').select(plannerCols).eq('planned_date', date).in('batch_id', chunk).order('id').range(from, to) as unknown as PageRes<PlannerRow>)
+        : fetchAll<PlannerRow>((from, to) => supabase.from('batch_planners').select(plannerCols).eq('planned_date', date).order('id').range(from, to) as unknown as PageRes<PlannerRow>),
+      scoped
+        ? fetchAllIn<SlotRow>(scoped, (chunk, from, to) => supabase.from('batch_schedules').select(slotCols).eq('day_of_week', dow).in('batch_id', chunk).order('id').range(from, to) as unknown as PageRes<SlotRow>)
+        : fetchAll<SlotRow>((from, to) => supabase.from('batch_schedules').select(slotCols).eq('day_of_week', dow).order('id').range(from, to) as unknown as PageRes<SlotRow>),
+    ])
 
-    const { data: planners, error: pErr } = await query
-
-    if (pErr) {
-      setMessage({ type: 'error', text: 'Could not load lectures: ' + pErr.message })
+    if (pRes.error || sRes.error) {
+      setMessage({ type: 'error', text: 'Could not load lectures: ' + (pRes.error ?? sRes.error) })
       setLoading(false)
       return
     }
 
-    if (!planners || planners.length === 0) {
+    const planners = pRes.data
+    const slots = sRes.data.filter((s) => weeklySlotActiveOn(s, date))
+
+    // Match each active weekly slot to a planner row of the same batch+subject
+    // (closest start time — planner rows can be a few minutes off the slot).
+    const used = new Set<string>()
+    type Pick = { kind: Lecture['kind']; p: PlannerRow | null; slot: SlotRow | null }
+    const picks: Pick[] = []
+    const mins = (t: string | null) => (t ? toMinutes(t.slice(0, 5)) : 0)
+    for (const s of [...slots].sort((a, b) => a.start_time.localeCompare(b.start_time))) {
+      const cands = planners.filter((p) => !used.has(p.id) && p.batch_id === s.batch_id && p.subject_id === s.subject_id)
+      // Prefer a real lecture, then a cancellation marker, then a buffer.
+      const rank = (p: PlannerRow) => (!p.is_buffer && p.status !== 'cancelled' ? 0 : p.status === 'cancelled' ? 1 : 2)
+      cands.sort((a, b) => rank(a) - rank(b) || Math.abs(mins(a.start_time) - mins(s.start_time)) - Math.abs(mins(b.start_time) - mins(s.start_time)))
+      const p = cands[0] ?? null
+      if (p) used.add(p.id)
+      if (p?.status === 'cancelled') continue // class cancelled for this date
+      if (p && !p.is_buffer) picks.push({ kind: 'planned', p, slot: s })
+      else picks.push({ kind: p ? 'buffer' : 'unplanned', p, slot: s })
+    }
+
+    if (picks.length === 0) {
       setLectures([])
       setEdits({})
-      setLoading(false)
-      return
+    } else {
+      // Existing audit rows
+      const ids = picks.map((x) => x.p?.id).filter((x): x is string => !!x)
+      const { data: audits } = await fetchAllIn<AuditRow>(ids, (chunk, from, to) => supabase
+        .from('lecture_audits')
+        .select('id, batch_planner_id, lecture_link, topic_check, duration_check, ppt_check, remarks, audit_status')
+        .in('batch_planner_id', chunk).order('id').range(from, to))
+      const auditMap = new Map<string, AuditRow>()
+      for (const a of audits) auditMap.set(a.batch_planner_id, a)
+
+      const merged: Lecture[] = picks.map(({ kind, p, slot }) => {
+        const src = (p ?? slot)!
+        const batch  = one((slot ?? p)!.batches as never) as { id: string; name: string; centre_id: string; batch_owner_id: string | null; centres: unknown } | null
+        const centre = one(batch?.centres as never) as { name: string } | null
+        const subj   = one(src.subjects as never) as { name: string } | null
+        const fac    = one((kind === 'planned' ? p!.app_users : slot?.app_users ?? p?.app_users) as never) as { full_name: string } | null
+        const a      = p ? auditMap.get(p.id) : undefined
+        const start  = kind === 'planned' ? p!.start_time : slot!.start_time
+        return {
+          key:             p ? p.id : `slot:${slot!.id}`,
+          planner_id:      p?.id ?? null,
+          kind,
+          planned_date:    date,
+          start_time:      start,
+          duration_minutes: kind === 'planned' ? p!.duration_minutes : mins(slot!.end_time) - mins(slot!.start_time),
+          batch_id:        src.batch_id,
+          batch_name:      batch?.name      ?? '—',
+          batch_owner_id:  batch?.batch_owner_id ?? null,
+          centre_name:     centre?.name     ?? '—',
+          subject_id:      src.subject_id,
+          subject_name:    subj?.name       ?? '—',
+          faculty_id:      kind === 'planned' ? p!.faculty_id : (slot?.faculty_id ?? p?.faculty_id ?? null),
+          faculty_name:    fac?.full_name   ?? '—',
+          classroom_id:    slot?.classroom_id ?? p?.classroom_id ?? null,
+          link_id:         p?.link_id ?? null,
+          chapter:         kind === 'planned' ? p!.chapter : null,
+          topic_name:      kind === 'planned' ? p!.topic_name : null,
+          audit_id:        a?.id            ?? null,
+          lecture_link:    a?.lecture_link  ?? '',
+          topic_check:     a?.topic_check   ?? false,
+          duration_check:  a?.duration_check ?? false,
+          ppt_check:       a?.ppt_check      ?? false,
+          remarks:         a?.remarks        ?? '',
+          audit_status:    (a?.audit_status as Lecture['audit_status']) ?? 'pending',
+        }
+      }).sort((x, y) => (x.start_time ?? '').localeCompare(y.start_time ?? '') || x.batch_name.localeCompare(y.batch_name))
+
+      setLectures(merged)
+
+      // Init edit state
+      const initEdits: typeof edits = {}
+      merged.forEach(l => {
+        initEdits[l.key] = {
+          lecture_link:   l.lecture_link,
+          topic_check:    l.topic_check,
+          duration_check: l.duration_check,
+          ppt_check:      l.ppt_check,
+          remarks:        l.remarks,
+          chapter:        '',
+          topic:          '',
+        }
+      })
+      setEdits(initEdits)
     }
-
-    // Filter out only entries with no start_time at all — everything else is valid
-    const validPlanners = planners.filter(p => !!p.start_time)
-
-    // Fetch existing audit rows
-    const ids = validPlanners.map(p => p.id)
-    const { data: audits } = await supabase
-      .from('lecture_audits')
-      .select('id, batch_planner_id, lecture_link, topic_check, duration_check, ppt_check, remarks, audit_status')
-      .in('batch_planner_id', ids)
-
-    const auditMap = new Map<string, typeof audits extends (infer T)[] | null ? T : never>()
-    for (const a of (audits ?? [])) auditMap.set(a.batch_planner_id, a)
-
-    // Merge
-    const merged: Lecture[] = validPlanners.map(p => {
-      const batch   = one(p.batches  as never) as { id: string; name: string; centre_id: string; batch_owner_id: string | null; centres: unknown } | null
-      const centre  = one(batch?.centres as never) as { name: string } | null
-      const subj    = one(p.subjects as never) as { name: string } | null
-      const fac     = one(p.app_users as never) as { full_name: string } | null
-      const a       = auditMap.get(p.id)
-
-      return {
-        planner_id:      p.id,
-        planned_date:    p.planned_date,
-        start_time:      p.start_time,
-        duration_minutes: p.duration_minutes,
-        batch_id:        p.batch_id,
-        batch_name:      batch?.name      ?? '—',
-        batch_owner_id:  batch?.batch_owner_id ?? null,
-        centre_name:     centre?.name     ?? '—',
-        subject_name:    subj?.name       ?? '—',
-        faculty_name:    fac?.full_name   ?? '—',
-        chapter:         p.chapter,
-        topic_name:      p.topic_name,
-        audit_id:        a?.id            ?? null,
-        lecture_link:    a?.lecture_link  ?? '',
-        topic_check:     a?.topic_check   ?? false,
-        duration_check:  a?.duration_check ?? false,
-        ppt_check:       a?.ppt_check      ?? false,
-        remarks:         a?.remarks        ?? '',
-        audit_status:    (a?.audit_status as Lecture['audit_status']) ?? 'pending',
-      }
-    })
-
-    setLectures(merged)
-
-    // Init edit state
-    const initEdits: typeof edits = {}
-    merged.forEach(l => {
-      initEdits[l.planner_id] = {
-        lecture_link:   l.lecture_link,
-        topic_check:    l.topic_check,
-        duration_check: l.duration_check,
-        ppt_check:      l.ppt_check,
-        remarks:        l.remarks,
-      }
-    })
-    setEdits(initEdits)
 
     // ── Carry-forward pending: count unaudited lectures from 19 Aug up to (but not including) selected date
     const START_DATE = '2026-08-19' // audit start date
-    const todayStr   = new Date().toISOString().split('T')[0]
 
     // Only show earlier pending when viewing a date after the start date
     if (date > START_DATE) {
-      let pastQuery = supabase
-        .from('batch_planners')
-        .select('id')
-        .eq('is_buffer', false)
-        .neq('status', 'cancelled')
-        .gte('planned_date', START_DATE)   // from audit start
-        .lt('planned_date', date)          // up to (not including) selected date
-
-      if (batchIdsToQuery && batchIdsToQuery.length > 0) {
-        pastQuery = pastQuery.in('batch_id', batchIdsToQuery)
+      const pastQuery = (from: number, to: number, chunk?: string[]) => {
+        let q = supabase
+          .from('batch_planners')
+          .select('id')
+          .eq('is_buffer', false)
+          .neq('status', 'cancelled')
+          .gte('planned_date', START_DATE)   // from audit start
+          .lt('planned_date', date)          // up to (not including) selected date
+        if (chunk) q = q.in('batch_id', chunk)
+        return q.order('id').range(from, to)
       }
-
-      const { data: pastPlanners } = await pastQuery
-      if (pastPlanners && pastPlanners.length > 0) {
-        const pastIds = pastPlanners.map((p: { id: string }) => p.id)
-        const { data: pastAudits } = await supabase
+      const { data: pastPlanners } = scoped
+        ? await fetchAllIn<{ id: string }>(scoped, (chunk, from, to) => pastQuery(from, to, chunk))
+        : await fetchAll<{ id: string }>((from, to) => pastQuery(from, to))
+      if (pastPlanners.length > 0) {
+        const pastIds = pastPlanners.map((p) => p.id)
+        const { data: pastAudits } = await fetchAllIn<{ batch_planner_id: string; audit_status: string }>(pastIds, (chunk, from, to) => supabase
           .from('lecture_audits')
           .select('batch_planner_id, audit_status')
-          .in('batch_planner_id', pastIds)
+          .in('batch_planner_id', chunk).order('batch_planner_id').range(from, to))
         // A lecture is "done" if it's audited or flagged — only truly pending ones carry forward
         const donePastIds = new Set(
-          (pastAudits ?? [])
+          pastAudits
             .filter((a: { audit_status: string }) => a.audit_status !== 'pending')
             .map((a: { batch_planner_id: string }) => a.batch_planner_id)
         )
@@ -332,12 +400,57 @@ export default function DailyLectureAudit() {
   // ─── Save ──────────────────────────────────────────────────────────────────
 
   const save = async (lecture: Lecture) => {
-    const pid = lecture.planner_id
-    setSaving(pid)
+    const key = lecture.key
+    setSaving(key)
     setMessage(null)
 
-    const e = edits[pid]
+    const e = edits[key]
     if (!e) { setSaving(''); return }
+
+    // A class that isn't in the planner becomes a real planner lecture once
+    // it's audited as taught: the buffer slot it used is consumed, or a new
+    // row is created for the weekly slot. Pacing then counts it.
+    let pid = lecture.planner_id
+    const taughtChapter = e.chapter.trim(), taughtTopic = e.topic.trim()
+    if (lecture.kind !== 'planned') {
+      if (e.topic_check && (!taughtChapter || !taughtTopic)) {
+        setMessage({ type: 'error', text: 'This class is not in the planner — enter the chapter and topic that were taught before ticking Topic ✓.' })
+        setSaving(''); return
+      }
+      const fields = {
+        is_buffer: false,
+        chapter: taughtChapter || 'Not in planner',
+        topic_name: taughtTopic || 'Not in planner',
+        start_time: lecture.start_time,
+        duration_minutes: lecture.duration_minutes ?? 60,
+        classroom_id: lecture.classroom_id,
+        status: e.topic_check ? 'conducted' : 'planned',
+        stage: 'Confirmed',
+      }
+      if (lecture.kind === 'buffer' && pid) {
+        const { error } = await supabase.from('batch_planners')
+          .update({ ...fields, ...(lecture.faculty_id ? { faculty_id: lecture.faculty_id } : {}) }).eq('id', pid)
+        if (error) { setMessage({ type: 'error', text: 'Save failed: ' + error.message }); setSaving(''); return }
+      } else {
+        if (!lecture.faculty_id) {
+          setMessage({ type: 'error', text: 'This weekly class has no faculty assigned in the Batch Scheduler — assign one there first.' })
+          setSaving(''); return
+        }
+        // Attach to the batch's planner link when it has one.
+        let linkId = lecture.link_id
+        if (!linkId) {
+          const { data: link } = await supabase.from('batch_planner_links').select('id').eq('batch_id', lecture.batch_id).limit(1).maybeSingle<{ id: string }>()
+          linkId = link?.id ?? null
+        }
+        const { data: ins, error } = await supabase.from('batch_planners').insert({
+          ...fields, batch_id: lecture.batch_id, link_id: linkId, subject_id: lecture.subject_id,
+          faculty_id: lecture.faculty_id, planned_date: lecture.planned_date,
+        }).select('id').single<{ id: string }>()
+        if (error || !ins) { setMessage({ type: 'error', text: 'Save failed: ' + (error?.message ?? 'could not create the lecture') }); setSaving(''); return }
+        pid = ins.id
+      }
+    }
+    if (!pid) { setSaving(''); return }
 
     const allChecked = e.topic_check && e.duration_check && e.ppt_check
     const anyChecked = e.topic_check || e.duration_check || e.ppt_check
@@ -392,10 +505,14 @@ export default function DailyLectureAudit() {
           : audit_status === 'flagged' ? '🚩 Flagged.'
           : '⏳ Saved.',
       })
-      // Update local state
+      // Update local state (a not-in-planner class is now a real lecture)
+      const nowPlanned = lecture.kind !== 'planned'
+        ? { kind: 'planned' as const, planner_id: pid, key: pid, chapter: taughtChapter || 'Not in planner', topic_name: taughtTopic || 'Not in planner' }
+        : {}
       setLectures(prev => prev.map(l =>
-        l.planner_id !== pid ? l : { ...l, audit_status, ...e }
+        l.key !== key ? l : { ...l, audit_status, ...e, ...nowPlanned }
       ))
+      if (nowPlanned.key) setEdits(prev => { const { [key]: cur, ...rest } = prev; return { ...rest, [pid!]: { ...cur, chapter: '', topic: '' } } })
     }
     setSaving('')
   }
@@ -566,7 +683,7 @@ export default function DailyLectureAudit() {
             </thead>
             <tbody>
               {filtered.map(lecture => {
-                const e   = edits[lecture.planner_id] ?? { lecture_link: '', topic_check: false, duration_check: false, ppt_check: false, remarks: '' }
+                const e   = edits[lecture.key] ?? { lecture_link: '', topic_check: false, duration_check: false, ppt_check: false, remarks: '', chapter: '', topic: '' }
                 const all = e.topic_check && e.duration_check && e.ppt_check
                 const any = e.topic_check || e.duration_check || e.ppt_check
                 const hasContent = e.lecture_link.trim() || e.remarks.trim()
@@ -575,7 +692,7 @@ export default function DailyLectureAudit() {
                   lecture.audit_status === 'flagged' ? 'bg-red-50/40' : ''
 
                 return (
-                  <tr key={lecture.planner_id} className={rowBg + ' hover:bg-neutral-50/60'}>
+                  <tr key={lecture.key} className={rowBg + ' hover:bg-neutral-50/60'}>
                     <td className={tdCls + ' whitespace-nowrap font-medium'}>
                       {fmt(lecture.start_time)}
                       {lecture.duration_minutes && <span className="text-neutral-400 text-xs ml-1">({lecture.duration_minutes}m)</span>}
@@ -584,44 +701,61 @@ export default function DailyLectureAudit() {
                     <td className={tdCls + ' whitespace-nowrap text-neutral-500'}>{lecture.centre_name}</td>
                     <td className={tdCls + ' whitespace-nowrap'}>{lecture.subject_name}</td>
                     <td className={tdCls + ' whitespace-nowrap text-neutral-600'}>{lecture.faculty_name}</td>
-                    <td className={tdCls}>
-                      {lecture.chapter && <div className="text-xs text-neutral-500">{lecture.chapter}</div>}
-                      <div className="font-medium">{lecture.topic_name || <span className="text-neutral-300 italic">Not set</span>}</div>
+                    <td className={tdCls + ' min-w-[200px]'}>
+                      {lecture.kind === 'planned' ? (
+                        <>
+                          {lecture.chapter && <div className="text-xs text-neutral-500">{lecture.chapter}</div>}
+                          <div className="font-medium">{lecture.topic_name || <span className="text-neutral-300 italic">Not set</span>}</div>
+                        </>
+                      ) : (
+                        <div className="space-y-1">
+                          <span className="inline-block px-1.5 py-0.5 text-[10px] font-bold uppercase rounded bg-amber-100 text-amber-800 border border-amber-300"
+                            title={lecture.kind === 'buffer' ? 'Weekly class on a buffer slot — no topic was planned for it.' : 'Weekly class with no planner lecture on this date.'}>
+                            Not in planner{lecture.kind === 'buffer' ? ' · buffer slot' : ''}
+                          </span>
+                          <input type="text" value={e.chapter} placeholder="Chapter taught"
+                            onChange={ev => setEdits(prev => ({ ...prev, [lecture.key]: { ...prev[lecture.key], chapter: ev.target.value } }))}
+                            className={inputCls} />
+                          <input type="text" value={e.topic} placeholder="Topic taught"
+                            onChange={ev => setEdits(prev => ({ ...prev, [lecture.key]: { ...prev[lecture.key], topic: ev.target.value } }))}
+                            className={inputCls} />
+                        </div>
+                      )}
                     </td>
                     <td className={tdCls}>
                       <input type="url" value={e.lecture_link}
-                        onChange={ev => setEdits(prev => ({ ...prev, [lecture.planner_id]: { ...prev[lecture.planner_id], lecture_link: ev.target.value } }))}
+                        onChange={ev => setEdits(prev => ({ ...prev, [lecture.key]: { ...prev[lecture.key], lecture_link: ev.target.value } }))}
                         placeholder="https://youtube.com/…" className={inputCls} />
                     </td>
                     <td className={tdCls + ' text-center'}>
                       <input type="checkbox" checked={e.topic_check}
-                        onChange={ev => setEdits(prev => ({ ...prev, [lecture.planner_id]: { ...prev[lecture.planner_id], topic_check: ev.target.checked } }))}
+                        onChange={ev => setEdits(prev => ({ ...prev, [lecture.key]: { ...prev[lecture.key], topic_check: ev.target.checked } }))}
                         className="w-4 h-4 rounded border-neutral-300 text-violet-600" />
                     </td>
                     <td className={tdCls + ' text-center'}>
                       <input type="checkbox" checked={e.duration_check}
-                        onChange={ev => setEdits(prev => ({ ...prev, [lecture.planner_id]: { ...prev[lecture.planner_id], duration_check: ev.target.checked } }))}
+                        onChange={ev => setEdits(prev => ({ ...prev, [lecture.key]: { ...prev[lecture.key], duration_check: ev.target.checked } }))}
                         className="w-4 h-4 rounded border-neutral-300 text-violet-600" />
                     </td>
                     <td className={tdCls + ' text-center'}>
                       <input type="checkbox" checked={e.ppt_check}
-                        onChange={ev => setEdits(prev => ({ ...prev, [lecture.planner_id]: { ...prev[lecture.planner_id], ppt_check: ev.target.checked } }))}
+                        onChange={ev => setEdits(prev => ({ ...prev, [lecture.key]: { ...prev[lecture.key], ppt_check: ev.target.checked } }))}
                         className="w-4 h-4 rounded border-neutral-300 text-violet-600" />
                     </td>
                     <td className={tdCls}>
                       <input type="text" value={e.remarks}
-                        onChange={ev => setEdits(prev => ({ ...prev, [lecture.planner_id]: { ...prev[lecture.planner_id], remarks: ev.target.value } }))}
+                        onChange={ev => setEdits(prev => ({ ...prev, [lecture.key]: { ...prev[lecture.key], remarks: ev.target.value } }))}
                         placeholder="Notes…" className={inputCls} />
                     </td>
                     <td className={tdCls + ' text-center'}>{statusBadge(lecture.audit_status)}</td>
                     <td className={tdCls + ' text-center'}>
-                      <button onClick={() => save(lecture)} disabled={saving === lecture.planner_id}
+                      <button onClick={() => save(lecture)} disabled={saving === lecture.key}
                         className={`px-3 py-1 text-xs font-semibold rounded-lg text-white disabled:opacity-50 ${
                           all ? 'bg-emerald-600 hover:bg-emerald-700' :
                           (any || hasContent) ? 'bg-red-500 hover:bg-red-600' :
                           'bg-violet-600 hover:bg-violet-700'
                         }`}>
-                        {saving === lecture.planner_id ? '…' : all ? '✅ Save' : (any || hasContent) ? '🚩 Save' : 'Save'}
+                        {saving === lecture.key ? '…' : all ? '✅ Save' : (any || hasContent) ? '🚩 Save' : 'Save'}
                       </button>
                     </td>
                   </tr>

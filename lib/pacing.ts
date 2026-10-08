@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { daysBetween } from '@/lib/utils'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 
 // ============================================================
 // Syllabus pacing: for a batch, how far each subject has progressed vs its
@@ -50,13 +51,15 @@ export async function computeBatchPacing(
   if (!b) return null
   const endDate = b.end_date
 
-  const { data: lecs } = await supabase
+  const { data: lecs } = await fetchAll<Record<string, unknown>>((from, to) => supabase
   .from('batch_planners')
   .select('subject_id, chapter, planned_date, duration_minutes, status, subjects(name)')
   .eq('batch_id', batchId)
   .eq('is_buffer', false)
+  .neq('status', 'cancelled')
   // Never count lectures beyond the batch end date
   .lte('planned_date', endDate)
+  .order('id').range(from, to))
 
 // NEW — fetch each chapter's syllabus order from Concept Tags
 const subjectIds = [...new Set((lecs ?? []).map((r) => r.subject_id).filter((id): id is string => !!id))]

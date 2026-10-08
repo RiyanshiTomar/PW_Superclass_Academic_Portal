@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import { parseCSVWithHeaders } from '@/lib/utils'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
@@ -9,7 +10,8 @@ import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/
 type Scope = 'central' | 'admin' | 'branch'
 type Centre = { id: string; name: string; branch_head_id: string | null }
 type Batch = { id: string; name: string; centre_id: string; start_date: string | null; end_date: string | null }
-type Student = { id: string; regno: string; student_name: string; centre_id: string | null; batch_id: string | null; sheet_batch: string | null }
+type Student = { id: string; regno: string; student_name: string; centre_id: string | null; batch_id: string | null; sheet_batch: string | null; status?: string | null; discard_reason?: string | null }
+const isDiscarded = (s: Student) => s.status === 'discarded'
 type BatchFill = { assigned: number; capacity: number | null; allowed: number | null }
 // One parsed CSV row, ready to preview before applying.
 type UploadRow = { regno: string; name: string; studentId: string | null; currentBatchId: string | null; targetBatchId: string | null; skip: boolean; error: string; warning: string }
@@ -56,6 +58,27 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
   const [loadingCentre, setLoadingCentre] = useState(false)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  // 'active' hides students who have left; 'discarded' shows only them.
+  const [view, setView] = useState<'active' | 'discarded'>('active')
+  const [hasStatus, setHasStatus] = useState(true) // false until migration-student-discard.sql is run
+  const [syncing, setSyncing] = useState(false)
+
+  // Pull new students from the enrollment sheet now (the cron runs nightly).
+  const syncNow = async () => {
+    setSyncing(true); setMsg(null)
+    try {
+      const res = await fetch('/api/students/sync', { method: 'POST' })
+      const j = await res.json()
+      if (!res.ok || !j.ok) throw new Error(j.error || 'Sync failed.')
+      const un = Object.entries((j.unmatchedCentres ?? {}) as Record<string, number>).map(([c, n]) => `${c} (${n})`).join(', ')
+      setMsg({ type: 'success', text: `Synced ${j.synced} students from the sheet. New students appear as Unassigned — assign their batch below.${un ? ` Skipped (centre not in the portal): ${un}.` : ''}` })
+      if (centreId) await loadCentre(centreId)
+    } catch (e) {
+      setMsg({ type: 'error', text: e instanceof Error ? e.message : 'Sync failed.' })
+    }
+    setSyncing(false)
+  }
 
   // CSV bulk-assign
   const fileRef = useRef<HTMLInputElement>(null)
@@ -91,10 +114,16 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
   const loadCentre = async (cid: string) => {
     setLoadingCentre(true); setMsg(null)
     const [sRes, bRes] = await Promise.all([
-      supabase.from('students').select('id, regno, student_name, centre_id, batch_id, sheet_batch').eq('centre_id', cid).order('student_name'),
+      (async () => {
+        const read = (cols: string) => fetchAll<Student>((from, to) => supabase.from('students').select(cols).eq('centre_id', cid).order('student_name').order('id').range(from, to) as unknown as PromiseLike<{ data: Student[] | null; error: { message: string } | null }>)
+        const r = await read('id, regno, student_name, centre_id, batch_id, sheet_batch, status, discard_reason')
+        if (!r.error) { setHasStatus(true); return r }
+        setHasStatus(false) // status column not there yet — everyone is active
+        return read('id, regno, student_name, centre_id, batch_id, sheet_batch')
+      })(),
       supabase.from('batches').select('id, name, centre_id, start_date, end_date').eq('centre_id', cid).neq('status', 'Merged').order('name'),
     ])
-    const studentsData = (sRes.data ?? []) as Student[]
+    const studentsData = sRes.data
     const batchesData = (bRes.data ?? []) as Batch[]
     setStudents(studentsData); setBatches(batchesData)
 
@@ -110,9 +139,10 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
     const regnos = studentsData.map((s) => s.regno)
     const attMap = new Map<string, number | null>()
     if (regnos.length) {
-      const { data: attRows } = await supabase.from('attendance').select('regno, attendance_date, first_punch_in').in('regno', regnos)
+      const { data: attRows } = await fetchAllIn<{ regno: string; attendance_date: string; first_punch_in: string | null }>(regnos, (chunk, from, to) =>
+        supabase.from('attendance').select('regno, attendance_date, first_punch_in').in('regno', chunk).order('regno').order('attendance_date').range(from, to))
       const present = new Map<string, Set<string>>(), total = new Map<string, Set<string>>()
-      for (const r of (attRows ?? []) as { regno: string; attendance_date: string; first_punch_in: string | null }[]) {
+      for (const r of attRows) {
         if (!total.has(r.regno)) total.set(r.regno, new Set())
         total.get(r.regno)!.add(r.attendance_date)
         if (r.first_punch_in) { if (!present.has(r.regno)) present.set(r.regno, new Set()); present.get(r.regno)!.add(r.attendance_date) }
@@ -128,17 +158,19 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
     const testMap = new Map<string, number | null>()
     const batchIds = batchesData.map((b) => b.id)
     if (batchIds.length) {
-      const { data: tests } = await supabase.from('test_schedules').select('id, batch_id').in('batch_id', batchIds)
+      const { data: tests } = await fetchAllIn<{ id: string; batch_id: string }>(batchIds, (chunk, from, to) =>
+        supabase.from('test_schedules').select('id, batch_id').in('batch_id', chunk).neq('stage', 'Cancelled').order('id').range(from, to))
       const testsByBatch = new Map<string, Set<string>>()
-      for (const t of (tests ?? []) as { id: string; batch_id: string }[]) {
+      for (const t of tests) {
         if (!testsByBatch.has(t.batch_id)) testsByBatch.set(t.batch_id, new Set())
         testsByBatch.get(t.batch_id)!.add(t.id)
       }
-      const testIds = (tests ?? []).map((t) => t.id)
+      const testIds = tests.map((t) => t.id)
       const recordedByReg = new Map<string, Set<string>>()
       if (testIds.length) {
-        const { data: results } = await supabase.from('test_results').select('test_id, regno, marks, absent').in('test_id', testIds)
-        for (const r of (results ?? []) as { test_id: string; regno: string; marks: number | null; absent: boolean }[]) {
+        const { data: results } = await fetchAllIn<{ test_id: string; regno: string; marks: number | null; absent: boolean }>(testIds, (chunk, from, to) =>
+          supabase.from('test_results').select('test_id, regno, marks, absent').in('test_id', chunk).order('test_id').order('regno').range(from, to))
+        for (const r of results) {
           if (r.marks == null && !r.absent) continue
           if (!recordedByReg.has(r.regno)) recordedByReg.set(r.regno, new Set())
           recordedByReg.get(r.regno)!.add(r.test_id)
@@ -175,7 +207,7 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
       capsByBatch.get(s.batch_id)!.push(cap)
     }
     const assigned = new Map<string, number>()
-    for (const st of students) if (st.batch_id) assigned.set(st.batch_id, (assigned.get(st.batch_id) ?? 0) + 1)
+    for (const st of students) if (st.batch_id && !isDiscarded(st)) assigned.set(st.batch_id, (assigned.get(st.batch_id) ?? 0) + 1)
     const out = new Map<string, BatchFill>()
     for (const b of batches) {
       const caps = capsByBatch.get(b.id) ?? []
@@ -198,7 +230,7 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
   const batchLabel = (b: Batch) => { const ft = fillText(b.id); return ft ? `${b.name} (${ft})` : b.name }
 
   const ordered = useMemo(() => {
-    return [...students].sort((a, b) => {
+    return students.filter((s) => !isDiscarded(s)).sort((a, b) => {
       const au = a.batch_id ? 1 : 0, bu = b.batch_id ? 1 : 0
       if (au !== bu) return au - bu
       return a.student_name.localeCompare(b.student_name)
@@ -212,6 +244,34 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
     if (error) { setMsg({ type: 'error', text: error.message }); return }
     setStudents((prev) => prev.map((s) => (s.id === student.id ? { ...s, batch_id: batchId || null } : s)))
     loadCentre(centreId)
+  }
+
+  // Students shown in the table: the chosen view + search (name / SID / sheet batch).
+  const visible = useMemo(() => {
+    const q = search.toLowerCase().trim()
+    const base = view === 'active' ? ordered : students.filter(isDiscarded).sort((a, b) => a.student_name.localeCompare(b.student_name))
+    return q ? base.filter((s) => s.student_name.toLowerCase().includes(q) || s.regno.toLowerCase().includes(q)) : base
+  }, [ordered, students, view, search])
+  const discardedCount = students.filter(isDiscarded).length
+
+  // Discard = the student has left. They keep their batch and all past
+  // records, but drop out of every roster (marks, attendance, results).
+  const setDiscarded = async (student: Student, discard: boolean) => {
+    let reason: string | null = null
+    if (discard) {
+      const r = window.prompt(`Discard ${student.student_name || student.regno} (${student.regno})?\n\nThey'll be removed from marks entry, attendance and results rosters. Past records are kept and you can restore them any time.\n\nReason (optional):`, '')
+      if (r === null) return
+      reason = r.trim() || null
+    }
+    setBusyId(student.id); setMsg(null)
+    const patch = discard
+      ? { status: 'discarded', discarded_at: new Date().toISOString(), discard_reason: reason, updated_at: new Date().toISOString() }
+      : { status: 'active', discarded_at: null, discard_reason: null, updated_at: new Date().toISOString() }
+    const { error } = await supabase.from('students').update(patch).eq('id', student.id)
+    setBusyId(null)
+    if (error) { setMsg({ type: 'error', text: error.message }); return }
+    setStudents((prev) => prev.map((x) => (x.id === student.id ? { ...x, status: patch.status, discard_reason: patch.discard_reason } : x)))
+    setMsg({ type: 'success', text: discard ? `${student.student_name || student.regno} discarded.` : `${student.student_name || student.regno} restored.` })
   }
 
   // --- CSV bulk assign ---------------------------------------------------
@@ -338,7 +398,7 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
     await loadCentre(centreId)
   }
 
-  const unassignedCount = students.filter((s) => !s.batch_id).length
+  const unassignedCount = students.filter((s) => !s.batch_id && !isDiscarded(s)).length
   const centreName = centres.find((c) => c.id === centreId)?.name ?? ''
   const uploadErrors = uploadRows?.filter((r) => r.error).length ?? 0
   const uploadWarnings = uploadRows?.filter((r) => !r.error && r.warning).length ?? 0
@@ -362,9 +422,10 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
         {centreId && !loadingCentre && (
           <>
             <div className="pb-2 text-sm text-neutral-500">
-              {students.length} students · <span className="font-semibold text-amber-600">{unassignedCount} unassigned</span>
+              {students.length - discardedCount} students · <span className="font-semibold text-amber-600">{unassignedCount} unassigned</span>{discardedCount > 0 && <> · <span className="text-neutral-400">{discardedCount} discarded</span></>}
             </div>
             <div className="ml-auto flex gap-2 pb-1">
+              <BtnSecondary onClick={syncNow} disabled={syncing}>{syncing ? 'Syncing…' : 'Sync from sheet'}</BtnSecondary>
               <BtnSecondary onClick={downloadTemplate}>Download CSV</BtnSecondary>
               <label className="inline-flex items-center px-4 h-10 rounded-xl text-sm font-semibold cursor-pointer bg-neutral-100 hover:bg-neutral-200 text-neutral-700">
                 Upload CSV
@@ -406,6 +467,18 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
       ) : students.length === 0 ? (
         <Alert type="info">No students at {centreName} yet. Run <code>npm run sync-students</code> to pull them from the enrollment sheet.</Alert>
       ) : (
+        <>
+        <div className="flex flex-wrap items-center gap-3 mb-3">
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name or SID…" className="h-10 flex-1 min-w-[220px] max-w-md px-3 bg-white border border-neutral-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+          {hasStatus && (
+            <div className="inline-flex rounded-xl border border-neutral-200 overflow-hidden text-sm font-semibold">
+              <button onClick={() => setView('active')} className={`px-3 h-10 ${view === 'active' ? 'bg-violet-600 text-white' : 'bg-white text-neutral-600'}`}>Active</button>
+              <button onClick={() => setView('discarded')} className={`px-3 h-10 ${view === 'discarded' ? 'bg-violet-600 text-white' : 'bg-white text-neutral-600'}`}>Discarded ({discardedCount})</button>
+            </div>
+          )}
+          {search && <span className="text-xs text-neutral-500">{visible.length} match{visible.length === 1 ? '' : 'es'}</span>}
+        </div>
+        {!hasStatus && <Alert type="info">To discard students who have left, run <code>scripts/migration-student-discard.sql</code> in Supabase once.</Alert>}
         <Card className="overflow-hidden p-0">
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm min-w-[900px]">
@@ -419,26 +492,37 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
                   <th className="px-3 py-3 font-semibold">Progress</th>
                   <th className="px-3 py-3 font-semibold">Attendance</th>
                   <th className="px-3 py-3 font-semibold">Tests</th>
+                  {hasStatus && <th className="px-3 py-3 font-semibold" />}
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100">
-                {ordered.map((s) => {
+                {visible.length === 0 && (
+                  <tr><td colSpan={9} className="px-4 py-8 text-center text-neutral-400">{view === 'discarded' ? 'No discarded students.' : 'No students match.'}</td></tr>
+                )}
+                {visible.map((s) => {
                   const b = batches.find((x) => x.id === s.batch_id)
                   const bs = batchStatus(b)
                   const assigned = !!s.batch_id
                   const ft = fillText(s.batch_id)
+                  const gone = isDiscarded(s)
                   return (
-                    <tr key={s.id} className={assigned ? 'hover:bg-neutral-50/60' : 'bg-amber-50/40'}>
+                    <tr key={s.id} className={gone ? 'bg-neutral-50 text-neutral-400' : assigned ? 'hover:bg-neutral-50/60' : 'bg-amber-50/40'}>
                       <td className="px-4 py-2.5 font-mono text-xs text-neutral-500">{s.regno}</td>
                       <td className="px-3 py-2.5 font-medium text-neutral-900">{s.student_name || '—'}</td>
                       <td className="px-3 py-2.5">
-                        <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${assigned ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{assigned ? 'Assigned' : 'Unassigned'}</span>
+                        {gone ? (
+                          <span title={s.discard_reason ?? ''} className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-neutral-200 text-neutral-600">Discarded</span>
+                        ) : (
+                          <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${assigned ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{assigned ? 'Assigned' : 'Unassigned'}</span>
+                        )}
+                        {gone && s.discard_reason && <div className="text-[11px] mt-0.5 max-w-[160px] truncate" title={s.discard_reason}>{s.discard_reason}</div>}
                       </td>
                       <td className="px-3 py-2.5">
-                        <select value={s.batch_id ?? ''} disabled={busyId === s.id} onChange={(e) => assign(s, e.target.value)} className="h-9 w-full px-2 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                        <select value={s.batch_id ?? ''} disabled={busyId === s.id || gone} onChange={(e) => assign(s, e.target.value)} className="h-9 w-full px-2 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 disabled:opacity-60">
                           <option value="">— Unassigned —</option>
                           {batches.map((bt) => <option key={bt.id} value={bt.id}>{batchLabel(bt)}</option>)}
                         </select>
+
                       </td>
                       <td className="px-3 py-2.5 whitespace-nowrap">
                         <span className={`text-xs font-medium ${bs.label === 'Ongoing' ? 'text-emerald-600' : bs.label === 'Completed' ? 'text-neutral-400' : bs.label === 'Yet to start' ? 'text-sky-600' : 'text-neutral-300'}`}>{bs.label}</span>
@@ -449,6 +533,11 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
                           (measured against the batch's active class-days / tests). */}
                       <td className="px-3 py-2.5"><Spark pct={assigned ? (att.get(s.regno) ?? null) : null} color="bg-emerald-500" /></td>
                       <td className="px-3 py-2.5"><Spark pct={assigned ? (testPct.get(s.regno) ?? null) : null} color="bg-sky-500" /></td>
+                      {hasStatus && (
+                        <td className="px-3 py-2.5 text-right">
+                          <button onClick={() => setDiscarded(s, !gone)} disabled={busyId === s.id} className={`text-xs font-semibold px-2.5 py-1 rounded-lg border disabled:opacity-50 ${gone ? 'text-violet-700 border-violet-200 bg-violet-50 hover:bg-violet-100' : 'text-neutral-500 border-neutral-200 hover:text-red-600 hover:border-red-200 hover:bg-red-50'}`}>{gone ? 'Restore' : 'Discard'}</button>
+                        </td>
+                      )}
                     </tr>
                   )
                 })}
@@ -456,6 +545,7 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
             </table>
           </div>
         </Card>
+        </>
       )}
 
       {/* CSV upload preview */}

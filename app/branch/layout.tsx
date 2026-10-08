@@ -12,6 +12,7 @@ const NAV = [
   { label: 'Tests', href: '/branch/tests', icon: '📝' },
   { label: 'Marks Entry', href: '/branch/marks-entry', icon: '✍️' },
   { label: 'Results', href: '/branch/results', icon: '📊' },
+  { label: 'Student Overview', href: '/branch/student-overview', icon: '🧑‍🎓' },
   { label: 'Attendance', href: '/branch/attendance', icon: '🗓️' },
 ]
 

@@ -51,3 +51,6 @@ AGENTS.md
 CLAUDE.md
 
 seed_and_schema.sql
+
+# local data backups (never commit)
+.backups/

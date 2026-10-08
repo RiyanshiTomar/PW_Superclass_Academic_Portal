@@ -1,0 +1,30 @@
+# Keeps the portal in step with the Google Sheets during the working day.
+# Vercel's own crons (vercel.json) still do the full nightly sync; this adds a
+# light sync every 15 minutes, 7 AM–10 PM IST, on any Vercel plan.
+#
+# Needs two repository secrets (GitHub → Settings → Secrets and variables → Actions):
+#   PORTAL_URL   e.g. https://pw-superclass-academic-portal-one.vercel.app
+#   CRON_SECRET  the same value as CRON_SECRET in Vercel's environment variables
+name: Sheet sync
+
+on:
+  schedule:
+    - cron: '*/15 1-16 * * *'   # every 15 min, 01:30–16:30 UTC ≈ 7 AM–10 PM IST
+  workflow_dispatch: {}          # "Run workflow" button for an instant sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Sync students (Data tab)
+        run: |
+          curl --fail-with-body -sS --max-time 300 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.PORTAL_URL }}/api/internal/sync-students"
+      - name: Sync attendance (last 3 days)
+        if: always()
+        run: |
+          curl --fail-with-body -sS --max-time 300 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.PORTAL_URL }}/api/internal/sync-attendance?days=3"

@@ -8,6 +8,27 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 
 const norm = (s: string | null | undefined) => (s ?? '').toLowerCase().trim()
 
+/** How many schedule slots / lectures / planner rows / tests still point at
+ *  these subjects. Deleting a subject that is in use would silently blank the
+ *  subject on all of them (FK is ON DELETE SET NULL) — so callers must refuse
+ *  and tell the admin to merge the subject instead. */
+export async function subjectUsage(
+  supabase: SupabaseClient,
+  subjectIds: string[]
+): Promise<{ total: number; text: string }> {
+  if (subjectIds.length === 0) return { total: 0, text: '' }
+  const count = async (table: string) => {
+    const { count: n } = await supabase.from(table).select('*', { count: 'exact', head: true }).in('subject_id', subjectIds)
+    return n ?? 0
+  }
+  const [slots, lectures, template, tests] = await Promise.all([count('batch_schedules'), count('batch_planners'), count('planner_lectures'), count('test_schedules')])
+  const parts = [
+    slots && `${slots} schedule slot(s)`, lectures && `${lectures} batch lecture(s)`,
+    template && `${template} planner row(s)`, tests && `${tests} test(s)`,
+  ].filter(Boolean)
+  return { total: slots + lectures + template + tests, text: parts.join(', ') }
+}
+
 /** Merge subject `fromId` into `toId`: move all links, then delete `fromId`. */
 export async function mergeSubject(
   supabase: SupabaseClient,

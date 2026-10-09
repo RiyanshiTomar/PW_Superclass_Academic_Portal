@@ -343,9 +343,10 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
       ) : (
         <div className="space-y-6">
           {dataTill && (
-            <p className="text-xs text-neutral-500 -mb-2">
-              Biometric data available till <b>{fmtDate(dataTill)}</b>. Days with no data in the sheet (today until it&apos;s updated, holidays) are not counted as absences.
-            </p>
+            <div className="relative z-10 flex flex-wrap items-center gap-2 rounded-xl border border-sky-100 bg-sky-50/80 px-3 py-2 text-xs leading-relaxed text-sky-900">
+              <span className="font-semibold">Biometric data till {fmtDate(dataTill)}</span>
+              <span className="text-sky-800/80">Days with no data in the sheet (today until it&apos;s updated, holidays) are not counted as absences.</span>
+            </div>
           )}
           {/* Summary tiles */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

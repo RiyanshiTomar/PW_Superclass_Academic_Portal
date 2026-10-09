@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { parseCSVWithHeaders } from '@/lib/utils'
-import { mergeSubject } from '@/lib/merge'
+import { mergeSubject, subjectUsage } from '@/lib/merge'
 import { fetchAll } from '@/lib/supabase/fetch-all'
 
 type Program = { id: string; name: string }
@@ -138,6 +138,10 @@ export default function SyllabusPage() {
         const { error } = await supabase.from('subjects').update({ name }).eq('id', pending.subject.id)
         if (error) throw error
       } else if (pending.kind === 'delete-subject') {
+        // Never delete a subject that is in use — it would blank the subject
+        // on every schedule slot / lecture / test that uses it.
+        const use = await subjectUsage(supabase, [pending.subject.id])
+        if (use.total > 0) throw new Error(`Can't delete "${pending.subject.name}" — it is still used by ${use.text}. Merge it into the correct subject (Admin → Programs) instead of deleting.`)
         const { error } = await supabase.from('subjects').delete().eq('id', pending.subject.id)
         if (error) throw new Error('Cannot delete — this subject is still linked to a batch/planner/test. Remove those first (or merge the subject).')
       } else if (pending.kind === 'rename-chapter') {

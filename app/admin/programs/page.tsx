@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { mergeProgram } from '@/lib/merge'
+import { mergeProgram, subjectUsage } from '@/lib/merge'
 
 type Subject = { id: string; name: string }
 type Program = { id: string; name: string; subjects: Subject[] }
@@ -140,6 +140,12 @@ export default function ManageProgramsPage() {
   }
 
   const handleDeleteSubject = async (subjectId: string) => {
+    // A subject in use must be merged, never deleted — deleting blanks the
+    // subject on every schedule slot / lecture / test that uses it.
+    const use = await subjectUsage(supabase, [subjectId])
+    if (use.total > 0) { alert(`Can't delete this subject — it is still used by ${use.text}.
+
+Use "Merge" to move it into the correct subject instead.`); return }
     if (!confirm('Delete this subject?')) return
     const { error } = await supabase.from('subjects').delete().eq('id', subjectId)
     if (!error) loadPrograms()
@@ -175,6 +181,10 @@ export default function ManageProgramsPage() {
     // Subjects use ON DELETE SET NULL from programs, so delete them explicitly
     // (their chapters/topics cascade). Then remove the program.
     const subIds = (prog?.subjects ?? []).map((s) => s.id)
+    const use = await subjectUsage(supabase, subIds)
+    if (use.total > 0) { alert(`Can't delete "${name}" — its subjects are still used by ${use.text}.
+
+Merge this program into the correct one instead.`); return }
     if (subIds.length > 0) {
       const { error: sErr } = await supabase.from('subjects').delete().in('id', subIds)
       if (sErr) { alert('Failed to remove subjects: ' + sErr.message); return }

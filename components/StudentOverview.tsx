@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { activeBatchStudents } from '@/lib/students'
-import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
+import { fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import { weeklySlotActiveOn, WEEKLY_SLOT_COLS } from '@/lib/utils'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
@@ -224,6 +224,73 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [student, tests, markIdx, testStats, overallRank, classDays, attIdx])
 
+  // ---- Downloads (CSV — opens in Excel / Google Sheets) ----
+  const cell = (v: string | number | null | undefined) => {
+    const t = v == null ? '' : String(v)
+    return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t
+  }
+  const saveCsv = (name: string, lines: (string | number | null | undefined)[][]) => {
+    // BOM so Excel reads Hindi / special characters correctly.
+    const blob = new Blob(['﻿' + lines.map((l) => l.map(cell).join(',')).join('\n')], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = name.replace(/[\\/:*?"<>|]+/g, '-'); a.click()
+    URL.revokeObjectURL(url)
+  }
+  const centreName = centres.find((c) => c.id === batch?.centre_id)?.name ?? ''
+
+  // One student's full record: summary, every test, month-wise attendance.
+  const downloadStudent = () => {
+    if (!student || !view || !batch) return
+    const lines: (string | number | null)[][] = [
+      ['Student', student.student_name || ''], ['Student ID', student.regno], ['Batch', batch.name], ['Centre', centreName],
+      ['Batch dates', `${batch.start_date} to ${batch.end_date}`],
+      ['Rank in batch', view.rank ? `${view.rank} / ${overallRank.list.length}` : '—'],
+      ['Average score %', view.avg ?? '—'], ['Batch average %', overallRank.batchAvg ?? '—'],
+      ['Tests attempted', `${view.attempted} / ${view.dueTests}`], ['Tests absent', view.absentTests],
+      ['Attendance %', view.attPct ?? '—'], ['Batch attendance %', batchAttPct ?? '—'],
+      ['Class days present', `${view.presentDays} / ${classDays.length}`],
+      [],
+      ['TEST HISTORY'],
+      ['Test', 'Date', 'Type', 'Scope', 'Marks', 'Max marks', 'Score %', 'Batch avg %', 'Rank', 'Status'],
+      ...view.rows.map((r) => [
+        r.t.name, r.t.test_date, r.t.test_type, r.t.part_type,
+        r.status === 'scored' ? r.m!.marks : r.status === 'absent' ? 'Absent' : '',
+        r.t.max_marks, r.p != null ? round1(r.p) : '', r.avg ?? '', r.rank ? `${r.rank}/${r.of}` : '',
+        r.status === 'scored' ? 'Scored' : r.status === 'absent' ? 'Absent' : r.status === 'upcoming' ? 'Upcoming' : 'Marks not entered',
+      ]),
+      [],
+      ['ATTENDANCE BY MONTH'],
+      ['Month', 'Class days', 'Present', 'Absent', 'Attendance %'],
+      ...view.months.map(([m, v]) => [fmtMonth(m), v.days, v.present, v.days - v.present, round1((v.present / v.days) * 100)]),
+      [],
+      ['ATTENDANCE BY DAY'],
+      ['Date', 'Status'],
+      ...classDays.slice().reverse().map((d) => [d, isPresent(student.regno, d) ? 'Present' : 'Absent']),
+    ]
+    saveCsv(`${student.student_name || student.regno} - ${student.regno} - ${batch.name}.csv`, lines)
+  }
+
+  // Every student of the batch on one sheet.
+  const downloadBatch = () => {
+    if (!batch) return
+    const header = ['Student ID', 'Student', 'Rank', 'Average score %', 'Tests attempted', 'Tests absent', 'Attendance %',
+      ...scoredTests.map((t) => `${t.name} (${t.test_date}) /${t.max_marks ?? ''}`)]
+    const lines = students.map((s) => {
+      const ps = scoredTests.map((t) => markIdx.get(`${t.id}|${s.regno}`))
+      const pcts = scoredTests.map((t) => pctOf(markIdx.get(`${t.id}|${s.regno}`), t.max_marks)).filter((x): x is number => x != null)
+      const rank = overallRank.list.findIndex((x) => x.regno === s.regno)
+      const present = classDays.filter((d) => isPresent(s.regno, d)).length
+      return [
+        s.regno, s.student_name || '', rank >= 0 ? rank + 1 : '',
+        pcts.length ? round1(pcts.reduce((a, b) => a + b, 0) / pcts.length) : '',
+        pcts.length, ps.filter((m) => m?.absent).length,
+        classDays.length ? round1((present / classDays.length) * 100) : '',
+        ...ps.map((m) => (m?.absent ? 'AB' : m?.marks ?? '')),
+      ]
+    })
+    saveCsv(`${batch.name} - ${centreName} - students.csv`, [header, ...lines])
+  }
+
   const filteredStudents = useMemo(() => {
     const q = search.toLowerCase().trim()
     return students.filter((s) => !q || (s.student_name ?? '').toLowerCase().includes(q) || s.regno.toLowerCase().includes(q))
@@ -268,6 +335,7 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
         <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
           {/* Student picker */}
           <Card className="p-3 h-fit lg:sticky lg:top-4">
+            <button onClick={downloadBatch} className="w-full h-9 mb-2 rounded-lg text-xs font-semibold border border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100">⬇ Download batch ({students.length} students)</button>
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={`Search ${students.length} students…`} className="w-full h-10 px-3 mb-2 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
             <div className="max-h-[60vh] overflow-y-auto space-y-0.5">
               {filteredStudents.map((s) => {
@@ -293,7 +361,10 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
                     <h3 className="text-xl font-bold text-neutral-950">{student.student_name || student.regno}</h3>
                     <p className="text-sm text-neutral-500">{student.regno} · {batch?.name} · {centres.find((c) => c.id === batch?.centre_id)?.name}</p>
                   </div>
-                  {batch && <p className="text-xs text-neutral-400">Batch {fmtDate(batch.start_date)} → {fmtDate(batch.end_date)}</p>}
+                  <div className="text-right">
+                    {batch && <p className="text-xs text-neutral-400">Batch {fmtDate(batch.start_date)} → {fmtDate(batch.end_date)}</p>}
+                    <button onClick={downloadStudent} className="mt-2 h-9 px-3 rounded-lg text-sm font-semibold bg-violet-600 text-white hover:bg-violet-700">⬇ Download record</button>
+                  </div>
                 </div>
               </Card>
 

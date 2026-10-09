@@ -134,7 +134,7 @@ export default function EditPlanner() {
     return m
   }, [master])
 
-  const subjName = (id: string) => subjects.find((s) => s.id === id)?.name ?? '—'
+  const subjName = (id: string) => (id ? subjects.find((s) => s.id === id)?.name ?? 'Unknown subject' : 'No subject')
   const facName = (id: string) => faculty.find((f) => f.id === id)?.full_name ?? ''
 
   // Centre → batch → planner filtering (only that batch's planner in the picker).
@@ -425,7 +425,7 @@ export default function EditPlanner() {
   const filterOptions = useMemo(() => {
     const subjRows = rows.filter((r) => r.subject_id === activeSubject)
     const chapters = Array.from(new Set(subjRows.map((r) => r.chapter).filter(Boolean)))
-    const facIds = Array.from(new Set(subjRows.map((r) => r.faculty_id).filter(Boolean)))
+    const facIds = Array.from(new Set(rows.map((r) => r.faculty_id).filter(Boolean)))
     return {
       chapters,
       faculty: facIds.map((id) => ({ id, name: facName(id) || 'Unknown' })).sort((a, b) => a.name.localeCompare(b.name)),
@@ -926,9 +926,14 @@ export default function EditPlanner() {
           {/* Subject tabs */}
           <div className="flex flex-wrap gap-2">
             {subjectTabs.map((t) => (
-              <button key={t.id} onClick={() => setActiveSubject(t.id)} className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors ${activeSubject === t.id ? 'bg-violet-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}>{t.name}</button>
+              <button key={t.id} onClick={() => setActiveSubject(t.id)} className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors ${!t.id ? (activeSubject === t.id ? 'bg-amber-500 text-white' : 'bg-amber-100 text-amber-800 hover:bg-amber-200') : activeSubject === t.id ? 'bg-violet-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}>{!t.id ? '⚠ No subject' : t.name}</button>
             ))}
           </div>
+          {subjectTabs.some((t) => !t.id) && (
+            <Alert type="error">
+              Some lectures of this batch have <b>no subject</b> — their subject was deleted from Admin → Programs / Syllabus, which blanks it on every lecture and schedule slot that used it. They are listed under <b>⚠ No subject</b>. Ask the admin to restore the subject; until then these lectures can&apos;t follow the schedule or show under the right subject.
+            </Alert>
+          )}
 
           {/* Summary for the active subject */}
           <Card className="p-4">
@@ -1228,6 +1233,8 @@ export default function EditPlanner() {
                             <input list="ep-topics" value={r.topic_name} onChange={(e) => updateRow(r.key, { topic_name: e.target.value })} placeholder="Topic taught" className="flex-1 min-w-[160px] h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
                             <select value={r.faculty_id} onChange={(e) => updateRow(r.key, { faculty_id: e.target.value })} className="w-[160px] sm:shrink-0 h-9 px-2 bg-white/70 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
                               <option value="">Faculty…</option>
+                              {/* Keep the row's teacher visible even if they're no longer in the active list. */}
+                              {r.faculty_id && !faculty.some((f) => f.id === r.faculty_id) && <option value={r.faculty_id}>(inactive teacher)</option>}
                               {faculty.map((f) => <option key={f.id} value={f.id}>{f.full_name}</option>)}
                             </select>
                             {(!liveLinkId || liveHasStatus) ? (

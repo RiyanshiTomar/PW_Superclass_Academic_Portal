@@ -185,10 +185,11 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
 
   // ---- The selected student ----
   const student = students.find((s) => s.regno === regno) ?? null
-  const view = useMemo(() => {
-    if (!student) return null
+  // One student's record. Only tests held till today — upcoming ones are not
+  // part of a marksheet.
+  const buildView = (student: Student) => {
     const today = todayISO()
-    const rows = tests.map((t) => {
+    const rows = tests.filter((t) => t.test_date <= today).map((t) => {
       const m = markIdx.get(`${t.id}|${student.regno}`)
       const p = pctOf(m, t.max_marks)
       const st = testStats.get(t.id)
@@ -221,8 +222,10 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
       months: Array.from(months.entries()).sort(([a], [b]) => b.localeCompare(a)),
       recent: classDays.slice(-30).map((d) => ({ d, p: isPresent(student.regno, d) })),
     }
+  }
+  const view = useMemo(() => (student ? buildView(student) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [student, tests, markIdx, testStats, overallRank, classDays, attIdx])
+    [student, tests, markIdx, testStats, overallRank, classDays, attIdx])
 
   // ---- Downloads (CSV — opens in Excel / Google Sheets) ----
   const cell = (v: string | number | null | undefined) => {
@@ -237,6 +240,65 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
     URL.revokeObjectURL(url)
   }
   const centreName = centres.find((c) => c.id === batch?.centre_id)?.name ?? ''
+
+  // Printable marksheet (A4) for any student of the batch — opens in a new
+  // tab with the print dialog; "Save as PDF" gives a file to share.
+  const esc = (v: string | number | null | undefined) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string))
+  const openMarksheet = (s: Student) => {
+    if (!batch) return
+    const v = buildView(s)
+    const w = window.open('', '_blank')
+    if (!w) { setErr('Allow pop-ups for this site to download the marksheet.'); return }
+    const resultOf = (r: (typeof v.rows)[number]) =>
+      r.status === 'absent' ? '<span class="ab">Absent</span>'
+        : r.status !== 'scored' ? '<span class="na">Marks not entered</span>'
+          : r.t.pass_marks != null ? ((r.m!.marks ?? 0) >= r.t.pass_marks ? '<span class="ok">Pass</span>' : '<span class="ab">Fail</span>') : '—'
+    const testRows = v.rows.map((r) => `<tr>
+      <td>${esc(r.t.name)}</td><td>${esc(fmtDate(r.t.test_date))}</td><td>${esc(r.t.test_type)} · ${esc(r.t.part_type)}</td>
+      <td class="n">${r.status === 'scored' ? `${esc(r.m!.marks)}${r.t.max_marks ? ` / ${esc(r.t.max_marks)}` : ''}` : '—'}</td>
+      <td class="n">${r.p != null ? `${round1(r.p)}%` : '—'}</td>
+      <td class="n">${r.avg != null ? `${r.avg}%` : '—'}</td>
+      <td class="n">${r.rank ? `${r.rank}/${r.of}` : '—'}</td>
+      <td>${resultOf(r)}</td></tr>`).join('')
+    const monthRows = v.months.map(([m, x]) => `<tr><td>${esc(fmtMonth(m))}</td><td class="n">${x.days}</td><td class="n">${x.present}</td><td class="n">${x.days - x.present}</td><td class="n">${round1((x.present / x.days) * 100)}%</td></tr>`).join('')
+    const title = `Marksheet - ${s.student_name || s.regno} - ${s.regno}`
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
+<style>
+  @page { size: A4; margin: 14mm; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; color: #111; font-size: 12px; margin: 0; }
+  h1 { font-size: 20px; margin: 0; } h2 { font-size: 13px; margin: 18px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: #444; }
+  .head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #111; padding-bottom: 8px; }
+  .muted { color: #666; } .info { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 24px; margin-top: 10px; }
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+  .kpi { border: 1px solid #ccc; border-radius: 6px; padding: 8px; } .kpi b { display: block; font-size: 17px; }
+  table { width: 100%; border-collapse: collapse; } th, td { border: 1px solid #ccc; padding: 5px 6px; text-align: left; }
+  th { background: #f2f2f2; font-size: 11px; } td.n { text-align: right; white-space: nowrap; }
+  .ok { color: #0a7a3b; font-weight: bold; } .ab { color: #b42318; font-weight: bold; } .na { color: #888; }
+  .foot { margin-top: 18px; font-size: 10px; color: #777; }
+  @media print { .noprint { display: none; } }
+</style></head><body>
+<div class="noprint" style="padding:8px 0 12px"><button onclick="window.print()">Print / Save as PDF</button></div>
+<div class="head"><div><h1>Student Marksheet</h1><div class="muted">${esc(centreName)}</div></div><div class="muted">Till ${esc(fmtDate(todayISO()))}</div></div>
+<div class="info">
+  <div><b>Name:</b> ${esc(s.student_name || '—')}</div><div><b>Student ID:</b> ${esc(s.regno)}</div>
+  <div><b>Batch:</b> ${esc(batch.name)}</div><div><b>Batch dates:</b> ${esc(fmtDate(batch.start_date))} – ${esc(fmtDate(batch.end_date))}</div>
+</div>
+<div class="kpis">
+  <div class="kpi"><span class="muted">Rank in batch</span><b>${v.rank ? `${v.rank} / ${overallRank.list.length}` : '—'}</b></div>
+  <div class="kpi"><span class="muted">Average score</span><b>${v.avg != null ? `${v.avg}%` : '—'}</b><span class="muted">Batch ${overallRank.batchAvg ?? '—'}%</span></div>
+  <div class="kpi"><span class="muted">Tests attempted</span><b>${v.attempted} / ${v.dueTests}</b><span class="muted">${v.absentTests} absent</span></div>
+  <div class="kpi"><span class="muted">Attendance</span><b>${v.attPct != null ? `${v.attPct}%` : '—'}</b><span class="muted">${v.presentDays} / ${classDays.length} days</span></div>
+</div>
+<h2>Test results</h2>
+${v.rows.length ? `<table><thead><tr><th>Test</th><th>Date</th><th>Type</th><th>Marks</th><th>Score</th><th>Batch avg</th><th>Rank</th><th>Result</th></tr></thead><tbody>${testRows}</tbody></table>` : '<p class="muted">No tests held yet.</p>'}
+<h2>Attendance</h2>
+${v.months.length ? `<table><thead><tr><th>Month</th><th>Class days</th><th>Present</th><th>Absent</th><th>Attendance</th></tr></thead><tbody>${monthRows}</tbody></table>` : '<p class="muted">No attendance recorded yet.</p>'}
+<div class="foot">Generated on ${esc(new Date().toLocaleString('en-IN'))} · Includes tests held till today only.</div>
+<script>window.onload = () => setTimeout(() => window.print(), 300)</script>
+</body></html>`)
+    w.document.close()
+  }
 
   // One student's full record: summary, every test, month-wise attendance.
   const downloadStudent = () => {
@@ -341,10 +403,13 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
               {filteredStudents.map((s) => {
                 const r = overallRank.list.findIndex((x) => x.regno === s.regno)
                 return (
-                  <button key={s.regno} onClick={() => setRegno(s.regno)} className={`w-full text-left px-2.5 py-2 rounded-lg text-sm ${regno === s.regno ? 'bg-violet-600 text-white' : 'hover:bg-neutral-100 text-neutral-800'}`}>
-                    <div className="font-medium truncate">{s.student_name || s.regno}</div>
-                    <div className={`text-[11px] ${regno === s.regno ? 'text-violet-100' : 'text-neutral-400'}`}>{s.regno}{r >= 0 ? ` · Rank ${r + 1}` : ''}</div>
-                  </button>
+                  <div key={s.regno} className={`flex items-center gap-1 rounded-lg ${regno === s.regno ? 'bg-violet-600 text-white' : 'hover:bg-neutral-100 text-neutral-800'}`}>
+                    <button onClick={() => setRegno(s.regno)} className="flex-1 min-w-0 text-left px-2.5 py-2 text-sm">
+                      <div className="font-medium truncate">{s.student_name || s.regno}</div>
+                      <div className={`text-[11px] ${regno === s.regno ? 'text-violet-100' : 'text-neutral-400'}`}>{s.regno}{r >= 0 ? ` · Rank ${r + 1}` : ''}</div>
+                    </button>
+                    <button onClick={() => openMarksheet(s)} title="Download marksheet (PDF)" className={`shrink-0 mr-1.5 h-7 w-7 grid place-items-center rounded-md text-xs ${regno === s.regno ? 'hover:bg-violet-500' : 'text-violet-600 hover:bg-violet-100'}`}>⬇</button>
+                  </div>
                 )
               })}
               {filteredStudents.length === 0 && <p className="text-sm text-neutral-400 p-2">No match.</p>}
@@ -363,7 +428,10 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
                   </div>
                   <div className="text-right">
                     {batch && <p className="text-xs text-neutral-400">Batch {fmtDate(batch.start_date)} → {fmtDate(batch.end_date)}</p>}
-                    <button onClick={downloadStudent} className="mt-2 h-9 px-3 rounded-lg text-sm font-semibold bg-violet-600 text-white hover:bg-violet-700">⬇ Download record</button>
+                    <div className="mt-2 flex justify-end gap-2">
+                      <button onClick={() => openMarksheet(student)} className="h-9 px-3 rounded-lg text-sm font-semibold bg-violet-600 text-white hover:bg-violet-700">⬇ Marksheet (PDF)</button>
+                      <button onClick={downloadStudent} className="h-9 px-3 rounded-lg text-sm font-semibold border border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100">Excel</button>
+                    </div>
                   </div>
                 </div>
               </Card>

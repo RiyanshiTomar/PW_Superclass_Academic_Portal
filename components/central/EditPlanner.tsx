@@ -657,6 +657,26 @@ export default function EditPlanner() {
     return null
   }
 
+  // Why an upcoming lecture is not on a scheduled class (or null if it is).
+  // Such lectures don't show in the Calendar or the Daily Lecture Audit until
+  // they are moved onto a class date of their subject.
+  const offSchedule = (r: EditRow): string | null => {
+    if (!liveLinkId || r.status === 'conducted' || r.planned_date < todayISO) return null
+    if (!r.subject_id) return 'No subject — its subject was deleted'
+    const end = liveBoundsRef.current.end
+    if (end && r.planned_date > end) return `After the batch end date (${fmtDate(end)})`
+    const slot = liveSlotFor(r.subject_id, r.planned_date)
+    if (!slot) return `No ${subjName(r.subject_id)} class on ${DAYS[new Date(r.planned_date + 'T12:00:00').getDay()]} in the Batch Scheduler`
+    if (r.start_time && r.start_time.slice(0, 5) !== slot.start) return `Time ${r.start_time.slice(0, 5)} differs from the schedule (${slot.start})`
+    return null
+  }
+  const offCountBySubject = (() => {
+    const m = new Map<string, number>()
+    for (const r of rows) if (offSchedule(r)) m.set(r.subject_id, (m.get(r.subject_id) ?? 0) + 1)
+    return m
+  })()
+  const offTotal = Array.from(offCountBySubject.values()).reduce((a, b) => a + b, 0)
+
   const resolveLiveSlot = (subjectId: string, date: string, selfKey?: string): { ok: boolean; error?: string; clashKey?: string; slot?: { start: string; duration: number; classroom: string | null } } => {
     if (!liveLinkId) return { ok: true }
     if (date < todayISO) return { ok: true } // past = already conducted → allowed as-is
@@ -926,9 +946,14 @@ export default function EditPlanner() {
           {/* Subject tabs */}
           <div className="flex flex-wrap gap-2">
             {subjectTabs.map((t) => (
-              <button key={t.id} onClick={() => setActiveSubject(t.id)} className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors ${!t.id ? (activeSubject === t.id ? 'bg-amber-500 text-white' : 'bg-amber-100 text-amber-800 hover:bg-amber-200') : activeSubject === t.id ? 'bg-violet-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}>{!t.id ? '⚠ No subject' : t.name}</button>
+              <button key={t.id} onClick={() => setActiveSubject(t.id)} className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors ${!t.id ? (activeSubject === t.id ? 'bg-amber-500 text-white' : 'bg-amber-100 text-amber-800 hover:bg-amber-200') : activeSubject === t.id ? 'bg-violet-600 text-white' : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'}`}>{!t.id ? '⚠ No subject' : t.name}{t.id && offCountBySubject.get(t.id) ? <span className="ml-1.5 px-1.5 rounded bg-red-100 text-red-700 text-[11px]">⚠ {offCountBySubject.get(t.id)}</span> : null}</button>
             ))}
           </div>
+          {offTotal > 0 && (
+            <Alert type="error">
+              <b>{offTotal} upcoming lecture{offTotal === 1 ? ' is' : 's are'} not on a scheduled class</b> — the day, time or date doesn&apos;t match this batch&apos;s timetable in the Batch Scheduler (marked ⚠ below). They will <b>not show in the Calendar or the Daily Lecture Audit</b> until each is moved to a class date of its subject (the subject&apos;s class days are listed in the summary card). Use the date box on each ⚠ row, then Save.
+            </Alert>
+          )}
           {subjectTabs.some((t) => !t.id) && (
             <Alert type="error">
               Some lectures of this batch have <b>no subject</b> — their subject was deleted from Admin → Programs / Syllabus, which blanks it on every lecture and schedule slot that used it. They are listed under <b>⚠ No subject</b>. Ask the admin to restore the subject; until then these lectures can&apos;t follow the schedule or show under the right subject.
@@ -1100,7 +1125,10 @@ export default function EditPlanner() {
                         const r = item.r
                         return (
                           <tr key={r.key} className={r.status === 'conducted' ? 'bg-neutral-100/70' : r.status === 'confirmed' ? 'bg-emerald-50/60' : ''}>
-                            <td className="px-3 py-2 whitespace-nowrap font-medium text-neutral-800">{fmtDate(r.planned_date)}</td>
+                            <td className="px-3 py-2 whitespace-nowrap font-medium text-neutral-800">
+                              {fmtDate(r.planned_date)}
+                              {offSchedule(r) && <div className="text-[11px] font-semibold text-red-600 whitespace-normal max-w-[220px]">⚠ {offSchedule(r)}</div>}
+                            </td>
                             <td className="px-3 py-2 whitespace-nowrap text-neutral-500">{r.start_time ? r.start_time.slice(0, 5) : '—'}</td>
                             <td className="px-3 py-2 text-neutral-600 text-xs">{r.chapter}</td>
                             <td className="px-3 py-2">
@@ -1249,6 +1277,7 @@ export default function EditPlanner() {
                               </span>
                             )}
                             <button onClick={() => removeRow(r.key)} title="Remove" className="shrink-0 text-neutral-300 hover:text-red-600 text-lg leading-none">×</button>
+                            {offSchedule(r) && <div className="basis-full text-[11px] font-semibold text-red-600 pl-1">⚠ {offSchedule(r)} — not shown in Calendar / Audit until moved to a class date.</div>}
                           </div>
                         )
                       } else {

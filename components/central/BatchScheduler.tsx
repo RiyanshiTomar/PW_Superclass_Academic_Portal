@@ -682,6 +682,12 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
     if (!preview.ok) return `Planner check failed: ${preview.error}`
     const changes = preview.moved + preview.retimed + preview.buffersAdded + preview.buffersRemoved
     if (!changes) return preview.unplaced ? `Planner: ${preview.unplaced} lecture(s) don't fit before the batch end date — add classes or extend the batch.` : afterSave ? '' : 'Planner already matches the schedule.'
+    // After a schedule save, never move lectures by itself — just report it.
+    // Central fixes them in Edit Planner (⚠ rows) or uses "Align planner".
+    if (afterSave) {
+      const n = preview.moved + preview.retimed
+      return n ? `${n} upcoming lecture(s) no longer sit on a class of the new schedule — they are marked ⚠ in Edit Planner. Move them there, or use "Align planner" on the batch card.` : ''
+    }
     const lines = realignSummary(preview)
     const sample = preview.samples.length ? `\n\nFor example:\n${preview.samples.slice(0, 5).join('\n')}` : ''
     if (!confirm(`${afterSave ? 'Schedule saved. ' : ''}Align "${batchName}"'s planner to its current schedule?\n\n• ${lines.join('\n• ')}${sample}\n\nConducted and past classes are never touched.`)) {

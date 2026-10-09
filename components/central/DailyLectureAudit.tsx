@@ -418,7 +418,10 @@ export default function DailyLectureAudit() {
         setMessage({ type: 'error', text: 'This is a buffer class — enter the chapter and topic that were taught (or tap “Revision / Doubt”) before ticking Topic ✓.' })
         setSaving(''); return
       }
-      const fields = {
+      // Only what was actually taught turns a buffer into a planner lecture.
+      // A link / remark alone just records the audit on the (still free) slot.
+      const taught = !!(taughtChapter || taughtTopic || e.topic_check)
+      const fields = taught ? {
         is_buffer: false,
         chapter: taughtChapter || 'Buffer class',
         topic_name: taughtTopic || 'Buffer class',
@@ -427,8 +430,14 @@ export default function DailyLectureAudit() {
         classroom_id: lecture.classroom_id,
         status: e.topic_check ? 'conducted' : 'planned',
         stage: 'Confirmed',
+      } : {
+        is_buffer: true, chapter: '', topic_name: '', start_time: lecture.start_time,
+        duration_minutes: lecture.duration_minutes ?? 60, classroom_id: lecture.classroom_id,
+        status: 'planned', stage: 'Confirmed',
       }
-      if (lecture.kind === 'buffer' && pid) {
+      if (lecture.kind === 'buffer' && pid && !taught) {
+        // nothing to change on the buffer row — the audit is saved against it below
+      } else if (lecture.kind === 'buffer' && pid) {
         const { error } = await supabase.from('batch_planners')
           .update({ ...fields, ...(lecture.faculty_id ? { faculty_id: lecture.faculty_id } : {}) }).eq('id', pid)
         if (error) { setMessage({ type: 'error', text: 'Save failed: ' + error.message }); setSaving(''); return }
@@ -507,9 +516,10 @@ export default function DailyLectureAudit() {
           : '⏳ Saved.',
       })
       // Update local state (a not-in-planner class is now a real lecture)
-      const nowPlanned = lecture.kind !== 'planned'
+      const becameLecture = lecture.kind !== 'planned' && !!(taughtChapter || taughtTopic || e.topic_check)
+      const nowPlanned = becameLecture
         ? { kind: 'planned' as const, planner_id: pid, key: pid, chapter: taughtChapter || 'Buffer class', topic_name: taughtTopic || 'Buffer class' }
-        : {}
+        : lecture.kind === 'unplanned' ? { kind: 'buffer' as const, planner_id: pid, key: pid } : {}
       setLectures(prev => prev.map(l =>
         l.key !== key ? l : { ...l, audit_status, ...e, ...nowPlanned }
       ))

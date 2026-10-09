@@ -1,3 +1,4 @@
+import { portalRoles } from '@/lib/auth'
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 
@@ -39,11 +40,7 @@ export async function GET(request: Request) {
     return NextResponse.redirect(`${origin}/login?error=inactive`)
   }
 
-  const activeRoles = Array.isArray(result.user_roles) && result.user_roles.length > 0
-    ? result.user_roles
-    : result.user_role
-    ? [result.user_role]
-    : []
+  const activeRoles = portalRoles(result.user_roles, result.user_role)
 
   if (activeRoles.length === 0) {
     await supabase.auth.signOut()

@@ -1,7 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import PortalShell from '@/components/PortalShell'
-import { getAppUser } from '@/lib/auth'
+import { getAppUser, hasRole } from '@/lib/auth'
 
 const NAV = [
   { label: 'Dashboard', href: '/branch', icon: '🏫' },
@@ -29,7 +29,7 @@ export default async function BranchLayout({ children }: { children: React.React
       role="branch_head"
       fullName={appUser?.full_name ?? user.email ?? ''}
       homeHref="/branch"
-      navItems={NAV}
+      navItems={hasRole(appUser, 'centre_admin') ? [...NAV.slice(0, 5), { label: 'Faculty', href: '/branch/faculty', icon: '🧑‍🏫' }, ...NAV.slice(5)] : NAV}
     >
       {children}
     </PortalShell>

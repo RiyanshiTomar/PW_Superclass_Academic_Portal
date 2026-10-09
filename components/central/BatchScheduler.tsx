@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { getAppUser, getUserCentreIds } from '@/lib/auth'
+import { getAppUser, getUserCentreIds, hasRole } from '@/lib/auth'
 import { checkWeeklyScheduleOverlap, checkClassroomScheduleOverlap } from '@/lib/scheduling'
 import { assignPlanner } from '@/lib/planners'
 import { realignBatchPlanner, type RealignResult } from '@/lib/realign'
@@ -113,6 +113,10 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
   // can edit schedule slots only, cannot create/delete batches or change core fields
   const isBranch = scope === 'branch' || scope === 'batch-manager'
   const isBatchManager = scope === 'batch-manager'
+  // A branch head with the extra 'centre_admin' permission may also create
+  // batches and edit their core details — for their own centre(s) only.
+  const [isCentreAdmin, setIsCentreAdmin] = useState(false)
+  const lockCore = isBranch && !isCentreAdmin
   // For branch scope: store the branch head's allowed centre IDs
   const [allowedCentreIds, setAllowedCentreIds] = useState<Set<string>>(new Set())
   const [batches, setBatches] = useState<Batch[]>([])
@@ -320,6 +324,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
       const { data: { user } } = await supabase.auth.getUser()
       if (user) {
         const au = await getAppUser(supabase, user)
+        setIsCentreAdmin(!isBatchManager && hasRole(au, 'centre_admin'))
         if (isBatchManager) {
           // batch-manager: scope to batches they manage directly
           batchManagerUserId = au?.id ?? null
@@ -607,13 +612,14 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
     let batchId = editingBatch?.id
     if (editingBatch) {
       // Branch head: only update the schedule — never touch batch name/program/dates/manager/owner
-      if (!isBranch) {
+      if (!lockCore) {
         const { data, error } = await supabase.from('batches').update({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId || null, batch_owner_id: ownerId || null }).eq('id', editingBatch.id).select('id')
         if (error) return fail(error.message)
         if (!data || data.length === 0) { await loadData(); return fail('This batch no longer exists (it may have been deleted or merged). The list has been refreshed — please create it again or pick another batch.') }
       }
     } else {
-      if (isBranch) return fail('Branch heads cannot create batches.')
+      if (lockCore) return fail('Branch heads cannot create batches.')
+      if (isBranch && !allowedCentreIds.has(centreId)) return fail('You can only create batches for your own centre.')
       const { data, error } = await supabase.from('batches').insert({ name: trimmedName, program_id: programId, centre_id: centreId, start_date: startDate, end_date: endDate, batch_manager_id: managerId || null, batch_owner_id: ownerId || null }).select('id').single()
       if (error) return fail(error.message)
       if (!data?.id) return fail('Could not create the batch (no id returned). Check your access/permissions and try again.')
@@ -682,11 +688,12 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
     if (!preview.ok) return `Planner check failed: ${preview.error}`
     const changes = preview.moved + preview.retimed + preview.buffersAdded + preview.buffersRemoved
     if (!changes) return preview.unplaced ? `Planner: ${preview.unplaced} lecture(s) don't fit before the batch end date — add classes or extend the batch.` : afterSave ? '' : 'Planner already matches the schedule.'
-    // After a schedule save, never move lectures by itself — just report it.
-    // Central fixes them in Edit Planner (⚠ rows) or uses "Align planner".
+    // After a schedule save the planner follows the new timetable at once
+    // (branch heads change schedules often) — no prompt, just a summary.
     if (afterSave) {
-      const n = preview.moved + preview.retimed
-      return n ? `${n} upcoming lecture(s) no longer sit on a class of the new schedule — they are marked ⚠ in Edit Planner. Move them there, or use "Align planner" on the batch card.` : ''
+      const res = await realignBatchPlanner(supabase, batchId)
+      if (!res.ok) return `Schedule saved, but the planner could not be updated: ${res.error}`
+      return `Planner updated to the new schedule: ${realignSummary(res).join('; ')}.`
     }
     const lines = realignSummary(preview)
     const sample = preview.samples.length ? `\n\nFor example:\n${preview.samples.slice(0, 5).join('\n')}` : ''
@@ -766,7 +773,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
         action={!showForm ? (
           <div className="flex gap-2">
             {!isBranch && <BtnSecondary onClick={() => { setMergeOpen(true); setMessage(null); setSurvivorId(''); setAbsorbedId('') }}>Merge Batches</BtnSecondary>}
-            {!isBranch && <BtnPrimary onClick={() => setShowForm(true)}>+ Create Batch</BtnPrimary>}
+            {!lockCore && <BtnPrimary onClick={() => setShowForm(true)}>+ Create Batch</BtnPrimary>}
           </div>
         ) : undefined}
       />
@@ -779,32 +786,32 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
             <h3 className="text-sm font-semibold text-neutral-950 uppercase tracking-wider mb-4">Batch Details</h3>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
               <div>
-                <label className="block text-xs font-medium text-neutral-500 mb-1">Batch Name {!isBranch && '*'}</label>
-                <input required={!isBranch} readOnly={isBranch} value={name} onChange={(e) => setName(e.target.value)} className={isBranch ? inputClass + ' bg-neutral-100 cursor-not-allowed' : inputClass} placeholder="CA Found-A" />
+                <label className="block text-xs font-medium text-neutral-500 mb-1">Batch Name {!lockCore && '*'}</label>
+                <input required={!lockCore} readOnly={lockCore} value={name} onChange={(e) => setName(e.target.value)} className={lockCore ? inputClass + ' bg-neutral-100 cursor-not-allowed' : inputClass} placeholder="CA Found-A" />
               </div>
               <div>
-                <label className="block text-xs font-medium text-neutral-500 mb-1">Program {!isBranch && '*'}</label>
-                <select required={!isBranch} disabled={isBranch} value={programId} onChange={(e) => handleProgramChange(e.target.value)} className={isBranch ? inputClass + ' bg-neutral-100 cursor-not-allowed' : inputClass}>
+                <label className="block text-xs font-medium text-neutral-500 mb-1">Program {!lockCore && '*'}</label>
+                <select required={!lockCore} disabled={lockCore} value={programId} onChange={(e) => handleProgramChange(e.target.value)} className={lockCore ? inputClass + ' bg-neutral-100 cursor-not-allowed' : inputClass}>
                   <option value="">Select program</option>
                   {programs.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium text-neutral-500 mb-1">Centre {!isBranch && '*'}</label>
-                <select required={!isBranch} disabled={isBranch} value={centreId} onChange={(e) => handleCentreChange(e.target.value)} className={isBranch ? inputClass + ' bg-neutral-100 cursor-not-allowed' : inputClass}>
+                <label className="block text-xs font-medium text-neutral-500 mb-1">Centre {!lockCore && '*'}</label>
+                <select required={!lockCore} disabled={lockCore} value={centreId} onChange={(e) => handleCentreChange(e.target.value)} className={lockCore ? inputClass + ' bg-neutral-100 cursor-not-allowed' : inputClass}>
                   <option value="">Select centre</option>
                   {centres.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium text-neutral-500 mb-1">Start Date {!isBranch && '*'}</label>
-                <input required={!isBranch} readOnly={isBranch} type="date" value={startDate} onChange={(e) => handleStartDate(e.target.value)} className={isBranch ? inputClass + ' bg-neutral-100 cursor-not-allowed' : inputClass} />
+                <label className="block text-xs font-medium text-neutral-500 mb-1">Start Date {!lockCore && '*'}</label>
+                <input required={!lockCore} readOnly={lockCore} type="date" value={startDate} onChange={(e) => handleStartDate(e.target.value)} className={lockCore ? inputClass + ' bg-neutral-100 cursor-not-allowed' : inputClass} />
               </div>
               <div>
-                <label className="block text-xs font-medium text-neutral-500 mb-1">End Date {!isBranch && '*'}</label>
-                <input required={!isBranch} readOnly={isBranch} type="date" value={endDate} min={startDate || undefined} onChange={(e) => handleEndDate(e.target.value)} className={isBranch ? inputClass + ' bg-neutral-100 cursor-not-allowed' : inputClass} />
+                <label className="block text-xs font-medium text-neutral-500 mb-1">End Date {!lockCore && '*'}</label>
+                <input required={!lockCore} readOnly={lockCore} type="date" value={endDate} min={startDate || undefined} onChange={(e) => handleEndDate(e.target.value)} className={lockCore ? inputClass + ' bg-neutral-100 cursor-not-allowed' : inputClass} />
               </div>
-              {!isBranch && <div>
+              {!lockCore && <div>
                 <label className="block text-xs font-medium text-neutral-500 mb-1">Batch Manager</label>
                 <select value={managerId} onChange={(e) => setManagerId(e.target.value)} className={inputClass} disabled={!centreId}>
                   <option value="">Select batch manager (optional)</option>
@@ -815,7 +822,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
                     ))}
                 </select>
               </div>}
-              {!isBranch && <div>
+              {!lockCore && <div>
                 <label className="block text-xs font-medium text-neutral-500 mb-1">Batch Owner *</label>
                 <select required value={ownerId} onChange={(e) => setOwnerId(e.target.value)} className={inputClass} disabled={!centreId}>
                   <option value="">{centreId ? 'Select batch owner' : 'Select centre first'}</option>
@@ -1194,7 +1201,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
                   <div className="flex gap-2 mt-auto">
                     <BtnSecondary className="flex-1" onClick={() => handleEdit(b)}>Edit</BtnSecondary>
                     {bl.length > 0 && <button onClick={() => handleAlign(b)} disabled={aligningId === b.id} title="Put every upcoming lecture on a scheduled class of its subject" className="flex-1 px-3 py-2 border rounded-lg text-sm font-medium bg-sky-50 hover:bg-sky-100 text-sky-700 border-sky-200 disabled:opacity-50">{aligningId === b.id ? 'Checking…' : 'Align planner'}</button>}
-                    {!isBranch && <button onClick={() => openAttach(b)} disabled={bl.length > 0} title={bl.length > 0 ? 'A planner is already attached to this batch' : 'Attach a planner'} className={`flex-1 px-3 py-2 border rounded-lg text-sm font-medium ${bl.length > 0 ? 'bg-neutral-100 text-neutral-400 border-neutral-200 cursor-not-allowed' : 'bg-violet-50 hover:bg-violet-100 text-violet-700 border-violet-200'}`}>{bl.length > 0 ? 'Planner attached' : 'Attach Planner'}</button>}
+                    {!lockCore && <button onClick={() => openAttach(b)} disabled={bl.length > 0} title={bl.length > 0 ? 'A planner is already attached to this batch' : 'Attach a planner'} className={`flex-1 px-3 py-2 border rounded-lg text-sm font-medium ${bl.length > 0 ? 'bg-neutral-100 text-neutral-400 border-neutral-200 cursor-not-allowed' : 'bg-violet-50 hover:bg-violet-100 text-violet-700 border-violet-200'}`}>{bl.length > 0 ? 'Planner attached' : 'Attach Planner'}</button>}
                     {!isBranch && <button onClick={() => handleDelete(b)} className="px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-lg text-sm font-medium">Delete</button>}
                   </div>
                 </Card>

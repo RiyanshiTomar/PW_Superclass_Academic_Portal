@@ -1,3 +1,4 @@
+import { portalRoles } from '@/lib/auth'
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 
@@ -19,11 +20,7 @@ export default async function Home() {
     redirect('/login?error=no_access')
   }
 
-  const activeRoles = Array.isArray(appUser.roles) && appUser.roles.length > 0
-    ? appUser.roles
-    : appUser.role
-    ? [appUser.role]
-    : []
+  const activeRoles = portalRoles(appUser.roles, appUser.role)
 
   if (activeRoles.length === 0) {
     redirect('/login?error=no_access')

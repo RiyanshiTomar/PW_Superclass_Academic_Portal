@@ -453,10 +453,12 @@ export async function shiftSubjectForward(supabase: SupabaseClient, batchId: str
  *  pushed lecture never lands on another test). Call this after (re)materialising
  *  a planner onto a batch that may already have tests. Returns lectures moved. */
 export async function resolveTestConflicts(supabase: SupabaseClient, batchId: string): Promise<number> {
-  const { data: tests } = await supabase
-    .from('test_schedules')
-    .select('test_date, start_time, duration_minutes')
-    .eq('batch_id', batchId)
+  // Own + multi-batch tests of this batch; a cancelled test holds nothing.
+  const { data: maps } = await supabase.from('test_batch_mappings').select('test_id').eq('batch_id', batchId)
+  const mapped = (maps ?? []).map((r) => r.test_id as string)
+  let tq = supabase.from('test_schedules').select('test_date, start_time, duration_minutes').neq('stage', 'Cancelled')
+  tq = mapped.length ? tq.or(`batch_id.eq.${batchId},id.in.(${mapped.join(',')})`) : tq.eq('batch_id', batchId)
+  const { data: tests } = await tq
   let moved = 0
   for (const t of (tests ?? []) as { test_date: string; start_time: string; duration_minutes: number }[]) {
     const res = await shiftPlannerForTest(supabase, batchId, t.test_date, t.start_time, t.duration_minutes)

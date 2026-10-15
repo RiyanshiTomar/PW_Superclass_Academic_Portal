@@ -158,14 +158,24 @@ export default function StudentsPanel({ scope = 'branch' }: { scope?: Scope }) {
     const testMap = new Map<string, number | null>()
     const batchIds = batchesData.map((b) => b.id)
     if (batchIds.length) {
-      const { data: tests } = await fetchAllIn<{ id: string; batch_id: string }>(batchIds, (chunk, from, to) =>
-        supabase.from('test_schedules').select('id, batch_id').in('batch_id', chunk).neq('stage', 'Cancelled').order('id').range(from, to))
+      // Tests held till today: the batch's own + multi-batch tests it's mapped to.
+      const today = todayISO()
+      const [{ data: own }, { data: maps }] = await Promise.all([
+        fetchAllIn<{ id: string; batch_id: string }>(batchIds, (chunk, from, to) =>
+          supabase.from('test_schedules').select('id, batch_id').in('batch_id', chunk).neq('stage', 'Cancelled').lte('test_date', today).order('id').range(from, to)),
+        fetchAllIn<{ test_id: string; batch_id: string }>(batchIds, (chunk, from, to) =>
+          supabase.from('test_batch_mappings').select('test_id, batch_id').in('batch_id', chunk).order('test_id').order('batch_id').range(from, to)),
+      ])
+      const { data: mappedTests } = await fetchAllIn<{ id: string }>(maps.map((m) => m.test_id), (chunk, from, to) =>
+        supabase.from('test_schedules').select('id').in('id', chunk).neq('stage', 'Cancelled').lte('test_date', today).order('id').range(from, to))
+      const heldMapped = new Set(mappedTests.map((t) => t.id))
+      const tests = [...own, ...maps.filter((m) => heldMapped.has(m.test_id)).map((m) => ({ id: m.test_id, batch_id: m.batch_id }))]
       const testsByBatch = new Map<string, Set<string>>()
       for (const t of tests) {
         if (!testsByBatch.has(t.batch_id)) testsByBatch.set(t.batch_id, new Set())
         testsByBatch.get(t.batch_id)!.add(t.id)
       }
-      const testIds = tests.map((t) => t.id)
+      const testIds = Array.from(new Set(tests.map((t) => t.id)))
       const recordedByReg = new Map<string, Set<string>>()
       if (testIds.length) {
         const { data: results } = await fetchAllIn<{ test_id: string; regno: string; marks: number | null; absent: boolean }>(testIds, (chunk, from, to) =>

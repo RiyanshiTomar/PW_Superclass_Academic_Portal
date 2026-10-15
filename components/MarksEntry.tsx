@@ -35,6 +35,7 @@ export default function MarksEntry({ scope = 'central' }: { scope?: Scope }) {
   const [test, setTest] = useState<TestRow | null>(null)
   const [results, setResults] = useState<ResultRow[]>([])
   const [roster, setRoster] = useState<RosterStudent[]>([])
+  const [mappedByBatch, setMappedByBatch] = useState<Record<string, string[]>>({})
   const [entries, setEntries] = useState<MarkEntry[]>([])
   const [maxMarks, setMaxMarks] = useState('')
   const [passMarks, setPassMarks] = useState('')
@@ -62,6 +63,11 @@ export default function MarksEntry({ scope = 'central' }: { scope?: Scope }) {
       if (bRes.data) setBatches(bRes.data as Batch[])
       if (cRes.data) setCentres(cRes.data as Centre[])
       setTests(tRes.data)
+      // Multi-batch tests: the batches each test is ALSO held for.
+      const { data: maps } = await fetchAll<{ test_id: string; batch_id: string }>((from, to) => supabase.from('test_batch_mappings').select('test_id, batch_id').order('test_id').order('batch_id').range(from, to))
+      const m: Record<string, string[]> = {}
+      for (const r of maps) (m[r.batch_id] ??= []).push(r.test_id)
+      setMappedByBatch(m)
       setLoading(false)
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -82,11 +88,13 @@ export default function MarksEntry({ scope = 'central' }: { scope?: Scope }) {
 
   // Only offer the test type this role can enter (objective for BM, subjective for branch).
   const batchTests = useMemo(() => {
-    let list = tests.filter((t) => t.batch_id === batchId)
+    // The batch's own tests + multi-batch tests it is part of (not cancelled).
+    const mapped = new Set(mappedByBatch[batchId] ?? [])
+    let list = tests.filter((t) => (t.batch_id === batchId || mapped.has(t.id)) && t.stage !== 'Cancelled')
     if (scope === 'batch-manager') list = list.filter((t) => t.test_type === 'Objective')
     else if (scope === 'branch') list = list.filter((t) => t.test_type === 'Subjective')
     return list
-  }, [tests, batchId, scope])
+  }, [tests, batchId, scope, mappedByBatch])
 
   const selectTest = async (t: TestRow | null) => {
     setTest(t); setMsg(null); setResults([]); setEntries([]); setRoster([]); setPreview(null)
@@ -94,7 +102,11 @@ export default function MarksEntry({ scope = 'central' }: { scope?: Scope }) {
     setLoadingTest(true)
     setMaxMarks(t.max_marks != null ? String(t.max_marks) : '')
     setPassMarks(t.pass_marks != null ? String(t.pass_marks) : '')
-    const [res, rosterRes] = await Promise.all([fetchResults(supabase, t.id), fetchRoster(supabase, t.batch_id)])
+    // Students = the batch picked above (a multi-batch test belongs to several
+    // batches; each batch enters its own students' marks).
+    const [allRes, rosterRes] = await Promise.all([fetchResults(supabase, t.id), fetchRoster(supabase, batchId)])
+    const inBatch = new Set(rosterRes.students.map((s) => s.regno))
+    const res = t.batch_id === batchId ? allRes : allRes.filter((r) => inBatch.has(r.regno))
     setResults(res)
     setRoster(rosterRes.students)
     if (rosterRes.students.length === 0 && res.length === 0) setMsg({ type: 'info', text: rosterRes.error ?? 'No students assigned to this batch yet — the Branch Head assigns them under Students.' })
@@ -108,6 +120,14 @@ export default function MarksEntry({ scope = 'central' }: { scope?: Scope }) {
       setEntries(merged)
     }
     setLoadingTest(false)
+  }
+
+  // A multi-batch test's results, limited to this batch's students.
+  const batchResults = async (t: TestRow) => {
+    const fresh = await fetchResults(supabase, t.id)
+    if (t.batch_id === batchId) return fresh
+    const inBatch = new Set(roster.map((s) => s.regno))
+    return fresh.filter((r) => inBatch.has(r.regno))
   }
 
   const numMax = maxMarks.trim() ? Number(maxMarks) : null
@@ -129,7 +149,7 @@ export default function MarksEntry({ scope = 'central' }: { scope?: Scope }) {
     if (!res.ok) return setMsg({ type: 'error', text: res.error ?? 'Save failed.' })
     setTest({ ...test, max_marks: numMax, pass_marks: numPass })
     setMsg({ type: 'success', text: `Saved marks for ${res.saved} student(s).` })
-    setResults(await fetchResults(supabase, test.id))
+    setResults(await batchResults(test))
   }
 
   function downloadTemplate() {
@@ -225,7 +245,7 @@ export default function MarksEntry({ scope = 'central' }: { scope?: Scope }) {
     if (!res.ok) { setMsg({ type: 'error', text: res.error ?? 'Import failed.' }); return }
     setPreview(null)
     setMsg({ type: 'success', text: `Imported subjective marks for ${res.saved} student(s).` })
-    setResults(await fetchResults(supabase, test.id))
+    setResults(await batchResults(test))
   }
 
   const centreName = (id: string) => centres.find((c) => c.id === id)?.name ?? ''

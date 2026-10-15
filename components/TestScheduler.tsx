@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import {
-  createTest, updateTest, setTestStage, getEligibleChapters, getTestCompletion, getBatchFreeWindows, validateTestSlot,
+  createTest, updateTest, setTestStage, getEligibleChapters, getTestCompletion, getBatchFreeWindows, validateTestSlot, shiftPlannerForTest,
   getFreeFacultyIds, getClashingClass, getFreeClassrooms, revertTestShift, cascadeShiftTests,
   type ClashingClass, type EligibleChapter, type TestInput, type TestCompletion,
   type FreeWindow, type FreeClassroom, type CascadeShiftPreviewItem,
@@ -591,6 +591,23 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     try {
       // Use primary batch (first selected) for the main test record
       const primaryBatchId = activeBatchIds[0]
+
+      // Every other selected batch must be free too (a slot holds a class OR a
+      // test). Without test priority a clash blocks; with it, their lectures
+      // are shifted after the save, like the primary batch's.
+      const secondaryIds = activeBatchIds.slice(1)
+      if (!testPriority) {
+        for (const bid of secondaryIds) {
+          const clash = await validateTestSlot(supabase, { batchId: bid, facultyId: null, classroomId: null, date: testDate, startTime, durationMinutes: dur, ignoreTestId: editingId ?? undefined })
+          if (clash) {
+            const bn = batches.find((b) => b.id === bid)?.name ?? 'another selected batch'
+            setCanShift(/class|planned lecture/i.test(clash))
+            setMsg({ type: 'error', text: `${bn}: ${clash}` })
+            setSaving(false)
+            return
+          }
+        }
+      }
       
       const input: TestInput = {
         batch_id: primaryBatchId,
@@ -652,6 +669,12 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
           })
           if (mapError) {
             console.warn('Failed to map test to multiple batches:', mapError)
+          } else if (testPriority) {
+            for (const bid of secondaryIds) {
+              const r = await shiftPlannerForTest(supabase, bid, testDate, startTime, dur, testId)
+              res.shifted = (res.shifted ?? 0) + r.moved
+              res.unshiftable = (res.unshiftable ?? 0) + r.unmoved
+            }
           }
         }
       }

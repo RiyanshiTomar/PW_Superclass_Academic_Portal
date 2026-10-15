@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import {
-  createTest, updateTest, setTestStage, getEligibleChapters, getTestCompletion, getBatchFreeWindows, validateTestSlot, shiftPlannerForTest,
+  createTest, updateTest, setTestStage, getEligibleChapters, getTestCompletion, getBatchFreeWindows, validateTestSlot, shiftPlannerForTest, detachBatchFromTest,
   getFreeFacultyIds, getClashingClass, getFreeClassrooms, revertTestShift, cascadeShiftTests,
   type ClashingClass, type EligibleChapter, type TestInput, type TestCompletion,
   type FreeWindow, type FreeClassroom, type CascadeShiftPreviewItem,
@@ -137,6 +137,8 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const [loading, setLoading] = useState(true)
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
+  // Edit / delete of a multi-batch test: ask "only this batch" or "all batches".
+  const [scopeAsk, setScopeAsk] = useState<{ test: TestRow; action: 'edit' | 'delete'; batchId: string } | null>(null)
 
   // Form
   const [showForm, setShowForm] = useState(false)
@@ -704,8 +706,37 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     await loadData()
   }
 
-  const deleteTest = async (t: TestRow) => {
-    if (!confirm(`Delete test "${t.name}"? This cannot be undone.`)) return
+  // Batches a test is held for (primary + multi-batch mappings).
+  const batchesOfTest = (t: TestRow) => Array.from(new Set([t.batch_id, ...(testBatchMappings[t.id] ?? [])]))
+  const askOrRun = (t: TestRow, action: 'edit' | 'delete') => {
+    const bs = batchesOfTest(t)
+    if (bs.length <= 1) { if (action === 'edit') startEdit(t); else void deleteTest(t); return }
+    setScopeAsk({ test: t, action, batchId: filterBatchId && bs.includes(filterBatchId) ? filterBatchId : bs[0] })
+  }
+  // "Only this batch": give that batch its own copy of the test, then edit /
+  // delete just the copy — the other batches keep the original untouched.
+  const runForOneBatch = async () => {
+    if (!scopeAsk) return
+    const { test: t, action, batchId: bid } = scopeAsk
+    const bn = batches.find((b) => b.id === bid)?.name ?? 'this batch'
+    if (action === 'delete' && !confirm(`Delete "${t.name}" for ${bn} only? The other batches keep the test.`)) return
+    setScopeAsk(null); setBusyId(t.id); setMsg(null)
+    const res = await detachBatchFromTest(supabase, t.id, bid)
+    setBusyId(null)
+    if (!res.ok || !res.testId) return setMsg({ type: 'error', text: res.error ?? 'Could not separate the test for this batch.' })
+    const copy: TestRow = { ...t, id: res.testId, batch_id: bid }
+    if (action === 'delete') await deleteTest(copy, true)
+    else { await loadData(); startEdit(copy); setMsg({ type: 'info', text: `Editing "${t.name}" for ${bn} only — the other batches keep the original test.` }) }
+  }
+  const runForAllBatches = () => {
+    if (!scopeAsk) return
+    const { test: t, action } = scopeAsk
+    setScopeAsk(null)
+    if (action === 'edit') startEdit(t); else void deleteTest(t)
+  }
+
+  const deleteTest = async (t: TestRow, confirmed = false) => {
+    if (!confirmed && !confirm(`Delete test "${t.name}"? This cannot be undone.`)) return
     setBusyId(t.id)
     const revert = await revertTestShift(supabase, t.id)
     const { error } = await supabase.from('test_schedules').delete().eq('id', t.id)
@@ -1847,12 +1878,12 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                         {busyId === t.id
                           ? <span className="text-xs text-neutral-400">…</span>
                           : <>
-                              <button onClick={() => startEdit(t)} className="text-xs font-semibold text-violet-600 hover:text-violet-800 mr-3">Edit</button>
+                              <button onClick={() => askOrRun(t, 'edit')} className="text-xs font-semibold text-violet-600 hover:text-violet-800 mr-3">Edit</button>
                               {t.stage !== 'Cancelled' && (
                                 <button onClick={() => openCascade(t)} className="text-xs font-semibold text-orange-500 hover:text-orange-700 mr-3">Shift Forward</button>
                               )}
                               {isPrivileged && (
-                                <button onClick={() => deleteTest(t)} className="text-xs font-semibold text-red-500 hover:text-red-700">Delete</button>
+                                <button onClick={() => askOrRun(t, 'delete')} className="text-xs font-semibold text-red-500 hover:text-red-700">Delete</button>
                               )}
                             </>}
                       </td>
@@ -1865,6 +1896,32 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         </div>
       )}
       {/* ---- Cascade Shift Modal -------------------------------------------- */}
+      {scopeAsk && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-950/50 backdrop-blur-sm" onClick={() => setScopeAsk(null)}>
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl border border-neutral-200 p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div>
+              <h3 className="text-lg font-bold text-neutral-950">{scopeAsk.action === 'edit' ? 'Edit' : 'Delete'} “{scopeAsk.test.name}”</h3>
+              <p className="text-sm text-neutral-500 mt-1">This test is shared by {batchesOfTest(scopeAsk.test).length} batches: {batchesOfTest(scopeAsk.test).map((id) => batches.find((b) => b.id === id)?.name ?? '—').join(', ')}.</p>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Batch</label>
+              <select value={scopeAsk.batchId} onChange={(e) => setScopeAsk({ ...scopeAsk, batchId: e.target.value })} className="w-full h-10 px-3 bg-white border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                {batchesOfTest(scopeAsk.test).map((id) => <option key={id} value={id}>{batches.find((b) => b.id === id)?.name ?? id}</option>)}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <button onClick={runForOneBatch} className={`w-full h-11 rounded-xl text-sm font-semibold text-white ${scopeAsk.action === 'delete' ? 'bg-red-600 hover:bg-red-700' : 'bg-violet-600 hover:bg-violet-700'}`}>
+                {scopeAsk.action === 'edit' ? 'Edit' : 'Delete'} for {batches.find((b) => b.id === scopeAsk.batchId)?.name ?? 'this batch'} only
+              </button>
+              <button onClick={runForAllBatches} className="w-full h-11 rounded-xl text-sm font-semibold border border-neutral-200 text-neutral-700 hover:bg-neutral-50">
+                {scopeAsk.action === 'edit' ? 'Edit' : 'Delete'} for all {batchesOfTest(scopeAsk.test).length} batches
+              </button>
+              <p className="text-xs text-neutral-500">“Only” gives that batch its own copy of the test (with its students’ marks); the other batches keep the original unchanged.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {cascadeTest && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <Card className="w-full max-w-2xl max-h-[90vh] overflow-auto">

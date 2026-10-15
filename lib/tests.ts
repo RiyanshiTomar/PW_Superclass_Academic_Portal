@@ -275,6 +275,10 @@ export type TestSlot = {
   startTime: string        // HH:MM
   durationMinutes: number
   ignoreTestId?: string
+  /** Test name. Another test with the SAME name at the SAME start time is the
+   *  same sitting (a multi-batch test split per batch), so sharing its room /
+   *  invigilator is not a clash. */
+  name?: string
 }
 
 /** Returns a human error if the test slot clashes with anything, else null.
@@ -319,7 +323,8 @@ export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot,
     }
     for (const r of rows) {
       const rs = toMinutes(r.start_time.slice(0, 5))
-      if (overlaps(s, e, rs, rs + r.duration_minutes)) {
+      const sameSitting = col !== 'batch_id' && !!slot.name && r.name.trim().toLowerCase() === slot.name.trim().toLowerCase() && r.start_time.slice(0, 5) === slot.startTime.slice(0, 5)
+      if (!sameSitting && overlaps(s, e, rs, rs + r.duration_minutes)) {
         const clashTime = r.start_time.slice(0, 5)
         const clashEnd = hhmm(rs + r.duration_minutes)
         return `${label} — "${r.name}" is at ${clashTime}–${clashEnd} (${r.duration_minutes}m)`
@@ -515,7 +520,7 @@ export async function createTest(
 ): Promise<{ ok: boolean; id?: string; error?: string; shifted?: number; unshiftable?: number }> {
   const clash = await validateTestSlot(supabase, {
     batchId: input.batch_id, facultyId: input.faculty_id, classroomId: input.classroom_id,
-    date: input.test_date, startTime: input.start_time, durationMinutes: input.duration_minutes,
+    date: input.test_date, startTime: input.start_time, durationMinutes: input.duration_minutes, name: input.name,
   }, { testPriority: opts?.testPriority })
   if (clash) return { ok: false, error: clash }
 
@@ -546,7 +551,7 @@ export async function updateTest(
   const clash = await validateTestSlot(supabase, {
     batchId: input.batch_id, facultyId: input.faculty_id, classroomId: input.classroom_id,
     date: input.test_date, startTime: input.start_time, durationMinutes: input.duration_minutes,
-    ignoreTestId: testId,
+    ignoreTestId: testId, name: input.name,
   }, { testPriority: opts?.testPriority })
   if (clash) return { ok: false, error: clash }
 
@@ -1255,6 +1260,59 @@ export async function getBatchProgress(
  *  any lecture whose original slot is now occupied by something else, rather
  *  than risk creating a new overlap — those can be fixed manually in Edit
  *  Planner. */
+/** Give ONE batch of a multi-batch test its own copy of the test, so it can
+ *  be edited or deleted for that batch alone. The copy keeps the details,
+ *  chapters, that batch's students' marks and that batch's shifted lectures;
+ *  the original test continues unchanged for the other batches. For a test
+ *  that has only this batch, returns the same test. */
+export async function detachBatchFromTest(
+  supabase: SupabaseClient,
+  testId: string,
+  batchId: string
+): Promise<{ ok: boolean; testId?: string; error?: string }> {
+  const { data: t } = await supabase.from('test_schedules').select('*').eq('id', testId).single<Record<string, unknown> & { id: string; batch_id: string }>()
+  if (!t) return { ok: false, error: 'Test not found.' }
+  const { data: maps } = await supabase.from('test_batch_mappings').select('batch_id').eq('test_id', testId)
+  const all = Array.from(new Set([t.batch_id, ...(maps ?? []).map((m) => m.batch_id as string)]))
+  if (!all.includes(batchId)) return { ok: false, error: 'This batch is not part of the test.' }
+  if (all.length <= 1) return { ok: true, testId }
+  const remaining = all.filter((b) => b !== batchId)
+
+  // 1. The copy for this batch.
+  const { id: _id, created_at: _c, ...rest } = t as Record<string, unknown>
+  void _id; void _c
+  const { data: copy, error: insErr } = await supabase.from('test_schedules').insert({ ...rest, batch_id: batchId }).select('id').single<{ id: string }>()
+  if (insErr || !copy) return { ok: false, error: `Could not separate the test: ${insErr?.message}` }
+  const newId = copy.id
+
+  // 2. Same syllabus.
+  const { data: chs } = await supabase.from('test_chapters').select('chapter_id').eq('test_id', testId).limit(5000)
+  if (chs?.length) {
+    const { error } = await supabase.from('test_chapters').insert(chs.map((c) => ({ test_id: newId, chapter_id: c.chapter_id })))
+    if (error) { await supabase.from('test_schedules').delete().eq('id', newId); return { ok: false, error: error.message } }
+  }
+
+  // 3. This batch's students' marks move to the copy.
+  const { data: studs } = await supabase.from('students').select('regno').eq('batch_id', batchId)
+  const regnos = (studs ?? []).map((r) => r.regno as string)
+  for (let i = 0; i < regnos.length; i += 150) {
+    const { error } = await supabase.from('test_results').update({ test_id: newId }).eq('test_id', testId).in('regno', regnos.slice(i, i + 150))
+    if (error) return { ok: false, error: `Marks could not be moved: ${error.message}` }
+  }
+
+  // 4. Lectures this test shifted for this batch now belong to the copy.
+  await supabase.from('batch_planners').update({ shifted_for_test_id: newId }).eq('shifted_for_test_id', testId).eq('batch_id', batchId)
+
+  // 5. The original test no longer includes this batch.
+  if (t.batch_id === batchId) {
+    const { error } = await supabase.from('test_schedules').update({ batch_id: remaining[0] }).eq('id', testId)
+    if (error) return { ok: false, error: error.message }
+  }
+  await supabase.from('test_batch_mappings').delete().eq('test_id', testId).eq('batch_id', batchId)
+  if (remaining.length === 1) await supabase.from('test_batch_mappings').delete().eq('test_id', testId) // now single-batch
+  return { ok: true, testId: newId }
+}
+
 export async function revertTestShift(supabase: SupabaseClient, testId: string): Promise<{ reverted: number; skipped: number }> {
   const { data } = await supabase
     .from('batch_planners')

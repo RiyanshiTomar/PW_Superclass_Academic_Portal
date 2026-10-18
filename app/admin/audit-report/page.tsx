@@ -13,8 +13,10 @@ type AuditRow = {
   planner_id: string
   planned_date: string
   batch_name: string
+  centre_id: string | null
   centre_name: string
   subject_name: string
+  faculty_id: string | null
   faculty_name: string
   chapter: string | null
   topic_name: string | null
@@ -106,7 +108,7 @@ function downloadCSV(content: string, filename: string) {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 type PlannerAuditRow = {
-  id: string; planned_date: string; start_time: string | null; duration_minutes: number; chapter: string; topic_name: string
+  id: string; faculty_id: string | null; planned_date: string; start_time: string | null; duration_minutes: number; chapter: string; topic_name: string
   batches: unknown; subjects: unknown; app_users: unknown; lecture_audits: unknown
 }
 
@@ -120,6 +122,8 @@ export default function AuditReportPage() {
 
   // Filters
   const [filterOwner,  setFilterOwner]  = useState('')
+  const [filterCentre, setFilterCentre] = useState('')
+  const [filterFaculty, setFilterFaculty] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [filterFrom,   setFilterFrom]   = useState(AUDIT_START)
   const [filterTo,     setFilterTo]     = useState(new Date().toISOString().split('T')[0])
@@ -139,8 +143,8 @@ export default function AuditReportPage() {
     const { data: planners, error } = await fetchAll<PlannerAuditRow>((from, to) => supabase
       .from('batch_planners')
       .select(`
-        id, planned_date, start_time, duration_minutes, chapter, topic_name,
-        batches(id, name, batch_owner_id, centres(name),
+        id, faculty_id, planned_date, start_time, duration_minutes, chapter, topic_name,
+        batches(id, name, batch_owner_id, centre_id, centres(id, name),
           app_users!batches_batch_owner_id_fkey(id, full_name)),
         subjects(name),
         app_users!batch_planners_faculty_id_fkey(full_name),
@@ -160,7 +164,7 @@ export default function AuditReportPage() {
     if (error) { setMessage({ type: 'error', text: error }); setLoading(false); return }
 
     const merged: AuditRow[] = (planners ?? []).map(p => {
-      const batch   = one(p.batches  as never) as { id: string; name: string; batch_owner_id: string | null; centres: unknown; app_users: unknown } | null
+      const batch   = one(p.batches  as never) as { id: string; name: string; batch_owner_id: string | null; centre_id: string | null; centres: unknown; app_users: unknown } | null
       const centre  = one(batch?.centres as never) as { name: string } | null
       const owner   = one(batch?.app_users as never) as { id: string; full_name: string } | null
       const subj    = one(p.subjects  as never) as { name: string } | null
@@ -176,8 +180,10 @@ export default function AuditReportPage() {
         planner_id:       p.id,
         planned_date:     p.planned_date,
         batch_name:       batch?.name      ?? '—',
+        centre_id:        batch?.centre_id ?? null,
         centre_name:      centre?.name     ?? '—',
         subject_name:     subj?.name       ?? '—',
+        faculty_id:       p.faculty_id     ?? null,
         faculty_name:     fac?.full_name   ?? '—',
         chapter:          p.chapter,
         topic_name:       p.topic_name,
@@ -206,10 +212,41 @@ export default function AuditReportPage() {
   // ─── Filtered ─────────────────────────────────────────────────────────────
 
   const filtered = useMemo(() => rows.filter(r => {
-    if (filterOwner  && r.owner_id     !== filterOwner)  return false
-    if (filterStatus && r.audit_status !== filterStatus) return false
+    if (filterOwner === '__unassigned__' ? r.owner_id !== null : filterOwner && r.owner_id !== filterOwner) return false
+    if (filterCentre  && r.centre_id    !== filterCentre)  return false
+    if (filterFaculty && (filterFaculty === '__none__' ? r.faculty_id !== null : r.faculty_id !== filterFaculty)) return false
+    if (filterStatus  && r.audit_status !== filterStatus)  return false
     return true
-  }), [rows, filterOwner, filterStatus])
+  }), [rows, filterOwner, filterCentre, filterFaculty, filterStatus])
+
+  // Filter options come from the lectures in the date range.
+  const centreOptions = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of rows) if (r.centre_id) m.set(r.centre_id, r.centre_name)
+    return Array.from(m.entries()).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+  }, [rows])
+  const facultyOptions = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of rows) if (r.faculty_id && (!filterCentre || r.centre_id === filterCentre)) m.set(r.faculty_id, r.faculty_name)
+    return Array.from(m.entries()).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+  }, [rows, filterCentre])
+  // A faculty picked for another centre doesn't stay hidden-selected.
+  useEffect(() => {
+    if (filterFaculty && filterFaculty !== '__none__' && !facultyOptions.some((f) => f.id === filterFaculty)) setFilterFaculty('')
+  }, [facultyOptions, filterFaculty])
+
+  const csvName = () => {
+    const parts = ['audit-report']
+    const c = centreOptions.find((x) => x.id === filterCentre)?.name
+    const f = facultyOptions.find((x) => x.id === filterFaculty)?.name
+    const o = owners.find((x) => x.id === filterOwner)?.full_name
+    if (c) parts.push(c)
+    if (f) parts.push(f)
+    if (o) parts.push(o)
+    if (filterStatus) parts.push(filterStatus)
+    parts.push(`${filterFrom}-to-${filterTo}`)
+    return parts.join('-').replace(/[\/:*?"<>|]+/g, '').replace(/\s+/g, '-') + '.csv'
+  }
 
   // ─── Summary: owner × date grid ───────────────────────────────────────────
 
@@ -286,6 +323,23 @@ export default function AuditReportPage() {
               className="h-9 px-3 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-400" />
           </div>
           <div>
+            <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Centre</label>
+            <select value={filterCentre} onChange={e => setFilterCentre(e.target.value)}
+              className="h-9 px-3 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 min-w-[160px]">
+              <option value="">All centres</option>
+              {centreOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Faculty</label>
+            <select value={filterFaculty} onChange={e => setFilterFaculty(e.target.value)}
+              className="h-9 px-3 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 min-w-[180px]">
+              <option value="">All faculty</option>
+              {facultyOptions.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+              <option value="__none__">— No faculty —</option>
+            </select>
+          </div>
+          <div>
             <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Batch Owner</label>
             <select value={filterOwner} onChange={e => setFilterOwner(e.target.value)}
               className="h-9 px-3 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 min-w-[160px]">
@@ -304,7 +358,7 @@ export default function AuditReportPage() {
               <option value="flagged">🚩 Flagged</option>
             </select>
           </div>
-          <BtnSecondary onClick={() => { setFilterOwner(''); setFilterStatus('') }}>Clear</BtnSecondary>
+          <BtnSecondary onClick={() => { setFilterOwner(''); setFilterCentre(''); setFilterFaculty(''); setFilterStatus('') }}>Clear</BtnSecondary>
           <BtnPrimary onClick={load} disabled={loading}>
             {loading ? 'Loading…' : '↻ Refresh'}
           </BtnPrimary>
@@ -339,7 +393,7 @@ export default function AuditReportPage() {
                 📋 Detail
               </button>
             </div>
-            <BtnPrimary onClick={() => downloadCSV(toCSV(filtered), `audit-report-${filterFrom}-to-${filterTo}.csv`)}>
+            <BtnPrimary onClick={() => downloadCSV(toCSV(filtered), csvName())}>
               ⬇ Download CSV
             </BtnPrimary>
           </div>

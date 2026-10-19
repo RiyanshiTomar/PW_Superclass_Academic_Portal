@@ -6,15 +6,15 @@ import { activeBatchStudents } from '@/lib/students'
 import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import { summarize, type ResultRow } from '@/lib/results'
+import { passRuleFor, passMarksFor } from '@/lib/passing'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
 
 type Scope = 'central' | 'admin' | 'branch' | 'batch-manager' | 'faculty'
-type Batch = { id: string; name: string; centre_id: string; batch_manager_id: string | null }
+type Batch = { id: string; name: string; centre_id: string; batch_manager_id: string | null; programs?: { name: string } | { name: string }[] | null }
 type Centre = { id: string; name: string; branch_head_id: string | null }
-type TestRow = { id: string; batch_id: string; name: string; test_type: string; test_date: string; max_marks: number | null; pass_marks: number | null }
+type TestRow = { id: string; batch_id: string; name: string; test_type: string; part_type: string; test_date: string; max_marks: number | null; pass_marks: number | null }
 type Result = ResultRow & { test_id: string }
 
-const pct = (marks: number, max: number | null) => (max ? (marks / max) * 100 : null)
 const fmtDate = (s: string) => new Date(s + 'T12:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
 
 export default function ResultsSummary({ scope = 'central' }: { scope?: Scope }) {
@@ -41,9 +41,9 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
       const au = user ? await getAppUser(supabase, user) : null
       setAppUser(au)
       const [bRes, cRes, tRes] = await Promise.all([
-        supabase.from('batches').select('id, name, centre_id, batch_manager_id').order('name'),
+        supabase.from('batches').select('id, name, centre_id, batch_manager_id, programs(name)').order('name'),
         supabase.from('centres').select('id, name, branch_head_id').order('name'),
-        fetchAll<TestRow>((from, to) => supabase.from('test_schedules').select('id, batch_id, name, test_type, test_date, max_marks, pass_marks').neq('stage', 'Cancelled').order('test_date', { ascending: true }).order('id').range(from, to)),
+        fetchAll<TestRow>((from, to) => supabase.from('test_schedules').select('id, batch_id, name, test_type, part_type, test_date, max_marks, pass_marks').neq('stage', 'Cancelled').order('test_date', { ascending: true }).order('id').range(from, to)),
       ])
       if (bRes.data) setBatches(bRes.data as Batch[])
       if (cRes.data) setCentres(cRes.data as Centre[])
@@ -75,6 +75,12 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
     if (scope === 'faculty') return batches.filter((b) => facultyBatchIds.has(b.id))
     return batches.filter((b) => allowedCentreIds.has(b.centre_id))
   }, [batches, isPrivileged, scope, appUser, allowedCentreIds, facultyBatchIds])
+
+  const rule = useMemo(() => {
+    const b = batches.find((x) => x.id === batchId)
+    const prog = Array.isArray(b?.programs) ? b?.programs[0] : b?.programs
+    return passRuleFor(prog?.name)
+  }, [batches, batchId])
 
   const batchTests = useMemo(() => {
     const mapped = new Set(mappedByBatch[batchId] ?? [])
@@ -119,9 +125,10 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
   const perTest = useMemo(() => {
     return batchTests.map((t) => {
       const rows = results.filter((r) => r.test_id === t.id)
-      return { test: t, summary: summarize(rows, t.max_marks, t.pass_marks), rows }
+      // Pass mark: the test's own, else the program's passing criteria.
+      return { test: t, summary: summarize(rows, t.max_marks, passMarksFor(t, rule)), rows }
     })
-  }, [batchTests, results])
+  }, [batchTests, results, rule])
 
   // Overall = mean of each test's avg% / pass% (only tests that have marks).
   const overall = useMemo(() => {
@@ -133,20 +140,24 @@ export default function ResultsSummary({ scope = 'central' }: { scope?: Scope })
   }, [perTest, batchTests])
 
   // Toppers: each student's average % across the tests they attempted.
+  // Toppers by overall score: total marks ÷ total max over the tests held,
+  // an Absent counting as 0 — one good test can't put a student on top.
   const toppers = useMemo(() => {
     const maxByTest = new Map(batchTests.map((t) => [t.id, t.max_marks]))
-    const agg = new Map<string, { name: string; sum: number; n: number }>()
+    const agg = new Map<string, { name: string; got: number; max: number; tests: number }>()
     for (const r of results) {
-      if (r.absent || r.marks == null) continue
-      const p = pct(r.marks, maxByTest.get(r.test_id) ?? null)
-      if (p == null) continue
-      const cur = agg.get(r.regno) ?? { name: r.student_name, sum: 0, n: 0 }
-      cur.sum += p; cur.n += 1; if (r.student_name) cur.name = r.student_name
+      const max = maxByTest.get(r.test_id)
+      if (!max || (!r.absent && r.marks == null)) continue
+      const cur = agg.get(r.regno) ?? { name: r.student_name, got: 0, max: 0, tests: 0 }
+      cur.max += max; cur.got += r.absent ? 0 : (r.marks as number)
+      if (!r.absent) cur.tests += 1
+      if (r.student_name) cur.name = r.student_name
       agg.set(r.regno, cur)
     }
     return Array.from(agg.entries())
-      .map(([regno, v]) => ({ regno, name: v.name, avgPct: Math.round((v.sum / v.n) * 10) / 10, tests: v.n }))
-      .sort((a, b) => b.avgPct - a.avgPct)
+      .filter(([, v]) => v.max > 0)
+      .map(([regno, v]) => ({ regno, name: v.name, avgPct: Math.round((v.got / v.max) * 1000) / 10, tests: v.tests }))
+      .sort((a, b) => b.avgPct - a.avgPct || b.tests - a.tests)
       .slice(0, 8)
   }, [results, batchTests])
 

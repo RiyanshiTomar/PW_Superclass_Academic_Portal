@@ -29,6 +29,19 @@ const todayISO = () => { const d = new Date(); d.setHours(12, 0, 0, 0); return d
 const fmtDate = (s: string) => new Date(s + 'T12:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' })
 const fmtMonth = (ym: string) => new Date(ym + '-01T12:00:00').toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })
 const round1 = (n: number) => Math.round(n * 10) / 10
+// A test series = the papers sharing one name, e.g. every "Milestone Test - 01"
+// paper. Names are typed by hand, so spacing, "-", leading zeros, "test" and
+// the common misspellings ("Miletone", "Mlestone") don't split a series.
+const ACRONYMS = new Set(['ca', 'cuet', 'ipmat', 'clat', 'ailet', 'caf'])
+const seriesOf = (name: string) => {
+  const words = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean)
+    .map((w) => (/^(miletone|mlestone|milstone|milestne)$/.test(w) ? 'milestone' : /^\d+$/.test(w) ? String(Number(w)) : w))
+    .filter((w) => w !== 'test')
+  const key = words.join(' ')
+  const num = /^\d+$/.test(words[words.length - 1] ?? '') ? words[words.length - 1] : null
+  const fam = (num ? words.slice(0, -1) : words).map((w) => (ACRONYMS.has(w) ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)))
+  return { key, label: `${fam.join(' ')} Test${num ? ` ${num}` : ''}`.trim() }
+}
 const pctOf = (m: Mark | undefined, max: number | null) => (m && !m.absent && m.marks != null && max ? (m.marks / max) * 100 : null)
 
 export default function StudentOverview({ scope = 'central' }: { scope?: Scope }) {
@@ -156,8 +169,8 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
   // A student's test lines for scoring: every held test with marks that has a
   // record for them — Absent counts as 0; a test whose marks aren't entered
   // for them yet is left out (missing data, not a zero).
-  const linesOf = (regno: string): ScoreLine[] =>
-    scoredTests.filter((t) => t.max_marks).flatMap((t) => {
+  const linesOf = (regno: string, only?: Set<string>): ScoreLine[] =>
+    scoredTests.filter((t) => t.max_marks && (!only || only.has(t.id))).flatMap((t) => {
       const m = markIdx.get(`${t.id}|${regno}`)
       if (!m || (!m.absent && m.marks == null)) return []
       return [{ subjectId: t.subject_id, obtained: m.absent ? 0 : (m.marks as number), max: t.max_marks as number }]
@@ -176,6 +189,49 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
     return { list, batchAvg: list.length ? round1(list.reduce((a, b) => a + b.avg, 0) / list.length) : null }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [students, scoredTests, markIdx])
+
+  // Test series held till today (oldest first), and each series' batch ranking
+  // by the same rule as overall: total marks ÷ total max, Absent = 0.
+  const series = useMemo(() => {
+    const today = todayISO()
+    const groups = new Map<string, { key: string; label: string; tests: Test[] }>()
+    for (const t of tests) {
+      if (t.test_date > today) continue
+      const { key, label } = seriesOf(t.name)
+      const g = groups.get(key) ?? { key, label, tests: [] }
+      g.tests.push(t)
+      groups.set(key, g)
+    }
+    return Array.from(groups.values()).map((g) => ({ ...g, ids: new Set(g.tests.map((t) => t.id)), first: g.tests[0].test_date }))
+      .sort((a, b) => a.first.localeCompare(b.first) || a.label.localeCompare(b.label))
+  }, [tests])
+  const seriesRank = useMemo(() => {
+    const out = new Map<string, string[]>() // series key → regnos, best first
+    for (const g of series) {
+      const list = students.map((s) => {
+        const ls = linesOf(s.regno, g.ids)
+        const o = ls.reduce((a, l) => a + l.obtained, 0), m = ls.reduce((a, l) => a + l.max, 0)
+        return { regno: s.regno, pct: m ? o / m : null }
+      }).filter((x): x is { regno: string; pct: number } => x.pct != null).sort((a, b) => b.pct - a.pct)
+      out.set(g.key, list.map((x) => x.regno))
+    }
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [series, students, scoredTests, markIdx])
+  // One student's result in each series.
+  const seriesResults = (regno: string) => series.map((g) => {
+    const ls = linesOf(regno, g.ids)
+    const res = overallResult(ls, rule, (id) => subjectNames.get(id) ?? 'Subject')
+    const ranked = seriesRank.get(g.key) ?? []
+    const idx = ranked.indexOf(regno)
+    const withMarks = g.tests.filter((t) => scoredTests.includes(t)).length
+    return {
+      key: g.key, label: g.label, first: g.first, papers: g.tests.length, withMarks, counted: ls.length,
+      absent: g.tests.filter((t) => markIdx.get(`${t.id}|${regno}`)?.absent).length,
+      obtained: round1(ls.reduce((a, l) => a + l.obtained, 0)), max: ls.reduce((a, l) => a + l.max, 0),
+      ...res, rank: idx >= 0 ? idx + 1 : null, of: ranked.length,
+    }
+  })
 
   // Class days so far: every date from batch start to today (or end) with a
   // weekly slot running — but only days attendance was actually recorded for
@@ -240,7 +296,7 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
       months.set(k, cur)
     }
     return {
-      rows, avg, passed, withPass, passOf, result,
+      rows, avg, passed, withPass, passOf, result, series: seriesResults(student.regno),
       absentTests: rows.filter((r) => r.status === 'absent').length,
       dueTests: rows.filter((r) => r.status !== 'upcoming').length,
       attempted: scored.length,
@@ -253,7 +309,7 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
   }
   const view = useMemo(() => (student ? buildView(student) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [student, tests, markIdx, testStats, overallRank, classDays, attIdx, rule, subjectNames])
+    [student, tests, markIdx, testStats, overallRank, classDays, attIdx, rule, subjectNames, seriesRank])
 
   // ---- Downloads (CSV — opens in Excel / Google Sheets) ----
   const cell = (v: string | number | null | undefined) => {
@@ -291,6 +347,12 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
       <td class="n">${r.avg != null ? `${r.avg}%` : '—'}</td>
       <td class="n">${r.rank ? `${r.rank}/${r.of}` : '—'}</td>
       <td>${resultOf(r)}</td></tr>`).join('')
+    const seriesRows = v.series.map((x) => `<tr>
+      <td>${esc(x.label)}</td><td class="n">${x.counted} / ${x.papers}${x.absent ? ` <span class="ab">(${x.absent} AB)</span>` : ''}</td>
+      <td class="n">${x.max ? `${esc(x.obtained)} / ${esc(x.max)}` : '—'}</td>
+      <td class="n">${x.aggregate != null ? `${x.aggregate}%` : '—'}</td>
+      <td>${x.status ? (x.status === 'Pass' ? '<span class="ok">Pass</span>' : '<span class="ab">Fail</span>') : '<span class="na">Marks not entered</span>'}${x.reasons.length ? `<div class="muted">${esc(x.reasons.join('; '))}</div>` : ''}</td>
+      <td class="n">${x.rank ? `${x.rank}/${x.of}` : '—'}</td></tr>`).join('')
     const monthRows = v.months.map(([m, x]) => `<tr><td>${esc(fmtMonth(m))}</td><td class="n">${x.days}</td><td class="n">${x.present}</td><td class="n">${x.days - x.present}</td><td class="n">${round1((x.present / x.days) * 100)}%</td></tr>`).join('')
     const title = `Marksheet - ${s.student_name || s.regno} - ${s.regno}`
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
@@ -323,6 +385,7 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
 </div>
 <div style="margin-top:12px;padding:8px 10px;border:1px solid #ccc;border-radius:6px"><b>Overall result: ${v.result.status ? (v.result.status === 'Pass' ? '<span class="ok">PASS</span>' : '<span class="ab">FAIL</span>') : '—'}</b> <span class="muted">· Criteria: ${esc(rule.label)}</span>${v.result.reasons.length ? `<div class="muted" style="margin-top:3px">Below the mark: ${esc(v.result.reasons.join('; '))}</div>` : ''}</div>
 ${subjRows ? `<h2>Subject-wise</h2><table><thead><tr><th>Subject</th><th>Score (absent = 0)</th></tr></thead><tbody>${subjRows}</tbody></table>` : ''}
+${seriesRows ? `<h2>Test series results</h2><table><thead><tr><th>Series</th><th>Papers</th><th>Marks</th><th>Score</th><th>Result</th><th>Rank</th></tr></thead><tbody>${seriesRows}</tbody></table>` : ''}
 <h2>Test results</h2>
 ${v.rows.length ? `<table><thead><tr><th>Test</th><th>Date</th><th>Type</th><th>Marks</th><th>Score</th><th>Batch avg</th><th>Rank</th><th>Result</th></tr></thead><tbody>${testRows}</tbody></table>` : '<p class="muted">No tests held yet.</p>'}
 <h2>Attendance</h2>
@@ -349,6 +412,11 @@ ${v.months.length ? `<table><thead><tr><th>Month</th><th>Class days</th><th>Pres
       ['Attendance %', view.attPct ?? '—'], ['Batch attendance %', batchAttPct ?? '—'],
       ['Class days present', `${view.presentDays} / ${classDays.length}`],
       [],
+      ['TEST SERIES'],
+      ['Series', 'Papers counted', 'Papers', 'Absent', 'Marks obtained', 'Max marks', 'Score % (absent = 0)', 'Result', 'Below the mark', 'Rank in series'],
+      ...view.series.map((x) => [x.label, x.counted, x.papers, x.absent, x.max ? x.obtained : '', x.max || '', x.aggregate ?? '',
+        x.status ?? 'Marks not entered', x.reasons.join('; '), x.rank ? `${x.rank} / ${x.of}` : '']),
+      [],
       ['TEST HISTORY'],
       ['Test', 'Date', 'Type', 'Scope', 'Marks', 'Max marks', 'Score %', 'Batch avg %', 'Rank', 'Status', 'Result'],
       ...view.rows.map((r) => [
@@ -374,6 +442,7 @@ ${v.months.length ? `<table><thead><tr><th>Month</th><th>Class days</th><th>Pres
   const downloadBatch = () => {
     if (!batch) return
     const header = ['Student ID', 'Student', 'Rank', 'Overall score % (absent = 0)', 'Result', 'Tests attempted', 'Tests absent', 'Attendance %',
+      ...series.flatMap((g) => [`${g.label} %`, `${g.label} result`, `${g.label} rank`]),
       ...scoredTests.map((t) => `${t.name} (${t.test_date}) /${t.max_marks ?? ''}`)]
     const lines = students.map((s) => {
       const ps = scoredTests.map((t) => markIdx.get(`${t.id}|${s.regno}`))
@@ -386,6 +455,7 @@ ${v.months.length ? `<table><thead><tr><th>Month</th><th>Class days</th><th>Pres
         res.aggregate ?? '', res.status ?? '',
         pcts.length, ps.filter((m) => m?.absent).length,
         classDays.length ? round1((present / classDays.length) * 100) : '',
+        ...seriesResults(s.regno).flatMap((x) => [x.aggregate ?? '', x.status ?? '', x.rank ?? '']),
         ...ps.map((m) => (m?.absent ? 'AB' : m?.marks ?? '')),
       ]
     })
@@ -506,6 +576,45 @@ ${v.months.length ? `<table><thead><tr><th>Month</th><th>Class days</th><th>Pres
                   <div className="text-xs font-medium text-amber-900/60 mt-1">Attendance{batchAttPct != null ? ` · batch ${batchAttPct}%` : ''}</div>
                 </div>
               </div>
+
+              {/* Test series results */}
+              {view.series.length > 0 && (
+                <Card className="overflow-hidden">
+                  <div className="px-5 py-4 border-b border-neutral-100">
+                    <h4 className="font-semibold text-neutral-950">Test series results</h4>
+                    <p className="text-xs text-neutral-400 mt-0.5">All papers of a series together · absent = 0 · criteria: {rule.label}. The rank in batch above counts every test held till today.</p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm min-w-[720px]">
+                      <thead><tr className="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wider">
+                        <th className="px-5 py-2">Series</th><th className="px-3 py-2">Papers</th><th className="px-3 py-2">Marks</th>
+                        <th className="px-3 py-2">Score %</th><th className="px-3 py-2">Result</th><th className="px-3 py-2">Rank</th>
+                      </tr></thead>
+                      <tbody className="divide-y divide-neutral-100">
+                        {view.series.map((x) => (
+                          <tr key={x.key} className="hover:bg-neutral-50/60 align-top">
+                            <td className="px-5 py-2 font-medium text-neutral-900">{x.label}<div className="text-xs font-normal text-neutral-400">from {fmtDate(x.first)}</div></td>
+                            <td className="px-3 py-2 tabular-nums whitespace-nowrap">
+                              {x.counted}<span className="text-neutral-400">/{x.papers}</span>
+                              {x.absent > 0 && <span className="ml-1.5 px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 text-xs font-semibold">{x.absent} AB</span>}
+                              {x.withMarks < x.papers && <div className="text-xs text-amber-600">{x.papers - x.withMarks} not entered</div>}
+                            </td>
+                            <td className="px-3 py-2 tabular-nums whitespace-nowrap">{x.max ? <>{x.obtained}<span className="text-neutral-400"> / {x.max}</span></> : '—'}</td>
+                            <td className={`px-3 py-2 font-semibold tabular-nums ${tone(x.aggregate)}`}>{x.aggregate != null ? `${x.aggregate}%` : '—'}</td>
+                            <td className="px-3 py-2">
+                              {x.status === 'Pass' ? <span className="text-xs font-semibold text-emerald-600">Pass</span>
+                                : x.status === 'Fail' ? <span className="text-xs font-semibold text-red-600">Fail</span>
+                                : <span className="text-xs text-amber-600">Marks not entered</span>}
+                              {x.reasons.length > 0 && <div className="text-xs text-neutral-500">{x.reasons.join('; ')}</div>}
+                            </td>
+                            <td className="px-3 py-2 tabular-nums">{x.rank ? <>{x.rank}<span className="text-neutral-400">/{x.of}</span></> : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              )}
 
               {/* Test history */}
               <Card className="overflow-hidden">

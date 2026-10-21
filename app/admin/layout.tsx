@@ -18,6 +18,7 @@ const NAV = [
   { label: 'Attendance', href: '/admin/attendance' },
   { label: 'Audit Report', href: '/admin/audit-report' },
   { label: 'Audit Log', href: '/admin/audit-log' },
+  { label: 'Usage Report', href: '/admin/usage' },
 ]
 
 // A syllabus-only editor sees just the Syllabus page.

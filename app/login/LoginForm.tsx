@@ -57,6 +57,8 @@ export default function LoginForm() {
       setLoading(false)
       return
     }
+    // Record the sign-in for the admin Usage Report (never blocks login).
+    await fetch('/api/track', { method: 'POST', body: JSON.stringify({ event: 'login' }) }).catch(() => {})
 
     router.push('/')
     router.refresh()

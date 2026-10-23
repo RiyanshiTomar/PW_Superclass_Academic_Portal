@@ -8,6 +8,7 @@ const NAV = [
   { label: 'Faculty Schedule View', href: '/faculty-schedule', icon: '👥' },
   { label: 'Students', href: '/branch/students', icon: '🎓' },
   { label: 'Schedule', href: '/branch/calendar', icon: '📅' },
+  { label: 'Calendar', href: '/branch/timetable', icon: '📆' },
   { label: 'Batch Scheduler', href: '/branch/batch-scheduler', icon: '🗂️' },
   { label: 'Tests', href: '/branch/tests', icon: '📝' },
   { label: 'Marks Entry', href: '/branch/marks-entry', icon: '✍️' },
@@ -29,7 +30,7 @@ export default async function BranchLayout({ children }: { children: React.React
       role="branch_head"
       fullName={appUser?.full_name ?? user.email ?? ''}
       homeHref="/branch"
-      navItems={hasRole(appUser, 'centre_admin') ? [...NAV.slice(0, 5), { label: 'Faculty', href: '/branch/faculty', icon: '🧑‍🏫' }, ...NAV.slice(5)] : NAV}
+      navItems={hasRole(appUser, 'centre_admin') ? [...NAV.slice(0, 6), { label: 'Faculty', href: '/branch/faculty', icon: '🧑‍🏫' }, ...NAV.slice(6)] : NAV}
     >
       {children}
     </PortalShell>

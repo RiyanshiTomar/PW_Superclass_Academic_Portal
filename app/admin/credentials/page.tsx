@@ -23,6 +23,7 @@ const ROLE_OPTIONS = [
   { value: 'branch_head', label: 'Branch Head' },
   { value: 'batch_manager', label: 'Batch Manager' },
   { value: 'syllabus_editor', label: 'Syllabus Editor' },
+  { value: 'head', label: 'Head (HOD)' },
 ]
 
 function genPassword() {

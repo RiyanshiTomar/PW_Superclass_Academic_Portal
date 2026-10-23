@@ -10,6 +10,7 @@ const roleRedirects: Record<string, string> = {
   batch_manager: '/batch-manager',
   syllabus_editor: '/admin/syllabus',
   progress_reviewer: '/progress-reviewer',
+  head: '/head',
 }
 
 const roleLabels: Record<string, string> = {
@@ -20,6 +21,7 @@ const roleLabels: Record<string, string> = {
   batch_manager: 'Batch Manager Portal',
   syllabus_editor: 'Syllabus Editor',
   progress_reviewer: 'Batch Progress Portal',
+  head: 'Head Dashboards',
 }
 
 const roleDescriptions: Record<string, string> = {
@@ -30,6 +32,7 @@ const roleDescriptions: Record<string, string> = {
   batch_manager: 'Monitor batches you manage and view planned lectures.',
   syllabus_editor: 'Edit the concept tags (Subjects → Chapters → Topics) only.',
   progress_reviewer: 'View batch progress across all centres.',
+  head: 'Batch pace and faculty usage across Superclass and every branch.',
 }
 
 export default async function ChooseRolePage() {

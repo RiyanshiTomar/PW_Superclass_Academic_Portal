@@ -70,7 +70,7 @@ export function hasRole(appUser: AppUser | null, role: string): boolean {
 /** Roles that are a PORTAL a user can open. Anything else in `roles` (e.g.
  *  'centre_admin') is an extra permission inside a portal and must never be
  *  offered as a portal, or the role picker would loop. */
-export const PORTAL_ROLES = ['admin', 'central_team', 'faculty', 'branch_head', 'batch_manager', 'syllabus_editor', 'progress_reviewer'] as const
+export const PORTAL_ROLES = ['admin', 'central_team', 'faculty', 'branch_head', 'batch_manager', 'syllabus_editor', 'progress_reviewer', 'head'] as const
 export function portalRoles(roles: unknown, role?: string | null): string[] {
   const all = Array.isArray(roles) && roles.length > 0 ? (roles as string[]) : role ? [role] : []
   return all.filter((r) => (PORTAL_ROLES as readonly string[]).includes(r))

@@ -57,6 +57,8 @@ export async function GET(request: Request) {
     faculty: '/faculty',
     branch_head: '/branch',
     batch_manager: '/batch-manager',
+    progress_reviewer: '/progress-reviewer',
+    head: '/head',
   }
 
   const destination = roleRedirects[activeRoles[0]] || next

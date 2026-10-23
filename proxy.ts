@@ -11,6 +11,7 @@ const PROTECTED_ROLE_PATHS: Record<string, string[]> = {
   '/branch': ['branch_head'],
   '/batch-manager': ['batch_manager'],
   '/progress-reviewer': ['progress_reviewer', 'central_team', 'admin'],
+  '/head': ['head', 'admin'],
 }
 
 const ROLE_HOME: Record<string, string> = {
@@ -21,6 +22,7 @@ const ROLE_HOME: Record<string, string> = {
   batch_manager: '/batch-manager',
   syllabus_editor: '/admin/syllabus',
   progress_reviewer: '/progress-reviewer',
+  head: '/head',
 }
 
 export async function proxy(request: NextRequest) {

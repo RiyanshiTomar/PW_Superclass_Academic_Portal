@@ -4,6 +4,7 @@ import { useState } from 'react'
 import BatchScheduler from '@/components/central/BatchScheduler'
 import BatchPlannerPanel from '@/components/central/BatchPlannerPanel'
 import BatchProgress from '@/components/central/BatchProgress'
+import ScheduleEndedAlert from '@/components/central/ScheduleEndedAlert'
 
 type View = 'scheduler' | 'planner' | 'progress'
 
@@ -56,6 +57,7 @@ export default function CentralHub() {
         </div>
       </div>
 
+      <ScheduleEndedAlert />
       {renderView()}
     </div>
   )

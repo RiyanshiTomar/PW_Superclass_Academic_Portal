@@ -7,6 +7,7 @@ import { fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import { weeklySlotActiveOn, WEEKLY_SLOT_COLS } from '@/lib/utils'
 import { passRuleFor, passMarksFor, overallResult, type ScoreLine } from '@/lib/passing'
+import { seriesOf } from '@/lib/series'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
 
 // ============================================================
@@ -29,19 +30,6 @@ const todayISO = () => { const d = new Date(); d.setHours(12, 0, 0, 0); return d
 const fmtDate = (s: string) => new Date(s + 'T12:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' })
 const fmtMonth = (ym: string) => new Date(ym + '-01T12:00:00').toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })
 const round1 = (n: number) => Math.round(n * 10) / 10
-// A test series = the papers sharing one name, e.g. every "Milestone Test - 01"
-// paper. Names are typed by hand, so spacing, "-", leading zeros, "test" and
-// the common misspellings ("Miletone", "Mlestone") don't split a series.
-const ACRONYMS = new Set(['ca', 'cuet', 'ipmat', 'clat', 'ailet', 'caf'])
-const seriesOf = (name: string) => {
-  const words = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean)
-    .map((w) => (/^(miletone|mlestone|milstone|milestne)$/.test(w) ? 'milestone' : /^\d+$/.test(w) ? String(Number(w)) : w))
-    .filter((w) => w !== 'test')
-  const key = words.join(' ')
-  const num = /^\d+$/.test(words[words.length - 1] ?? '') ? words[words.length - 1] : null
-  const fam = (num ? words.slice(0, -1) : words).map((w) => (ACRONYMS.has(w) ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)))
-  return { key, label: `${fam.join(' ')} Test${num ? ` ${num}` : ''}`.trim() }
-}
 const pctOf = (m: Mark | undefined, max: number | null) => (m && !m.absent && m.marks != null && max ? (m.marks / max) * 100 : null)
 
 export default function StudentOverview({ scope = 'central' }: { scope?: Scope }) {

@@ -7,7 +7,7 @@ import { checkWeeklyScheduleOverlap, checkClassroomScheduleOverlap } from '@/lib
 import { assignPlanner } from '@/lib/planners'
 import { realignBatchPlanner, type RealignResult } from '@/lib/realign'
 import { computeBatchPacing, type BatchPacing } from '@/lib/pacing'
-import { mergeBatch } from '@/lib/merge'
+import { mergeBatch, type BatchMergePlan } from '@/lib/merge'
 import { validateBatchDates, validateTimeRange } from '@/lib/validation'
 import { getBatchProgress, type BatchProgressData } from '@/lib/tests'
 import { DAYS, timesOverlap, daysBetween, toMinutes, addDaysToDate } from '@/lib/utils'
@@ -164,6 +164,11 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
   const [survivorId, setSurvivorId] = useState('')
   const [absorbedId, setAbsorbedId] = useState('')
   const [merging, setMerging] = useState(false)
+  const istToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())
+  const [mergeDate, setMergeDate] = useState(istToday)
+  const [mergePlan, setMergePlan] = useState<{ plan?: BatchMergePlan; error?: string } | null>(null)
+  // Batches merged into others (shown on the survivor's card).
+  const [mergedList, setMergedList] = useState<{ id: string; name: string; merged_into: string | null; merged_on: string | null }[]>([])
 
   // Batch list search + centre filter + manager filter + owner filter (to find a batch quickly).
   const [gridSearch, setGridSearch] = useState('')
@@ -244,29 +249,25 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
     return { minutes, lectures }
   }
 
-  // planner ids linked to each batch (for the same-planner merge rule)
-  const plannersByBatch = useMemo(() => {
-    const m = new Map<string, Set<string>>()
-    for (const l of links) {
-      if (!m.has(l.batch_id)) m.set(l.batch_id, new Set())
-      m.get(l.batch_id)!.add(l.planner_id)
-    }
-    return m
-  }, [links])
-
-  // Batches you can merge INTO the chosen survivor: same centre, not already
-  // merged, and sharing at least one planner with it.
+  // Batches you can merge INTO the chosen survivor: any other batch at the same
+  // centre that isn't merged already (the survivor's planner & tests carry on).
   const mergeCandidates = useMemo(() => {
     const survivor = batches.find((b) => b.id === survivorId)
     if (!survivor) return []
-    const sPl = plannersByBatch.get(survivorId) ?? new Set<string>()
-    return batches.filter((b) =>
-      b.id !== survivorId &&
-      b.status !== 'Merged' &&
-      b.centre_id === survivor.centre_id &&
-      Array.from(plannersByBatch.get(b.id) ?? new Set<string>()).some((p) => sPl.has(p))
-    )
-  }, [batches, survivorId, plannersByBatch])
+    return batches.filter((b) => b.id !== survivorId && b.status !== 'Merged' && b.centre_id === survivor.centre_id)
+  }, [batches, survivorId])
+
+  // Preview what the merge will do (counts only, nothing changes).
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!mergeOpen || !survivorId || !absorbedId || !mergeDate) { setMergePlan(null); return }
+    let cancelled = false
+    mergeBatch(supabase, { survivorId, absorbedId, mergeDate, dryRun: true })
+      .then((r) => { if (!cancelled) setMergePlan(r.ok ? { plan: r.plan } : { error: r.error }) })
+      .catch(() => { if (!cancelled) setMergePlan(null) })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mergeOpen, survivorId, absorbedId, mergeDate])
 
   // Rebuild rows from an existing schedule. A row = one (subject + faculty +
   // room + date-range) group, each day carrying its own timing. A fresh batch
@@ -339,6 +340,8 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
       }
     }
 
+    supabase.from('batches').select('id, name, merged_into, merged_on').eq('status', 'Merged')
+      .then(({ data }) => setMergedList((data ?? []) as { id: string; name: string; merged_into: string | null; merged_on: string | null }[]))
     let batchQuery = supabase.from('batches').select('*').neq('status', 'Merged').order('created_at', { ascending: false })
     if (isBatchManager && batchManagerUserId) {
       batchQuery = batchQuery.eq('batch_manager_id', batchManagerUserId)
@@ -752,14 +755,20 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
     if (!survivorId || !absorbedId) { setMessage({ type: 'error', text: 'Pick both batches.' }); return }
     const survivor = batches.find((b) => b.id === survivorId)
     const absorbed = batches.find((b) => b.id === absorbedId)
-    if (!confirm(`Merge "${absorbed?.name}" INTO "${survivor?.name}"?\n\nAll students move to "${survivor?.name}". "${absorbed?.name}" is archived — its future classes/tests are removed, past records (attendance/results) are kept. This can't be auto-undone.`)) return
+    const when = new Date(mergeDate + 'T12:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+    if (!confirm(`Merge "${absorbed?.name}" INTO "${survivor?.name}" from ${when}?\n\nFrom ${when} only ${survivor?.name}'s planner and tests run; all students move to ${survivor?.name}. Everything of ${absorbed?.name} before ${when} is kept. This can't be auto-undone.`)) return
     setMerging(true); setMessage(null)
-    const today = new Date().toISOString().split('T')[0]
-    const res = await mergeBatch(supabase, { survivorId, absorbedId, today })
+    const res = await mergeBatch(supabase, { survivorId, absorbedId, mergeDate })
     setMerging(false)
     if (!res.ok) { setMessage({ type: 'error', text: res.error ?? 'Merge failed.' }); return }
-    setMessage({ type: 'success', text: `Merged — ${res.movedStudents} student(s) moved to ${survivor?.name}. ${absorbed?.name} archived.` })
-    setMergeOpen(false); setSurvivorId(''); setAbsorbedId('')
+    const { data: { user } } = await supabase.auth.getUser()
+    const au = user ? await getAppUser(supabase, user) : null
+    await supabase.from('audit_log').insert({
+      user_id: au?.id ?? null, action: `Batch merged — ${absorbed?.name} into ${survivor?.name} from ${mergeDate}`,
+      entity_type: 'batch', entity_id: absorbedId, details: { survivor_id: survivorId, merge_date: mergeDate, ...res.plan },
+    })
+    setMessage({ type: 'success', text: `Merged — ${res.plan?.students ?? 0} student(s) moved to ${survivor?.name} from ${when}. ${absorbed?.name} archived; its records before ${when} are kept.` })
+    setMergeOpen(false); setSurvivorId(''); setAbsorbedId(''); setMergePlan(null)
     await loadData()
   }
 
@@ -772,7 +781,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
         description="Create batches and their recurring weekly schedule. Each row can run for the whole batch or a date-range segment (so the pattern can change over time). Live per-subject hours; overlaps always blocked. Optionally merge a batch with an existing planner."
         action={!showForm ? (
           <div className="flex gap-2">
-            {!isBranch && <BtnSecondary onClick={() => { setMergeOpen(true); setMessage(null); setSurvivorId(''); setAbsorbedId('') }}>Merge Batches</BtnSecondary>}
+            {!isBranch && <BtnSecondary onClick={() => { setMergeOpen(true); setMessage(null); setSurvivorId(''); setAbsorbedId(''); setMergeDate(istToday()); setMergePlan(null) }}>Merge Batches</BtnSecondary>}
             {!lockCore && <BtnPrimary onClick={() => setShowForm(true)}>+ Create Batch</BtnPrimary>}
           </div>
         ) : undefined}
@@ -1018,6 +1027,11 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
                   <div className="space-y-1.5 text-sm text-neutral-600 mb-4">
                     <p>{programs.find((p) => p.id === b.program_id)?.name}</p>
                     <p>{centres.find((c) => c.id === b.centre_id)?.name}</p>
+                    {mergedList.filter((m) => m.merged_into === b.id).map((m) => (
+                      <p key={m.id} className="text-xs text-violet-700 bg-violet-50 border border-violet-100 rounded-md px-2 py-1">
+                        🔗 <b>{m.name}</b> merged in{m.merged_on ? ` from ${new Date(m.merged_on + 'T12:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}` : ''}
+                      </p>
+                    ))}
                     <p className="text-xs">
                       <span className="text-neutral-500">Manager:</span>{' '}
                       <span className="font-medium text-purple-700">
@@ -1238,7 +1252,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-950/50 backdrop-blur-sm">
           <div className="bg-white rounded-2xl p-8 max-w-md w-full shadow-2xl border border-neutral-200">
             <h3 className="text-xl font-bold text-neutral-950 mb-1">Merge Batches</h3>
-            <p className="text-sm text-neutral-500 mb-6">Combine two batches that run the <span className="font-semibold">same planner</span> at the same centre. Students move into the batch you keep; the other is archived (its future classes &amp; tests are removed, past records stay).</p>
+            <p className="text-sm text-neutral-500 mb-6">Combine two batches at the same centre. From the merge date only the batch you keep runs — its planner and tests — and all students move into it. Everything of the other batch before that date is kept.</p>
             <div className="space-y-4 mb-4">
               <div>
                 <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Keep this batch (survivor)</label>
@@ -1250,18 +1264,34 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
               <div>
                 <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Merge in &amp; archive</label>
                 <select value={absorbedId} onChange={(e) => setAbsorbedId(e.target.value)} className={inputClass} disabled={!survivorId}>
-                  <option value="">{survivorId ? (mergeCandidates.length ? 'Select batch to merge in' : 'No same-planner batch at this centre') : 'Pick the survivor first'}</option>
-                  {mergeCandidates.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                  <option value="">{survivorId ? (mergeCandidates.length ? 'Select batch to merge in' : 'No other batch at this centre') : 'Pick the survivor first'}</option>
+                  {mergeCandidates.map((b) => <option key={b.id} value={b.id}>{b.name} · {programs.find((p) => p.id === b.program_id)?.name ?? ''}</option>)}
                 </select>
               </div>
-            </div>
-            {survivorId && absorbedId && (
-              <div className="mb-4 text-xs bg-violet-50 border border-violet-200 rounded-lg p-3 text-violet-800">
-                Students of <b>{batches.find((b) => b.id === absorbedId)?.name}</b> will move into <b>{batches.find((b) => b.id === survivorId)?.name}</b>. The merged-in batch is archived; its past attendance &amp; results are kept.
+              <div>
+                <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Merge date (from this day they study together)</label>
+                <input type="date" value={mergeDate} onChange={(e) => setMergeDate(e.target.value)} className={inputClass} />
               </div>
-            )}
+            </div>
+            {survivorId && absorbedId && (() => {
+              const sv = batches.find((b) => b.id === survivorId), ab = batches.find((b) => b.id === absorbedId)
+              const p = mergePlan?.plan
+              return (
+                <div className="mb-4 text-xs bg-violet-50 border border-violet-200 rounded-lg p-3 text-violet-900 space-y-1">
+                  {sv && ab && sv.program_id !== ab.program_id && <div className="text-amber-700 font-semibold">⚠ Different programs — {ab.name} students will follow {sv.name}&apos;s syllabus.</div>}
+                  {mergePlan?.error ? <div className="text-red-700 font-semibold">{mergePlan.error}</div> : !p ? <div>Checking…</div> : (
+                    <>
+                      <div><b>{p.students}</b> student(s) move into <b>{sv?.name}</b>.</div>
+                      <div>{ab?.name}: weekly classes stop the day before the merge date ({p.schedulesEnded + p.schedulesRemoved} schedule row(s)); <b>{p.lecturesRemoved}</b> planned lecture(s) from that date removed{p.lecturesKept ? `, ${p.lecturesKept} already conducted kept` : ''}.</div>
+                      <div>Tests from that date: <b>{p.testsRemoved}</b> removed{p.testsDetached ? `, ${p.testsDetached} shared test(s) just drop this batch` : ''}{p.testsKeptWithMarks ? `, ${p.testsKeptWithMarks} with marks kept` : ''}.</div>
+                      <div>Earlier tests: <b>{p.pastTestsShared}</b> also show in {sv?.name}&apos;s results, so old marks stay visible.</div>
+                    </>
+                  )}
+                </div>
+              )
+            })()}
             <div className="flex gap-3">
-              <BtnPrimary className="flex-1" onClick={handleMerge} disabled={merging || !survivorId || !absorbedId}>{merging ? 'Merging…' : 'Merge'}</BtnPrimary>
+              <BtnPrimary className="flex-1" onClick={handleMerge} disabled={merging || !survivorId || !absorbedId || !mergeDate || !!mergePlan?.error || !mergePlan?.plan}>{merging ? 'Merging…' : 'Merge'}</BtnPrimary>
               <BtnSecondary className="flex-1" onClick={() => setMergeOpen(false)}>Cancel</BtnSecondary>
             </div>
           </div>

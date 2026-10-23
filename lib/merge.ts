@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { fetchAll } from '@/lib/supabase/fetch-all'
 
 // ============================================================
 // Safe merge of duplicate subjects / programs. Every reference to the OLD row
@@ -67,52 +68,154 @@ export async function mergeSubject(
   return { ok: true }
 }
 
-/** Merge two batches that run the SAME planner (e.g. two small batches sat
- *  together at a centre). Students of `absorbedId` move into `survivorId`; the
- *  absorbed batch's FUTURE schedule/lectures/tests are removed (so no ghost
- *  classes on the calendar) while all PAST records (attendance, results) stay
- *  intact; the absorbed batch is archived (status 'Merged'). Non-destructive to
- *  history. Precondition: same centre + at least one shared planner. */
+const dayBefore = (d: string) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() - 1); return x.toISOString().slice(0, 10) }
+
+export type BatchMergePlan = {
+  students: number
+  schedulesEnded: number; schedulesRemoved: number
+  lecturesRemoved: number; lecturesKept: number
+  testsRemoved: number; testsDetached: number; testsKeptWithMarks: number; pastTestsShared: number
+}
+
+/** Merge batch `absorbedId` INTO `survivorId` from `mergeDate` (any two batches
+ *  at the same centre). Before the merge date nothing of the absorbed batch is
+ *  lost; from the merge date only the survivor's planner & tests run:
+ *  - every student of the absorbed batch moves to the survivor;
+ *  - its weekly schedule stops the day before the merge date;
+ *  - its lectures from the merge date are removed (ones marked conducted stay);
+ *  - its tests from the merge date are removed — a test shared with other
+ *    batches just drops this batch, and a test that already has marks stays;
+ *  - its earlier tests are shared with the survivor (test_batch_mappings), so
+ *    the moved students' old marks show in the survivor's results;
+ *  - the batch is archived: status 'Merged', merged_into, merged_on.
+ *  `dryRun` only counts what would happen. */
 export async function mergeBatch(
   supabase: SupabaseClient,
-  args: { survivorId: string; absorbedId: string; today: string }
-): Promise<{ ok: boolean; error?: string; movedStudents?: number }> {
-  const { survivorId, absorbedId, today } = args
+  args: { survivorId: string; absorbedId: string; mergeDate: string; dryRun?: boolean }
+): Promise<{ ok: boolean; error?: string; plan?: BatchMergePlan }> {
+  const { survivorId, absorbedId, mergeDate, dryRun } = args
   if (!survivorId || !absorbedId || survivorId === absorbedId) return { ok: false, error: 'Pick two different batches.' }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(mergeDate)) return { ok: false, error: 'Pick the merge date.' }
+  const needMigration = 'Run scripts/migration-batch-merge.sql in Supabase first (it adds the merge date to batches).'
 
-  const { data: batches } = await supabase.from('batches').select('id, name, centre_id, status').in('id', [survivorId, absorbedId])
+  const { data: batches, error: bErr } = await supabase.from('batches').select('id, name, centre_id, status, start_date, merged_into').in('id', [survivorId, absorbedId])
+  if (bErr) return { ok: false, error: /merged_into/.test(bErr.message) ? needMigration : bErr.message }
   const survivor = (batches ?? []).find((b) => b.id === survivorId)
   const absorbed = (batches ?? []).find((b) => b.id === absorbedId)
   if (!survivor || !absorbed) return { ok: false, error: 'Batch not found.' }
   if (survivor.centre_id !== absorbed.centre_id) return { ok: false, error: 'Both batches must be at the same centre.' }
-  if (absorbed.status === 'Merged') return { ok: false, error: 'That batch is already merged.' }
+  if (absorbed.status === 'Merged' || survivor.status === 'Merged') return { ok: false, error: 'One of these batches is already merged.' }
+  if (mergeDate < absorbed.start_date) return { ok: false, error: `The merge date can’t be before ${absorbed.name} starts.` }
 
-  // Same-planner precondition: the two batches must share at least one planner.
-  const { data: links } = await supabase.from('batch_planner_links').select('batch_id, planner_id').in('batch_id', [survivorId, absorbedId])
-  const sPlanners = new Set((links ?? []).filter((l) => l.batch_id === survivorId).map((l) => l.planner_id as string))
-  const aPlanners = (links ?? []).filter((l) => l.batch_id === absorbedId).map((l) => l.planner_id as string)
-  if (aPlanners.length === 0 || !aPlanners.some((p) => sPlanners.has(p))) {
-    return { ok: false, error: 'These batches don’t share a planner — only batches on the same planner can be merged.' }
+  // ---- What would change ----
+  const [stuRes, schRes, lecRes, mapRes, ownTestRes] = await Promise.all([
+    supabase.from('students').select('regno', { count: 'exact', head: true }).eq('batch_id', absorbedId),
+    supabase.from('batch_schedules').select('id, effective_from, effective_to').eq('batch_id', absorbedId),
+    fetchAll<{ id: string; status: string }>((a, b) => supabase.from('batch_planners').select('id, status').eq('batch_id', absorbedId).gte('planned_date', mergeDate).order('id').range(a, b)),
+    supabase.from('test_batch_mappings').select('test_id').eq('batch_id', absorbedId),
+    supabase.from('test_schedules').select('id').eq('batch_id', absorbedId),
+  ])
+  const firstErr = schRes.error?.message ?? lecRes.error ?? mapRes.error?.message ?? ownTestRes.error?.message
+  if (firstErr) return { ok: false, error: firstErr }
+
+  // Schedule rows that start on/after the merge date go; rows running across
+  // it end the day before.
+  const lastDay = dayBefore(mergeDate)
+  const sched = (schRes.data ?? []) as { id: string; effective_from: string | null; effective_to: string | null }[]
+  const schedRemove = sched.filter((r) => r.effective_from && r.effective_from >= mergeDate).map((r) => r.id)
+  const schedEnd = sched.filter((r) => !(r.effective_from && r.effective_from >= mergeDate) && (!r.effective_to || r.effective_to >= mergeDate)).map((r) => r.id)
+
+  const lecRemove = lecRes.data.filter((l) => l.status !== 'conducted').map((l) => l.id)
+
+  // Every test this batch sits (its own or shared with other batches).
+  const testIds = Array.from(new Set([...(mapRes.data ?? []).map((r) => r.test_id as string), ...(ownTestRes.data ?? []).map((r) => r.id as string)]))
+  const tests: { id: string; batch_id: string; test_date: string }[] = []
+  const allMaps: { test_id: string; batch_id: string }[] = []
+  const withMarks = new Set<string>()
+  for (let i = 0; i < testIds.length; i += 150) {
+    const ids = testIds.slice(i, i + 150)
+    const [t, m, r] = await Promise.all([
+      supabase.from('test_schedules').select('id, batch_id, test_date').in('id', ids),
+      supabase.from('test_batch_mappings').select('test_id, batch_id').in('test_id', ids),
+      fetchAll<{ test_id: string }>((a, b) => supabase.from('test_results').select('test_id').in('test_id', ids).or('absent.eq.true,marks.not.is.null').order('test_id').range(a, b)),
+    ])
+    const e = t.error?.message ?? m.error?.message ?? r.error
+    if (e) return { ok: false, error: e }
+    tests.push(...((t.data ?? []) as typeof tests))
+    allMaps.push(...((m.data ?? []) as typeof allMaps))
+    for (const x of r.data) withMarks.add(x.test_id)
+  }
+  const batchesOf = (id: string) => new Set(allMaps.filter((m) => m.test_id === id).map((m) => m.batch_id))
+  const othersOf = (id: string) => Array.from(batchesOf(id)).filter((b) => b !== absorbedId)
+
+  const later = tests.filter((t) => t.test_date >= mergeDate && !withMarks.has(t.id))
+  const detach = later.filter((t) => othersOf(t.id).length > 0)
+  const remove = later.filter((t) => othersOf(t.id).length === 0)
+  const keptWithMarks = tests.filter((t) => t.test_date >= mergeDate && withMarks.has(t.id)).length
+  const share = tests.filter((t) => (t.test_date < mergeDate || withMarks.has(t.id)) && !batchesOf(t.id).has(survivorId))
+
+  const plan: BatchMergePlan = {
+    students: stuRes.count ?? 0,
+    schedulesEnded: schedEnd.length, schedulesRemoved: schedRemove.length,
+    lecturesRemoved: lecRemove.length, lecturesKept: lecRes.data.length - lecRemove.length,
+    testsRemoved: remove.length, testsDetached: detach.length, testsKeptWithMarks: keptWithMarks, pastTestsShared: share.length,
+  }
+  if (dryRun) return { ok: true, plan }
+
+  // ---- Apply ---- (merge marked first, so a half-finished run is visible)
+  const { error: mErr } = await supabase.from('batches').update({ merged_into: survivorId, merged_on: mergeDate }).eq('id', absorbedId)
+  if (mErr) return { ok: false, error: /merged_into|merged_on/.test(mErr.message) ? needMigration : mErr.message }
+
+  // 1. Earlier tests also count for the survivor (old marks stay visible).
+  const shareRows = share.flatMap((t) => [
+    ...(batchesOf(t.id).has(absorbedId) ? [] : [{ test_id: t.id, batch_id: absorbedId }]),
+    { test_id: t.id, batch_id: survivorId },
+  ])
+  for (let i = 0; i < shareRows.length; i += 200) {
+    const { error } = await supabase.from('test_batch_mappings').upsert(shareRows.slice(i, i + 200), { onConflict: 'test_id,batch_id', ignoreDuplicates: true })
+    if (error) return { ok: false, error: `tests: ${error.message}` }
   }
 
-  // 1. Move students into the survivor.
-  const { data: moved, error: mErr } = await supabase.from('students').update({ batch_id: survivorId }).eq('batch_id', absorbedId).select('id')
-  if (mErr) return { ok: false, error: `students: ${mErr.message}` }
+  // 2. Later tests: a shared one just drops this batch; its own ones go.
+  for (const t of detach) {
+    if (t.batch_id === absorbedId) {
+      const others = othersOf(t.id)
+      const { error } = await supabase.from('test_schedules').update({ batch_id: others.includes(survivorId) ? survivorId : others[0] }).eq('id', t.id)
+      if (error) return { ok: false, error: `tests: ${error.message}` }
+    }
+    const { error } = await supabase.from('test_batch_mappings').delete().eq('test_id', t.id).eq('batch_id', absorbedId)
+    if (error) return { ok: false, error: `tests: ${error.message}` }
+  }
+  for (let i = 0; i < remove.length; i += 150) {
+    const { error } = await supabase.from('test_schedules').delete().in('id', remove.slice(i, i + 150).map((t) => t.id))
+    if (error) return { ok: false, error: `tests: ${error.message}` }
+  }
 
-  // 2. Clear the absorbed batch's FUTURE footprint so nothing ghosts the calendar.
-  //    (Recurring weekly rows carry no history, so all of them go.)
-  const delSched = await supabase.from('batch_schedules').delete().eq('batch_id', absorbedId)
-  if (delSched.error) return { ok: false, error: `schedule: ${delSched.error.message}` }
-  const delLec = await supabase.from('batch_planners').delete().eq('batch_id', absorbedId).gte('planned_date', today)
-  if (delLec.error) return { ok: false, error: `lectures: ${delLec.error.message}` }
-  const delTest = await supabase.from('test_schedules').delete().eq('batch_id', absorbedId).gte('test_date', today)
-  if (delTest.error) return { ok: false, error: `tests: ${delTest.error.message}` }
+  // 3. Lectures from the merge date (the survivor's planner runs from then).
+  for (let i = 0; i < lecRemove.length; i += 150) {
+    const { error } = await supabase.from('batch_planners').delete().in('id', lecRemove.slice(i, i + 150))
+    if (error) return { ok: false, error: `lectures: ${error.message}` }
+  }
 
-  // 3. Archive the absorbed batch (past records stay attached to it).
+  // 4. Weekly schedule stops the day before the merge date.
+  if (schedRemove.length) {
+    const { error } = await supabase.from('batch_schedules').delete().in('id', schedRemove)
+    if (error) return { ok: false, error: `schedule: ${error.message}` }
+  }
+  if (schedEnd.length) {
+    const { error } = await supabase.from('batch_schedules').update({ effective_to: lastDay }).in('id', schedEnd)
+    if (error) return { ok: false, error: `schedule: ${error.message}` }
+  }
+
+  // 5. Students join the survivor.
+  const { error: sErr } = await supabase.from('students').update({ batch_id: survivorId }).eq('batch_id', absorbedId)
+  if (sErr) return { ok: false, error: `students: ${sErr.message}` }
+
+  // 6. Archive.
   const { error: aErr } = await supabase.from('batches').update({ status: 'Merged' }).eq('id', absorbedId)
   if (aErr) return { ok: false, error: aErr.message }
 
-  return { ok: true, movedStudents: moved?.length ?? 0 }
+  return { ok: true, plan }
 }
 
 /** Merge program `fromId` into `toId`: move batches, merge/absorb subjects,

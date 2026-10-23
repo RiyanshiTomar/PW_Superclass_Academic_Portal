@@ -32,7 +32,7 @@ const PALETTE = [
 ]
 const PX_PER_MIN = 1
 
-export default function CentreTimetable({ scope = 'central' }: { scope?: 'central' | 'branch' }) {
+export default function CentreTimetable({ scope = 'central' }: { scope?: 'central' | 'branch' | 'batch-manager' }) {
   const supabase = createClient()
   const [centres, setCentres] = useState<Centre[]>([])
   const [classrooms, setClassrooms] = useState<Classroom[]>([])
@@ -51,12 +51,17 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
         supabase.from('classrooms').select('id, name, room_no, centre_id, is_active').order('room_no'),
       ])
       let centreList = (cRes.data ?? []) as Centre[]
-      // Branch head only sees their own centre(s).
-      if (scope === 'branch') {
+      // Branch head / batch manager only see their own centre(s) — the whole
+      // centre, every room, view only.
+      if (scope !== 'central') {
         const { data: { user } } = await supabase.auth.getUser()
         const au = user ? await getAppUser(supabase, user) : null
         const ids = new Set(getUserCentreIds(au))
-        if (au) centreList.filter((c) => c.branch_head_id === au.id).forEach((c) => ids.add(c.id))
+        if (au && scope === 'branch') centreList.filter((c) => c.branch_head_id === au.id).forEach((c) => ids.add(c.id))
+        if (au && scope === 'batch-manager') {
+          const { data: own } = await supabase.from('batches').select('centre_id').eq('batch_manager_id', au.id)
+          for (const b of own ?? []) if (b.centre_id) ids.add(b.centre_id as string)
+        }
         centreList = centreList.filter((c) => ids.has(c.id))
       }
       setCentres(centreList)

@@ -333,14 +333,12 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
       <td class="n">${r.status === 'scored' ? `${esc(r.m!.marks)}${r.t.max_marks ? ` / ${esc(r.t.max_marks)}` : ''}` : '—'}</td>
       <td class="n">${r.p != null ? `${round1(r.p)}%` : '—'}</td>
       <td class="n">${r.avg != null ? `${r.avg}%` : '—'}</td>
-      <td class="n">${r.rank ? `${r.rank}/${r.of}` : '—'}</td>
       <td>${resultOf(r)}</td></tr>`).join('')
     const seriesRows = v.series.map((x) => `<tr>
       <td>${esc(x.label)}</td><td class="n">${x.counted} / ${x.papers}${x.absent ? ` <span class="ab">(${x.absent} AB)</span>` : ''}</td>
       <td class="n">${x.max ? `${esc(x.obtained)} / ${esc(x.max)}` : '—'}</td>
       <td class="n">${x.aggregate != null ? `${x.aggregate}%` : '—'}</td>
-      <td>${x.status ? (x.status === 'Pass' ? '<span class="ok">Pass</span>' : '<span class="ab">Fail</span>') : '<span class="na">Marks not entered</span>'}${x.reasons.length ? `<div class="muted">${esc(x.reasons.join('; '))}</div>` : ''}</td>
-      <td class="n">${x.rank ? `${x.rank}/${x.of}` : '—'}</td></tr>`).join('')
+      <td>${x.status ? (x.status === 'Pass' ? '<span class="ok">Pass</span>' : '<span class="ab">Fail</span>') : '<span class="na">Marks not entered</span>'}${x.reasons.length ? `<div class="muted">${esc(x.reasons.join('; '))}</div>` : ''}</td></tr>`).join('')
     const monthRows = v.months.map(([m, x]) => `<tr><td>${esc(fmtMonth(m))}</td><td class="n">${x.days}</td><td class="n">${x.present}</td><td class="n">${x.days - x.present}</td><td class="n">${round1((x.present / x.days) * 100)}%</td></tr>`).join('')
     const title = `Marksheet - ${s.student_name || s.regno} - ${s.regno}`
     w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
@@ -351,7 +349,7 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
   h1 { font-size: 20px; margin: 0; } h2 { font-size: 13px; margin: 18px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: #444; }
   .head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #111; padding-bottom: 8px; }
   .muted { color: #666; } .info { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 24px; margin-top: 10px; }
-  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+  .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
   .kpi { border: 1px solid #ccc; border-radius: 6px; padding: 8px; } .kpi b { display: block; font-size: 17px; }
   table { width: 100%; border-collapse: collapse; } th, td { border: 1px solid #ccc; padding: 5px 6px; text-align: left; }
   th { background: #f2f2f2; font-size: 11px; } td.n { text-align: right; white-space: nowrap; }
@@ -366,19 +364,18 @@ export default function StudentOverview({ scope = 'central' }: { scope?: Scope }
   <div><b>Batch:</b> ${esc(batch.name)}</div><div><b>Batch dates:</b> ${esc(fmtDate(batch.start_date))} – ${esc(fmtDate(batch.end_date))}</div>
 </div>
 <div class="kpis">
-  <div class="kpi"><span class="muted">Rank in batch</span><b>${v.rank ? `${v.rank} / ${overallRank.list.length}` : '—'}</b></div>
   <div class="kpi"><span class="muted">Overall score</span><b>${v.result.aggregate != null ? `${v.result.aggregate}%` : '—'}</b><span class="muted">Batch ${overallRank.batchAvg ?? '—'}% · absent = 0</span></div>
   <div class="kpi"><span class="muted">Tests attempted</span><b>${v.attempted} / ${v.dueTests}</b><span class="muted">${v.absentTests} absent</span></div>
   <div class="kpi"><span class="muted">Attendance</span><b>${v.attPct != null ? `${v.attPct}%` : '—'}</b><span class="muted">${v.presentDays} / ${classDays.length} days</span></div>
 </div>
 <div style="margin-top:12px;padding:8px 10px;border:1px solid #ccc;border-radius:6px"><b>Overall result: ${v.result.status ? (v.result.status === 'Pass' ? '<span class="ok">PASS</span>' : '<span class="ab">FAIL</span>') : '—'}</b> <span class="muted">· Criteria: ${esc(rule.label)}</span>${v.result.reasons.length ? `<div class="muted" style="margin-top:3px">Below the mark: ${esc(v.result.reasons.join('; '))}</div>` : ''}</div>
 ${subjRows ? `<h2>Subject-wise</h2><table><thead><tr><th>Subject</th><th>Score (absent = 0)</th></tr></thead><tbody>${subjRows}</tbody></table>` : ''}
-${seriesRows ? `<h2>Test series results</h2><table><thead><tr><th>Series</th><th>Papers</th><th>Marks</th><th>Score</th><th>Result</th><th>Rank</th></tr></thead><tbody>${seriesRows}</tbody></table>` : ''}
+${seriesRows ? `<h2>Test series results</h2><table><thead><tr><th>Series</th><th>Papers</th><th>Marks</th><th>Score</th><th>Result</th></tr></thead><tbody>${seriesRows}</tbody></table>` : ''}
 <h2>Test results</h2>
-${v.rows.length ? `<table><thead><tr><th>Test</th><th>Date</th><th>Type</th><th>Marks</th><th>Score</th><th>Batch avg</th><th>Rank</th><th>Result</th></tr></thead><tbody>${testRows}</tbody></table>` : '<p class="muted">No tests held yet.</p>'}
+${v.rows.length ? `<table><thead><tr><th>Test</th><th>Date</th><th>Type</th><th>Marks</th><th>Score</th><th>Batch avg</th><th>Result</th></tr></thead><tbody>${testRows}</tbody></table>` : '<p class="muted">No tests held yet.</p>'}
 <h2>Attendance</h2>
 ${v.months.length ? `<table><thead><tr><th>Month</th><th>Class days</th><th>Present</th><th>Absent</th><th>Attendance</th></tr></thead><tbody>${monthRows}</tbody></table>` : '<p class="muted">No attendance recorded yet.</p>'}
-<div class="foot">Generated on ${esc(new Date().toLocaleString('en-IN'))} · Includes tests held till today only. Overall score and rank count an absent test as 0.</div>
+<div class="foot">Generated on ${esc(new Date().toLocaleString('en-IN'))} · Includes tests held till today only. Overall score counts an absent test as 0.</div>
 <script>window.onload = () => setTimeout(() => window.print(), 300)</script>
 </body></html>`)
     w.document.close()

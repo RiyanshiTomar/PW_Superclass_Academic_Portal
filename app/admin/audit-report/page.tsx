@@ -4,7 +4,7 @@ import { useEffect, useState, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 import { fetchAll } from '@/lib/supabase/fetch-all'
-import { weeklySlotActiveOn, WEEKLY_SLOT_COLS } from '@/lib/utils'
+import { toMinutes, weeklySlotActiveOn } from '@/lib/utils'
 import { matchClasses } from '@/lib/audit-match'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ type PlannerAuditRow = {
   batch_id: string; subject_id: string | null; is_buffer: boolean; status: string
   batches: unknown; subjects: unknown; app_users: unknown; lecture_audits: unknown
 }
-type SlotAuditRow = { id: string; batch_id: string; subject_id: string | null; day_of_week: number; start_time: string; effective_from: string | null; effective_to: string | null; batches: unknown }
+type SlotAuditRow = { id: string; batch_id: string; subject_id: string | null; faculty_id: string | null; day_of_week: number; start_time: string; end_time: string; effective_from: string | null; effective_to: string | null; batches: unknown; subjects: unknown; app_users: unknown }
 
 export default function AuditReportPage() {
   const supabase = createClient()
@@ -165,21 +165,41 @@ export default function AuditReportPage() {
       .order('id')
       .range(from, to) as unknown as PromiseLike<{ data: PlannerAuditRow[] | null; error: { message: string } | null }>),
       fetchAll<SlotAuditRow>((from, to) => supabase.from('batch_schedules')
-        .select(`id, batch_id, subject_id, day_of_week, start_time, ${WEEKLY_SLOT_COLS}`)
+        .select(`id, batch_id, subject_id, faculty_id, day_of_week, start_time, end_time, effective_from, effective_to,
+          batches(id, name, start_date, end_date, status, batch_owner_id, centre_id, centres(id, name),
+            app_users!batches_batch_owner_id_fkey(id, full_name)),
+          subjects(name), app_users(full_name)`)
         .order('id').range(from, to) as unknown as PromiseLike<{ data: SlotAuditRow[] | null; error: { message: string } | null }>),
     ])
     const error = pRes.error ?? sRes.error
     if (error) { setMessage({ type: 'error', text: error }); setLoading(false); return }
 
-    // Only lectures that were real classes: a running timetable slot that day
-    // (same rule as Daily Lecture Audit and the calendar).
+    // Every class = every running timetable slot that day, matched to its
+    // planner lecture (same rule as Daily Lecture Audit and the calendar). A
+    // class whose planner row is a buffer — or that has no planner row — is
+    // still a class to audit; it shows as "not in planner".
     const byDate = new Map<string, PlannerAuditRow[]>()
     for (const p of pRes.data) byDate.set(p.planned_date, [...(byDate.get(p.planned_date) ?? []), p])
     const planners: PlannerAuditRow[] = []
-    for (const [date, lectures] of byDate) {
-      const dow = new Date(date + 'T12:00:00').getDay()
+    // Walk EVERY date of the range (a day can have classes with no planner row at all).
+    const cap = filterTo < new Date().toISOString().slice(0, 10) ? filterTo : new Date().toISOString().slice(0, 10)
+    for (const day = new Date(filterFrom + 'T12:00:00'); day.toISOString().slice(0, 10) <= cap; day.setDate(day.getDate() + 1)) {
+      const date = day.toISOString().slice(0, 10)
+      const lectures = byDate.get(date) ?? []
+      const dow = day.getDay()
       const slots = sRes.data.filter((x) => x.day_of_week === dow && weeklySlotActiveOn(x, date))
-      for (const pick of matchClasses(slots, lectures)) if (pick.kind === 'planned' && pick.p) planners.push(pick.p)
+      for (const pick of matchClasses(slots, lectures)) {
+        if (pick.kind === 'planned' && pick.p) { planners.push(pick.p); continue }
+        const sl = pick.slot
+        planners.push({
+          ...(pick.p ?? { id: `slot:${sl.id}:${date}`, lecture_audits: null, is_buffer: true, status: 'planned' }),
+          batch_id: sl.batch_id, subject_id: sl.subject_id, faculty_id: pick.p?.faculty_id ?? sl.faculty_id,
+          planned_date: date, start_time: sl.start_time,
+          duration_minutes: toMinutes(sl.end_time.slice(0, 5)) - toMinutes(sl.start_time.slice(0, 5)),
+          chapter: '', topic_name: 'Not in planner (buffer class)',
+          batches: sl.batches, subjects: sl.subjects, app_users: pick.p?.app_users ?? sl.app_users,
+        } as PlannerAuditRow)
+      }
     }
     planners.sort((a, b) => a.planned_date.localeCompare(b.planned_date) || (a.start_time ?? '').localeCompare(b.start_time ?? ''))
 

@@ -7,11 +7,12 @@ import { fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import { DAYS_FULL } from '@/lib/utils'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
+import { classLectureIds } from '@/lib/audit-match'
 
 type Batch = { id: string; name: string; centre_id: string; batch_manager_id: string | null }
 type Centre = { id: string; name: string; branch_head_id: string | null }
 type Sched = { day_of_week: number; start_time: string; end_time: string }
-type PlanRow = { planned_date: string; start_time: string | null; duration_minutes: number }
+type PlanRow = { id: string; planned_date: string; start_time: string | null; duration_minutes: number }
 type RosterStudent = { regno: string; name: string }
 type AttRow = { regno: string; attendance_date: string; first_punch_in: string | null; last_punch_out: string | null }
 type Instance = { regno: string; name: string; date: string; at?: string }
@@ -152,11 +153,13 @@ export default function AttendancePanel({ scope = 'central' }: { scope?: Scope }
         ? fetchAllIn<AttRow>(regnos, (chunk, from, to) => supabase.from('attendance').select('regno, attendance_date, first_punch_in, last_punch_out').in('regno', chunk).gte('attendance_date', since).order('regno').order('attendance_date').range(from, to))
         : Promise.resolve({ data: [] as AttRow[] }),
       supabase.from('batch_schedules').select('day_of_week, start_time, end_time').eq('batch_id', portalBatchId),
-      supabase.from('batch_planners').select('planned_date, start_time, duration_minutes').eq('batch_id', portalBatchId).eq('is_buffer', false).neq('status', 'cancelled').gte('planned_date', since),
+      supabase.from('batch_planners').select('id, planned_date, start_time, duration_minutes').eq('batch_id', portalBatchId).eq('is_buffer', false).neq('status', 'cancelled').gte('planned_date', since),
     ])
     setRows((attRes.data ?? []) as AttRow[])
     setScheds((schRes.data ?? []) as Sched[])
-    setPlanRows((planRes.data ?? []) as PlanRow[])
+    // Only real classes set a day's class time (lib/audit-match).
+    const classIds = await classLectureIds(supabase, [portalBatchId], since, iso(todayNoon()))
+    setPlanRows(((planRes.data ?? []) as PlanRow[]).filter((p) => classIds.has(p.id)))
     setLoadingBatch(false)
   }
 

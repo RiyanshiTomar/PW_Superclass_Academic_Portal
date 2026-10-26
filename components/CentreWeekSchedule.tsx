@@ -6,6 +6,7 @@ import { getAppUser, getUserCentreIds } from '@/lib/auth'
 import { formatTime, stageBadgeClass, addDaysToDate } from '@/lib/utils'
 import { Alert, Card, PageHeader } from '@/components/PortalShell'
 import { fetchAllIn } from '@/lib/supabase/fetch-all'
+import { classLectureIds } from '@/lib/audit-match'
 
 type Centre = { id: string; name: string; branch_head_id: string | null }
 type Batch = { id: string; name: string; centre_id: string }
@@ -91,7 +92,11 @@ export default function CentreWeekSchedule({ scope = 'branch' }: { scope?: 'cent
         .range(from, to) as unknown as PromiseLike<{ data: Lecture[] | null; error: { message: string } | null }>)
       if (cancelled) return
       if (error) setErr(error)
-      setLectures([...lRes].sort((a, b) => a.planned_date.localeCompare(b.planned_date)))
+      // Only real classes (a lecture on a day its batch's timetable doesn't run isn't one).
+      const dates = lRes.map((l) => l.planned_date).filter(Boolean).sort()
+      const classIds = dates.length ? await classLectureIds(supabase, bs.map((b) => b.id), dates[0], dates[dates.length - 1]) : new Set<string>()
+      if (cancelled) return
+      setLectures(lRes.filter((l) => classIds.has(l.id)).sort((a, b) => a.planned_date.localeCompare(b.planned_date)))
       setLoadingWeeks(false)
     })()
     return () => { cancelled = true }

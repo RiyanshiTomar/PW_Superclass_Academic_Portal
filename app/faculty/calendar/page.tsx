@@ -9,6 +9,7 @@ import { getBatchFreeWindows, type FreeWindow } from '@/lib/tests'
 import { notifyRoles } from '@/lib/notifications'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 import { fetchAll } from '@/lib/supabase/fetch-all'
+import { classLectureIds } from '@/lib/audit-match'
 
 type Lecture = {
   id: string
@@ -92,7 +93,12 @@ export default function FacultyCalendarPage() {
         .eq('requested_by', appUser.id)
         .order('created_at', { ascending: true }),
     ])
-    setLectures((lecRes.data ?? []) as unknown as Lecture[])
+    // Only real classes: a lecture on a day its batch's timetable doesn't run
+    // is not a class (central must re-place it) — keep it off the calendar.
+    const lecs = (lecRes.data ?? []) as unknown as Lecture[]
+    const dates = lecs.map((l) => l.planned_date).filter(Boolean).sort()
+    const classIds = dates.length ? await classLectureIds(supabase, Array.from(new Set(lecs.map((l) => l.batch_id))), dates[0], dates[dates.length - 1]) : new Set<string>()
+    setLectures(lecs.filter((l) => classIds.has(l.id)))
     const map: Record<string, ReqInfo> = {}
     for (const r of (reqRes.data ?? []) as { planner_id: string | null; status: string; request_type: string }[]) {
       if (r.planner_id) map[r.planner_id] = { status: r.status, type: r.request_type } // latest wins (asc order)

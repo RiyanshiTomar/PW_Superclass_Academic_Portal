@@ -7,8 +7,10 @@ import { minutesToHours } from '@/lib/utils'
 import { Card, PageHeader } from '@/components/PortalShell'
 import CountUp from '@/components/CountUp'
 import { fetchAll } from '@/lib/supabase/fetch-all'
+import { classLectureIds } from '@/lib/audit-match'
 
 type Row = {
+  id: string
   batch_id: string
   planned_date: string
   duration_minutes: number
@@ -48,7 +50,7 @@ export default function FacultyHome() {
       const today = new Date().toISOString().split('T')[0]
       const { data } = await fetchAll<Record<string, unknown>>((from, to) => supabase
         .from('batch_planners')
-        .select('batch_id, planned_date, duration_minutes, stage, batches(name, centres(name))')
+        .select('id, batch_id, planned_date, duration_minutes, stage, batches(name, centres(name))')
         .eq('faculty_id', appUser.id)
         .eq('is_buffer', false)
         .neq('status', 'cancelled')
@@ -56,8 +58,13 @@ export default function FacultyHome() {
         .order('planned_date', { ascending: true }).order('id')
         .range(from, to))
 
+      // A past lecture counts as taught only if it was a real class (its batch's
+      // timetable ran that day); otherwise it is still to be taught.
+      const rows = (data ?? []) as unknown as Row[]
+      const past = rows.filter((r) => r.planned_date < today).map((r) => r.planned_date).sort()
+      const classIds = past.length ? await classLectureIds(supabase, Array.from(new Set(rows.map((r) => r.batch_id))), past[0], past[past.length - 1]) : new Set<string>()
       const byBatch = new Map<string, BatchStat>()
-      for (const r of (data ?? []) as unknown as Row[]) {
+      for (const r of rows) {
         const batch = one(r.batches)
         const centre = one(batch?.centres)
         if (!byBatch.has(r.batch_id)) {
@@ -73,7 +80,7 @@ export default function FacultyHome() {
         }
         const s = byBatch.get(r.batch_id)!
         s.total += 1
-        if (r.planned_date < today) {
+        if (r.planned_date < today && classIds.has(r.id)) {
           s.completed += 1
           s.completedMinutes += r.duration_minutes
         } else {

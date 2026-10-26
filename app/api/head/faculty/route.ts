@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { fetchAll } from '@/lib/supabase/fetch-all'
 import { headCaller, istToday, serviceDb } from '@/lib/head'
 import { toMinutes, weeklySlotActiveOn, WEEKLY_SLOT_COLS } from '@/lib/utils'
+import { classLectureIds } from '@/lib/audit-match'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -27,8 +28,8 @@ export async function GET(request: Request) {
     db.from('centres').select('id, name'),
     db.from('batches').select('id, name, centre_id, status'),
     db.from('subjects').select('id, name'),
-    fetchAll<{ batch_id: string; faculty_id: string | null; subject_id: string | null; planned_date: string; duration_minutes: number | null }>((a, b) =>
-      db.from('batch_planners').select('batch_id, faculty_id, subject_id, planned_date, duration_minutes').eq('is_buffer', false).neq('status', 'cancelled')
+    fetchAll<{ id: string; batch_id: string; faculty_id: string | null; subject_id: string | null; planned_date: string; duration_minutes: number | null }>((a, b) =>
+      db.from('batch_planners').select('id, batch_id, faculty_id, subject_id, planned_date, duration_minutes').eq('is_buffer', false).neq('status', 'cancelled')
         .gte('planned_date', from).lte('planned_date', to).not('faculty_id', 'is', null).order('id').range(a, b)),
     fetchAll<{ batch_id: string; faculty_id: string | null; subject_id: string | null; start_time: string; end_time: string; effective_from: string | null; effective_to: string | null; batches: unknown }>((a, b) =>
       db.from('batch_schedules').select(`batch_id, faculty_id, subject_id, start_time, end_time, ${WEEKLY_SLOT_COLS}`).order('id').range(a, b)),
@@ -43,7 +44,11 @@ export async function GET(request: Request) {
   // taught (till today) and still to come.
   const key = (f: string, b: string, s: string | null) => `${f}|${b}|${s ?? ''}`
   const agg = new Map<string, { facultyId: string; batchId: string; subjectId: string | null; lectures: number; taughtMin: number; upcomingMin: number; upcomingLectures: number }>()
+  // Only real classes count (a lecture on a day its batch's timetable doesn't
+  // run was never a class) — same rule as the audit and the calendar.
+  const classIds = await classLectureIds(db, Array.from(new Set(lRes.data.map((l) => l.batch_id))), from, to)
   for (const l of lRes.data) {
+    if (!classIds.has(l.id)) continue
     const k = key(l.faculty_id as string, l.batch_id, l.subject_id)
     const cur = agg.get(k) ?? { facultyId: l.faculty_id as string, batchId: l.batch_id, subjectId: l.subject_id, lectures: 0, taughtMin: 0, upcomingMin: 0, upcomingLectures: 0 }
     const min = l.duration_minutes ?? 0

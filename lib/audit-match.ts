@@ -1,4 +1,6 @@
-import { toMinutes } from '@/lib/utils'
+import type { SupabaseClient } from '@supabase/supabase-js'
+import { toMinutes, weeklySlotActiveOn, WEEKLY_SLOT_COLS } from '@/lib/utils'
+import { fetchAllIn } from '@/lib/supabase/fetch-all'
 
 // ============================================================
 // Which lectures were actually CLASSES on a date. A class happens only where
@@ -32,4 +34,42 @@ export function matchClasses<S extends SlotLike, P extends LectureLike>(slots: S
     else picks.push({ kind: p ? 'buffer' : 'unplanned', p, slot: s })
   }
   return picks
+}
+
+type ClassSlot = SlotLike & { day_of_week: number; effective_from: string | null; effective_to: string | null; batches?: unknown }
+type DatedLecture = LectureLike & { planned_date: string | null }
+
+/** Ids of the lectures that are real classes on their own date, from the
+ *  given planner rows (include buffers + cancel markers of those batches/dates
+ *  so they compete for slots correctly) and the batches' weekly slots
+ *  (selected with day_of_week + WEEKLY_SLOT_COLS). */
+export function classIdsFromRows(lectures: DatedLecture[], slots: ClassSlot[]): Set<string> {
+  const ids = new Set<string>()
+  const byDate = new Map<string, DatedLecture[]>()
+  for (const l of lectures) if (l.planned_date) byDate.set(l.planned_date, [...(byDate.get(l.planned_date) ?? []), l])
+  const slotsByDow = new Map<number, ClassSlot[]>()
+  for (const s of slots) slotsByDow.set(s.day_of_week, [...(slotsByDow.get(s.day_of_week) ?? []), s])
+  for (const [date, ls] of byDate) {
+    const batches = new Set(ls.map((l) => l.batch_id))
+    const dow = new Date(date + 'T12:00:00').getDay()
+    const running = (slotsByDow.get(dow) ?? []).filter((s) => batches.has(s.batch_id) && weeklySlotActiveOn(s, date))
+    for (const pick of matchClasses(running, ls)) if (pick.kind === 'planned' && pick.p) ids.add(pick.p.id)
+  }
+  return ids
+}
+
+/** Ids of the planner lectures of these batches, dated from..to, that are real
+ *  classes (sit on a running timetable slot). Use it wherever a lecture is
+ *  treated as a class: clash checks, hours taught, calendars, attendance. */
+export async function classLectureIds(supabase: SupabaseClient, batchIds: string[], from: string, to: string): Promise<Set<string>> {
+  if (!batchIds.length) return new Set()
+  const [l, s] = await Promise.all([
+    fetchAllIn<DatedLecture>(batchIds, (chunk, a, b) => supabase.from('batch_planners')
+      .select('id, batch_id, subject_id, start_time, planned_date, is_buffer, status')
+      .in('batch_id', chunk).gte('planned_date', from).lte('planned_date', to).order('id').range(a, b)),
+    fetchAllIn<ClassSlot>(batchIds, (chunk, a, b) => supabase.from('batch_schedules')
+      .select(`batch_id, subject_id, day_of_week, start_time, ${WEEKLY_SLOT_COLS}`)
+      .in('batch_id', chunk).order('id').range(a, b) as unknown as PromiseLike<{ data: ClassSlot[] | null; error: { message: string } | null }>),
+  ])
+  return classIdsFromRows(l.data, s.data)
 }

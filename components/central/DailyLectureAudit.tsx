@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 import { toMinutes, weeklySlotActiveOn } from '@/lib/utils'
-import { matchClasses } from '@/lib/audit-match'
+import { matchClasses, classLectureIds } from '@/lib/audit-match'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -270,7 +270,7 @@ export default function DailyLectureAudit() {
       const pastQuery = (from: number, to: number, chunk?: string[]) => {
         let q = supabase
           .from('batch_planners')
-          .select('id')
+          .select('id, batch_id')
           .eq('is_buffer', false)
           .neq('status', 'cancelled')
           .gte('planned_date', START_DATE)   // from audit start
@@ -278,9 +278,13 @@ export default function DailyLectureAudit() {
         if (chunk) q = q.in('batch_id', chunk)
         return q.order('id').range(from, to)
       }
-      const { data: pastPlanners } = scoped
-        ? await fetchAllIn<{ id: string }>(scoped, (chunk, from, to) => pastQuery(from, to, chunk))
-        : await fetchAll<{ id: string }>((from, to) => pastQuery(from, to))
+      const { data: pastRaw } = scoped
+        ? await fetchAllIn<{ id: string; batch_id: string }>(scoped, (chunk, from, to) => pastQuery(from, to, chunk))
+        : await fetchAll<{ id: string; batch_id: string }>((from, to) => pastQuery(from, to))
+      // Only lectures that were real classes can be pending an audit.
+      const prev = new Date(date + 'T12:00:00'); prev.setDate(prev.getDate() - 1)
+      const classIds = await classLectureIds(supabase, Array.from(new Set(pastRaw.map((p) => p.batch_id))), START_DATE, prev.toISOString().slice(0, 10))
+      const pastPlanners = pastRaw.filter((p) => classIds.has(p.id))
       if (pastPlanners.length > 0) {
         const pastIds = pastPlanners.map((p) => p.id)
         const { data: pastAudits } = await fetchAllIn<{ batch_planner_id: string; audit_status: string }>(pastIds, (chunk, from, to) => supabase

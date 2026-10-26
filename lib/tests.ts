@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { toMinutes, addDaysToDate, weeklySlotActiveOn, WEEKLY_SLOT_COLS } from '@/lib/utils'
+import { classLectureIds } from '@/lib/audit-match'
 import { notify } from '@/lib/notifications'
 import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 
@@ -35,6 +36,15 @@ type WeeklyRow = { start_time: string; end_time: string; effective_from: string 
 /** Live planner lectures only (buffers & cancelled hold no slot) — wraps a select. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const liveLectures = <Q extends { eq: any }>(q: Q): Q => q.eq('is_buffer', false).neq('status', 'cancelled')
+
+/** Keep only lectures that are real classes on `date` — a lecture sitting on a
+ *  day its batch's timetable doesn't run holds no slot (lib/audit-match). */
+async function classesOnly<T extends { id: string; batch_id: string }>(supabase: SupabaseClient, rows: T[] | null | undefined, date: string): Promise<T[]> {
+  const list = rows ?? []
+  if (!list.length) return list
+  const ids = await classLectureIds(supabase, Array.from(new Set(list.map((r) => r.batch_id))), date, date)
+  return list.filter((r) => ids.has(r.id))
+}
 
 /** Non-cancelled tests that occupy a batch on a date — its own tests plus the
  *  multi-batch tests it is mapped into as a secondary batch. */
@@ -82,20 +92,29 @@ export async function getEligibleChapters(
     topicsByChapter.get(t.chapter_id)!.push(t.name)
   }
 
-  // ALL planner lectures for the batch (we need totals as well as what's taught).
-  const { data: lecs } = await supabase
+  // ALL live planner lectures for the batch (we need totals as well as what's
+  // taught). Paged — a batch easily has more than 1000 rows.
+  type Lec = { id: string; chapter: string | null; topic_name: string | null; subject_id: string | null; planned_date: string; is_buffer: boolean; status: string }
+  const { data: lecs } = await fetchAll<Lec>((from, to) => supabase
     .from('batch_planners')
-    .select('chapter, topic_name, subject_id, planned_date')
+    .select('id, chapter, topic_name, subject_id, planned_date, is_buffer, status')
     .eq('batch_id', args.batchId)
-  const lectures = ((lecs ?? []) as { chapter: string | null; topic_name: string | null; subject_id: string | null; planned_date: string }[])
+    .order('id').range(from, to))
+  const lectures = lecs
+    .filter((l) => !l.is_buffer && l.status !== 'cancelled')
     .filter((l) => !l.subject_id || l.subject_id === args.subjectId) // this subject (or untagged)
+  // Taught by the test date = marked conducted, or a real class on its date
+  // (a lecture on a day the timetable doesn't run was never taught).
+  const dates = lectures.map((l) => l.planned_date).filter(Boolean).sort()
+  const classIds = dates.length ? await classLectureIds(supabase, [args.batchId], dates[0], args.byDate) : new Set<string>()
+  const taughtBy = (l: Lec) => !!l.planned_date && l.planned_date <= args.byDate && (l.status === 'conducted' || classIds.has(l.id))
 
   // Key taught topics by chapter name + topic name to avoid cross-chapter inflation.
   // e.g. "Introduction" in Chapter A should NOT count as taught for Chapter B.
   const taughtByChapter = new Map<string, Set<string>>()
   // Also keep a flat set for chapters with no master topics (lecture-count fallback).
   for (const l of lectures) {
-    if (l.planned_date <= args.byDate && l.topic_name) {
+    if (taughtBy(l) && l.topic_name) {
       const chapKey = norm(l.chapter)
       if (!taughtByChapter.has(chapKey)) taughtByChapter.set(chapKey, new Set())
       taughtByChapter.get(chapKey)!.add(norm(l.topic_name))
@@ -116,7 +135,7 @@ export async function getEligibleChapters(
       // No topics in the master — measure from the batch's own planner:
       // lectures of this chapter taught by the test date / total planned for it.
       const chapLecs = lectures.filter((l) => norm(l.chapter) === chKey)
-      const taught = chapLecs.filter((l) => l.planned_date <= args.byDate).length
+      const taught = chapLecs.filter(taughtBy).length
       pct = chapLecs.length > 0 ? Math.min(100, Math.round((taught / chapLecs.length) * 100)) : 0
       covered = taught
     }
@@ -241,8 +260,9 @@ export async function getBatchFreeWindows(
     if (weeklySlotActiveOn(r, args.date)) busy.push([toMinutes(r.start_time.slice(0, 5)), toMinutes(r.end_time.slice(0, 5))])
   }
 
-  const { data: pl } = await liveLectures(supabase.from('batch_planners').select('start_time, duration_minutes').eq('batch_id', args.batchId).eq('planned_date', args.date).not('start_time', 'is', null))
-  for (const r of (pl ?? []) as { start_time: string; duration_minutes: number }[]) { const s = toMinutes(r.start_time.slice(0, 5)); busy.push([s, s + (r.duration_minutes || 60)]) }
+  const { data: plRaw } = await liveLectures(supabase.from('batch_planners').select('id, batch_id, start_time, duration_minutes').eq('batch_id', args.batchId).eq('planned_date', args.date).not('start_time', 'is', null))
+  const pl = await classesOnly(supabase, plRaw as { id: string; batch_id: string; start_time: string; duration_minutes: number }[] | null, args.date)
+  for (const r of pl) { const s = toMinutes(r.start_time.slice(0, 5)); busy.push([s, s + (r.duration_minutes || 60)]) }
 
   for (const r of await batchTestsOn(supabase, args.batchId, args.date, args.ignoreTestId)) { const s = toMinutes(r.start_time.slice(0, 5)); busy.push([s, s + (r.duration_minutes || 60)]) }
 
@@ -301,8 +321,9 @@ export async function validateTestSlot(supabase: SupabaseClient, slot: TestSlot,
     return null
   }
   const plannerClash = async (col: string, val: string, label: string) => {
-    const { data } = await liveLectures(supabase.from('batch_planners').select('start_time, duration_minutes, topic_name').eq(col, val).eq('planned_date', slot.date).not('start_time', 'is', null))
-    for (const r of (data ?? []) as { start_time: string; duration_minutes: number; topic_name: string }[]) {
+    const { data: raw } = await liveLectures(supabase.from('batch_planners').select('id, batch_id, start_time, duration_minutes, topic_name').eq(col, val).eq('planned_date', slot.date).not('start_time', 'is', null))
+    const data = await classesOnly(supabase, raw as { id: string; batch_id: string; start_time: string; duration_minutes: number; topic_name: string }[] | null, slot.date)
+    for (const r of data) {
       const rs = toMinutes(r.start_time.slice(0, 5))
       if (overlaps(s, e, rs, rs + r.duration_minutes)) {
         const clashEnd = hhmm(rs + r.duration_minutes)
@@ -690,13 +711,14 @@ async function findNextFreeSlot(
     }
 
     // Planner lecture in the room on this date
-    const { data: pl } = await liveLectures(supabase
+    const { data: plRaw } = await liveLectures(supabase
       .from('batch_planners')
-      .select('classroom_id, start_time, duration_minutes')
+      .select('id, batch_id, classroom_id, start_time, duration_minutes')
       .in('classroom_id', centreRoomIds)
       .eq('planned_date', dateStr)
       .not('start_time', 'is', null))
-    for (const r of (pl ?? []) as { classroom_id: string; start_time: string; duration_minutes: number }[]) {
+    const pl = await classesOnly(supabase, plRaw as { id: string; batch_id: string; classroom_id: string; start_time: string; duration_minutes: number }[] | null, dateStr)
+    for (const r of pl) {
       const rs = toMinutes(r.start_time.slice(0, 5))
       if (overlaps(s, e, rs, rs + r.duration_minutes)) busyRooms.add(r.classroom_id)
     }
@@ -851,7 +873,8 @@ export async function getFreeFacultyIds(
 
   const [wkRes, plRes, tsRes] = await Promise.all([
     supabase.from('batch_schedules').select(`faculty_id, start_time, end_time, ${WEEKLY_SLOT_COLS}`).in('faculty_id', args.candidateFacultyIds).eq('day_of_week', dow),
-    liveLectures(supabase.from('batch_planners').select('faculty_id, start_time, duration_minutes').in('faculty_id', args.candidateFacultyIds).eq('planned_date', args.date).not('start_time', 'is', null)),
+    liveLectures(supabase.from('batch_planners').select('id, batch_id, faculty_id, start_time, duration_minutes').in('faculty_id', args.candidateFacultyIds).eq('planned_date', args.date).not('start_time', 'is', null))
+      .then(async (r: { data: unknown }) => ({ data: await classesOnly(supabase, r.data as { id: string; batch_id: string; faculty_id: string | null; start_time: string; duration_minutes: number }[] | null, args.date) })),
     (async () => {
       let q = supabase.from('test_schedules').select('faculty_id, start_time, duration_minutes').in('faculty_id', args.candidateFacultyIds).eq('test_date', args.date).neq('stage', 'Cancelled')
       if (args.ignoreTestId) q = q.neq('id', args.ignoreTestId)
@@ -884,11 +907,12 @@ export async function getClashingClass(
 ): Promise<ClashingClass | null> {
   const s = toMinutes(args.startTime.slice(0, 5))
   const e = s + args.durationMinutes
-  const { data } = await liveLectures(supabase
+  const { data: raw } = await liveLectures(supabase
     .from('batch_planners')
-    .select('topic_name, start_time, duration_minutes, subjects(name), app_users(full_name)')
+    .select('id, batch_id, topic_name, start_time, duration_minutes, subjects(name), app_users(full_name)')
     .eq('batch_id', args.batchId).eq('planned_date', args.date).not('start_time', 'is', null))
-  for (const r of (data ?? []) as { topic_name: string; start_time: string; duration_minutes: number; subjects: { name: string } | { name: string }[] | null; app_users: { full_name: string } | { full_name: string }[] | null }[]) {
+  const data = await classesOnly(supabase, raw as unknown as { id: string; batch_id: string }[] | null, args.date)
+  for (const r of data as unknown as { topic_name: string; start_time: string; duration_minutes: number; subjects: { name: string } | { name: string }[] | null; app_users: { full_name: string } | { full_name: string }[] | null }[]) {
     const rs = toMinutes(r.start_time.slice(0, 5))
     if (overlaps(s, e, rs, rs + r.duration_minutes)) {
       const subj = Array.isArray(r.subjects) ? r.subjects[0]?.name : r.subjects?.name
@@ -938,14 +962,15 @@ export async function getFreeClassrooms(
   }
   
   // Check planner lectures on that date
-  const { data: pl } = await liveLectures(supabase
+  const { data: plRaw } = await liveLectures(supabase
     .from('batch_planners')
-    .select('classroom_id, start_time, duration_minutes')
+    .select('id, batch_id, classroom_id, start_time, duration_minutes')
     .in('classroom_id', rooms.map(r => r.id))
     .eq('planned_date', args.date)
     .not('start_time', 'is', null))
-  
-  for (const r of (pl ?? []) as { classroom_id: string | null; start_time: string; duration_minutes: number }[]) {
+  const pl = await classesOnly(supabase, plRaw as { id: string; batch_id: string; classroom_id: string | null; start_time: string; duration_minutes: number }[] | null, args.date)
+
+  for (const r of pl) {
     if (r.classroom_id) {
       const rs = toMinutes(r.start_time.slice(0, 5))
       if (overlaps(s, e, rs, rs + r.duration_minutes)) busy.add(r.classroom_id)
@@ -1121,7 +1146,7 @@ export async function getBatchProgress(
   // Get all planned lectures (non-buffer)
   const { data: plannedLectures } = await fetchAll<Record<string, unknown>>((from, to) => supabase
     .from('batch_planners')
-    .select('subject_id, planned_date, status, is_buffer, subjects(name)')
+    .select('id, subject_id, planned_date, status, is_buffer, subjects(name)')
     .eq('batch_id', batchId)
     .eq('is_buffer', false)
     .neq('status', 'cancelled')
@@ -1129,6 +1154,7 @@ export async function getBatchProgress(
     .order('id').range(from, to))
   
   const lectures = (plannedLectures ?? []) as unknown as Array<{
+    id: string
     subject_id: string
     planned_date: string
     status: string
@@ -1136,6 +1162,9 @@ export async function getBatchProgress(
     subjects: any
   }>
   
+  // A past lecture is done only if it was a real class (lib/audit-match).
+  const classIds = await classLectureIds(supabase, [batchId], batch.start_date, today)
+
   // Get buffer slots info
   const { data: bufferInfo } = await fetchAll<Record<string, unknown>>((from, to) => supabase
     .from('batch_planners')
@@ -1164,7 +1193,7 @@ export async function getBatchProgress(
   const subjectMap = new Map<string, {
     subjectId: string
     subjectName: string
-    planned: Array<{ planned_date: string; status: string }>
+    planned: Array<{ id: string; planned_date: string; status: string }>
   }>()
   
   lectures.forEach(l => {
@@ -1174,12 +1203,12 @@ export async function getBatchProgress(
     if (!subjectMap.has(id)) {
       subjectMap.set(id, { subjectId: id, subjectName: name, planned: [] })
     }
-    subjectMap.get(id)!.planned.push({ planned_date: l.planned_date, status: l.status })
+    subjectMap.get(id)!.planned.push({ id: l.id, planned_date: l.planned_date, status: l.status })
   })
   
   const subjectProgress = Array.from(subjectMap.values()).map(s => {
     const plannedLectures = s.planned.length
-    const completedLectures = s.planned.filter(p => p.status === 'conducted' || p.planned_date < today).length
+    const completedLectures = s.planned.filter(p => p.status === 'conducted' || (p.planned_date < today && classIds.has(p.id))).length
     const expectedLectures = Math.floor((progressPercentage / 100) * plannedLectures)
     const completionRate = plannedLectures > 0 ? (completedLectures / plannedLectures) * 100 : 0
     const isOnTrack = completedLectures >= expectedLectures - 1 // Allow 1 lecture tolerance

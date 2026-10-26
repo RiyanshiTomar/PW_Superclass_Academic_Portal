@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { timesOverlap, toMinutes } from '@/lib/utils'
 import { minutesToTimeString } from '@/lib/validation'
+import { classLectureIds } from '@/lib/audit-match'
 
 function batchName(value: unknown): string {
   if (Array.isArray(value)) return (value[0] as { name?: string })?.name ?? 'another batch'
@@ -108,7 +109,7 @@ export async function checkPlannerTimeOverlap(
 
   let query = supabase
     .from('batch_planners')
-    .select('start_time, duration_minutes, batches(name)')
+    .select('id, batch_id, start_time, duration_minutes, batches(name)')
     .eq('faculty_id', facultyId)
     .eq('planned_date', plannedDate)
     .eq('is_buffer', false)
@@ -117,8 +118,12 @@ export async function checkPlannerTimeOverlap(
 
   if (ignorePlannerId) query = query.neq('id', ignorePlannerId)
 
-  const { data } = await query
-  if (!data?.length) return false
+  const { data: raw } = await query
+  if (!raw?.length) return false
+  // Only real classes hold the faculty (a lecture on a day its batch's
+  // timetable doesn't run is not a class).
+  const classes = await classLectureIds(supabase, Array.from(new Set(raw.map((r) => r.batch_id as string))), plannedDate, plannedDate)
+  const data = raw.filter((r) => classes.has(r.id as string))
 
   for (const row of data) {
     const exStart = toMinutes(row.start_time!.slice(0, 5))

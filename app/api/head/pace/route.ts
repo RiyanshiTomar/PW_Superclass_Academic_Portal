@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
 import { fetchAll } from '@/lib/supabase/fetch-all'
 import { headCaller, istToday, paceStatus, serviceDb } from '@/lib/head'
+import { classIdsFromRows } from '@/lib/audit-match'
+import { WEEKLY_SLOT_COLS } from '@/lib/utils'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -20,8 +22,8 @@ export async function GET() {
   const [bRes, sRes, lRes, subjRes] = await Promise.all([
     db.from('batches').select('id, name, start_date, end_date, status, centre_id, centres(name), programs(name)'),
     fetchAll<{ batch_id: string; effective_to: string | null }>((a, b) => db.from('batch_schedules').select('batch_id, effective_to').order('id').range(a, b)),
-    fetchAll<{ batch_id: string; subject_id: string; planned_date: string | null; status: string }>((a, b) =>
-      db.from('batch_planners').select('batch_id, subject_id, planned_date, status').eq('is_buffer', false).neq('status', 'cancelled').not('subject_id', 'is', null).order('id').range(a, b)),
+    fetchAll<{ id: string; batch_id: string; subject_id: string | null; start_time: string | null; planned_date: string | null; status: string; is_buffer: boolean }>((a, b) =>
+      db.from('batch_planners').select('id, batch_id, subject_id, start_time, planned_date, status, is_buffer').order('id').range(a, b)),
     db.from('subjects').select('id, name'),
   ])
   if (bRes.error || lRes.error) return NextResponse.json({ error: bRes.error?.message ?? lRes.error }, { status: 500 })
@@ -41,8 +43,17 @@ export async function GET() {
     if (to > (lastClass.get(r.batch_id) ?? '')) lastClass.set(r.batch_id, to)
   }
 
-  const byBatch = new Map<string, typeof lRes.data>()
-  for (const l of lRes.data) byBatch.set(l.batch_id, [...(byBatch.get(l.batch_id) ?? []), l])
+  // Which lectures are real classes on their date (buffers / cancel markers
+  // take part in the matching, then drop out).
+  const slotRes = await fetchAll<{ batch_id: string; subject_id: string | null; day_of_week: number; start_time: string; effective_from: string | null; effective_to: string | null; batches: unknown }>((a, b) =>
+    db.from('batch_schedules').select(`batch_id, subject_id, day_of_week, start_time, ${WEEKLY_SLOT_COLS}`).order('id').range(a, b) as unknown as PromiseLike<{ data: { batch_id: string; subject_id: string | null; day_of_week: number; start_time: string; effective_from: string | null; effective_to: string | null; batches: unknown }[] | null; error: { message: string } | null }>)
+  const classIds = classIdsFromRows(lRes.data, slotRes.data)
+  type L = { id: string; batch_id: string; subject_id: string; planned_date: string | null; status: string }
+  const byBatch = new Map<string, L[]>()
+  for (const l of lRes.data) {
+    if (l.is_buffer || l.status === 'cancelled' || !l.subject_id) continue
+    byBatch.set(l.batch_id, [...(byBatch.get(l.batch_id) ?? []), l as L])
+  }
 
   const out = batches.map((b) => {
     const ls = byBatch.get(b.id) ?? []
@@ -50,8 +61,9 @@ export async function GET() {
     const span = Math.max(1, days(b.start_date, b.end_date))
     const frac = Math.min(1, Math.max(0, days(b.start_date, today) / span))
     const fit = lastClass.get(b.id) ?? b.end_date
-    const isDone = (l: (typeof ls)[number]) => l.status === 'conducted' || (!!l.planned_date && l.planned_date < today)
-    const noSlotOf = (l: (typeof ls)[number]) => !isDone(l) && (!l.planned_date || l.planned_date > fit)
+    const isDone = (l: L) => l.status === 'conducted' || (!!l.planned_date && l.planned_date < today && classIds.has(l.id))
+    // Not done and not on a running class slot (past or future) = nowhere to be taught.
+    const noSlotOf = (l: L) => !isDone(l) && (!l.planned_date || l.planned_date > fit || !classIds.has(l.id))
     const done = ls.filter(isDone).length
     const expected = Math.round(frac * total)
     const noSlot = ls.filter(noSlotOf).length

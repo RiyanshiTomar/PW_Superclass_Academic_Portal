@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
+import { classLectureIds } from '@/lib/audit-match'
 
 type Row = { id: string; name: string; centre: string; lastDay: string; endDate: string; pending: number; noSlot: number; notMarked: number }
 
@@ -39,15 +40,19 @@ export default function ScheduleEndedAlert() {
       }
       const ended = batches.filter((b) => last.has(b.id) && (last.get(b.id) as string) < today)
       if (!ended.length) { if (!cancelled) setRows([]); return }
-      const { data: lectures } = await fetchAllIn<{ batch_id: string; planned_date: string | null }>(ended.map((b) => b.id), (chunk, a, b) =>
-        supabase.from('batch_planners').select('batch_id, planned_date').in('batch_id', chunk).eq('is_buffer', false)
+      const { data: lectures } = await fetchAllIn<{ id: string; batch_id: string; planned_date: string | null }>(ended.map((b) => b.id), (chunk, a, b) =>
+        supabase.from('batch_planners').select('id, batch_id, planned_date').in('batch_id', chunk).eq('is_buffer', false)
           .neq('status', 'cancelled').neq('status', 'conducted').not('subject_id', 'is', null).order('id').range(a, b))
+      // A past lecture that wasn't a real class (no timetable slot that day) has
+      // no class date either — it was never taught.
+      const pastDates = lectures.map((l) => l.planned_date).filter((d): d is string => !!d && d < today).sort()
+      const classIds = pastDates.length ? await classLectureIds(supabase, ended.map((b) => b.id), pastDates[0], pastDates[pastDates.length - 1]) : new Set<string>()
       const out: Row[] = []
       for (const b of ended) {
         const lastDay = last.get(b.id) as string
         const mine = lectures.filter((l) => l.batch_id === b.id)
         if (!mine.length) continue
-        const noSlot = mine.filter((l) => !l.planned_date || l.planned_date > lastDay).length
+        const noSlot = mine.filter((l) => !l.planned_date || l.planned_date > lastDay || (l.planned_date < today && !classIds.has(l.id))).length
         const c = Array.isArray(b.centres) ? b.centres[0] : b.centres
         out.push({ id: b.id, name: b.name, centre: c?.name ?? '', lastDay, endDate: b.end_date, pending: mine.length, noSlot, notMarked: mine.length - noSlot })
       }

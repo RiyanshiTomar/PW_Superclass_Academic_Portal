@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
 import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 import { toMinutes, weeklySlotActiveOn } from '@/lib/utils'
+import { matchClasses } from '@/lib/audit-match'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -189,23 +190,9 @@ export default function DailyLectureAudit() {
     const planners = pRes.data
     const slots = sRes.data.filter((s) => weeklySlotActiveOn(s, date))
 
-    // Match each active weekly slot to a planner row of the same batch+subject
-    // (closest start time — planner rows can be a few minutes off the slot).
-    const used = new Set<string>()
-    type Pick = { kind: Lecture['kind']; p: PlannerRow | null; slot: SlotRow | null }
-    const picks: Pick[] = []
+    // Each running weekly slot ↔ its planner row (shared rule, lib/audit-match).
+    const picks = matchClasses(slots, planners)
     const mins = (t: string | null) => (t ? toMinutes(t.slice(0, 5)) : 0)
-    for (const s of [...slots].sort((a, b) => a.start_time.localeCompare(b.start_time))) {
-      const cands = planners.filter((p) => !used.has(p.id) && p.batch_id === s.batch_id && p.subject_id === s.subject_id)
-      // Prefer a real lecture, then a cancellation marker, then a buffer.
-      const rank = (p: PlannerRow) => (!p.is_buffer && p.status !== 'cancelled' ? 0 : p.status === 'cancelled' ? 1 : 2)
-      cands.sort((a, b) => rank(a) - rank(b) || Math.abs(mins(a.start_time) - mins(s.start_time)) - Math.abs(mins(b.start_time) - mins(s.start_time)))
-      const p = cands[0] ?? null
-      if (p) used.add(p.id)
-      if (p?.status === 'cancelled') continue // class cancelled for this date
-      if (p && !p.is_buffer) picks.push({ kind: 'planned', p, slot: s })
-      else picks.push({ kind: p ? 'buffer' : 'unplanned', p, slot: s })
-    }
 
     if (picks.length === 0) {
       setLectures([])

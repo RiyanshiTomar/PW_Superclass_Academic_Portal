@@ -4,6 +4,8 @@ import { useEffect, useState, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 import { fetchAll } from '@/lib/supabase/fetch-all'
+import { weeklySlotActiveOn, WEEKLY_SLOT_COLS } from '@/lib/utils'
+import { matchClasses } from '@/lib/audit-match'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -109,8 +111,10 @@ function downloadCSV(content: string, filename: string) {
 
 type PlannerAuditRow = {
   id: string; faculty_id: string | null; planned_date: string; start_time: string | null; duration_minutes: number; chapter: string; topic_name: string
+  batch_id: string; subject_id: string | null; is_buffer: boolean; status: string
   batches: unknown; subjects: unknown; app_users: unknown; lecture_audits: unknown
 }
+type SlotAuditRow = { id: string; batch_id: string; subject_id: string | null; day_of_week: number; start_time: string; effective_from: string | null; effective_to: string | null; batches: unknown }
 
 export default function AuditReportPage() {
   const supabase = createClient()
@@ -139,11 +143,13 @@ export default function AuditReportPage() {
     const { data: ct } = await supabase.rpc('get_central_team_members')
     setOwners((ct ?? []) as Owner[])
 
-    // Fetch all batch_planners in date range with batch owner info
-    const { data: planners, error } = await fetchAll<PlannerAuditRow>((from, to) => supabase
+    // Planner rows in the range (buffers + cancel markers too — they decide
+    // which slot a lecture fills) and the weekly timetable.
+    const [pRes, sRes] = await Promise.all([fetchAll<PlannerAuditRow>((from, to) => supabase
       .from('batch_planners')
       .select(`
         id, faculty_id, planned_date, start_time, duration_minutes, chapter, topic_name,
+        batch_id, subject_id, is_buffer, status,
         batches(id, name, batch_owner_id, centre_id, centres(id, name),
           app_users!batches_batch_owner_id_fkey(id, full_name)),
         subjects(name),
@@ -152,18 +158,32 @@ export default function AuditReportPage() {
           remarks, audit_status, audited_at,
           app_users!lecture_audits_audited_by_fkey(full_name))
       `)
-      .eq('is_buffer', false)
-      .neq('status', 'cancelled')
       .gte('planned_date', filterFrom)
       .lte('planned_date', filterTo)
       .order('planned_date', { ascending: true })
       .order('start_time',   { ascending: true })
       .order('id')
-      .range(from, to) as unknown as PromiseLike<{ data: PlannerAuditRow[] | null; error: { message: string } | null }>)
-
+      .range(from, to) as unknown as PromiseLike<{ data: PlannerAuditRow[] | null; error: { message: string } | null }>),
+      fetchAll<SlotAuditRow>((from, to) => supabase.from('batch_schedules')
+        .select(`id, batch_id, subject_id, day_of_week, start_time, ${WEEKLY_SLOT_COLS}`)
+        .order('id').range(from, to) as unknown as PromiseLike<{ data: SlotAuditRow[] | null; error: { message: string } | null }>),
+    ])
+    const error = pRes.error ?? sRes.error
     if (error) { setMessage({ type: 'error', text: error }); setLoading(false); return }
 
-    const merged: AuditRow[] = (planners ?? []).map(p => {
+    // Only lectures that were real classes: a running timetable slot that day
+    // (same rule as Daily Lecture Audit and the calendar).
+    const byDate = new Map<string, PlannerAuditRow[]>()
+    for (const p of pRes.data) byDate.set(p.planned_date, [...(byDate.get(p.planned_date) ?? []), p])
+    const planners: PlannerAuditRow[] = []
+    for (const [date, lectures] of byDate) {
+      const dow = new Date(date + 'T12:00:00').getDay()
+      const slots = sRes.data.filter((x) => x.day_of_week === dow && weeklySlotActiveOn(x, date))
+      for (const pick of matchClasses(slots, lectures)) if (pick.kind === 'planned' && pick.p) planners.push(pick.p)
+    }
+    planners.sort((a, b) => a.planned_date.localeCompare(b.planned_date) || (a.start_time ?? '').localeCompare(b.start_time ?? ''))
+
+    const merged: AuditRow[] = planners.map(p => {
       const batch   = one(p.batches  as never) as { id: string; name: string; batch_owner_id: string | null; centre_id: string | null; centres: unknown; app_users: unknown } | null
       const centre  = one(batch?.centres as never) as { name: string } | null
       const owner   = one(batch?.app_users as never) as { id: string; full_name: string } | null

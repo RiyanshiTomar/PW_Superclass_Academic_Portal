@@ -8,8 +8,9 @@ import { minutesToTimeString } from '@/lib/validation'
 import { getBatchFreeWindows, type FreeWindow } from '@/lib/tests'
 import { notifyRoles } from '@/lib/notifications'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
-import { fetchAll } from '@/lib/supabase/fetch-all'
-import { classLectureIds } from '@/lib/audit-match'
+import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
+import { matchClasses } from '@/lib/audit-match'
+import { weeklySlotActiveOn } from '@/lib/utils'
 
 type Lecture = {
   id: string
@@ -21,6 +22,8 @@ type Lecture = {
   topic_name: string
   chapter: string
   stage: string
+  /** A timetable class with no topic in the planner (buffer / not planned). */
+  slotOnly?: boolean
   batches: { name: string; centres: { name: string } | { name: string }[] | null } | { name: string; centres: { name: string } | { name: string }[] | null }[] | null
   subjects: { name: string } | { name: string }[] | null
   classrooms: { name: string } | { name: string }[] | null
@@ -71,34 +74,70 @@ export default function FacultyCalendarPage() {
 
   const todayStr = new Date().toISOString().split('T')[0]
 
+  // The calendar is built from the TIMETABLE (Batch Scheduler), like Central's
+  // calendar: every running weekly slot of this faculty is a class. The planner
+  // only adds the topic — a slot whose planner row is a buffer (or missing)
+  // still shows, as "no topic yet". Matching slot ↔ lecture uses the shared
+  // rule (lib/audit-match), so a substitute's lecture shows for the substitute
+  // and a cancelled class shows for nobody.
   const loadData = async () => {
     setLoading(true)
     const { data: { user } } = await supabase.auth.getUser()
     const appUser = user ? await getAppUser(supabase, user) : null
     if (!appUser) { setLoading(false); return }
-    const [lecRes, reqRes] = await Promise.all([
-      fetchAll<Record<string, unknown>>((from, to) => supabase
-        .from('batch_planners')
-        .select('id, batch_id, subject_id, planned_date, start_time, duration_minutes, topic_name, chapter, stage, batches(name, centres(name)), subjects(name), classrooms(name)')
-        .eq('faculty_id', appUser.id)
-        .eq('stage', 'Confirmed')   // calendar shows only what the faculty has confirmed
-        .eq('is_buffer', false)
-        .neq('status', 'cancelled') // a cancelled class is no longer on the calendar
-        .order('planned_date', { ascending: true }).order('id')
-        .range(from, to)),
+    const me = appUser.id
+
+    type Slot = { id: string; batch_id: string; subject_id: string | null; faculty_id: string | null; day_of_week: number; start_time: string; end_time: string; effective_from: string | null; effective_to: string | null; batches: unknown; subjects: unknown; classrooms: unknown }
+    type Row = Lecture & { faculty_id: string | null; is_buffer: boolean; status: string }
+    const slotCols = 'id, batch_id, subject_id, faculty_id, day_of_week, start_time, end_time, effective_from, effective_to, batches(name, start_date, end_date, status, centres(name)), subjects(name), classrooms(name)'
+    const lecCols = 'id, batch_id, subject_id, faculty_id, planned_date, start_time, duration_minutes, topic_name, chapter, stage, is_buffer, status, batches(name, centres(name)), subjects(name), classrooms(name)'
+
+    // My batches: where I hold a timetable slot or a lecture.
+    const [mySlots, myLecs, reqRes] = await Promise.all([
+      fetchAll<Slot>((from, to) => supabase.from('batch_schedules').select(slotCols).eq('faculty_id', me).order('id').range(from, to) as unknown as PromiseLike<{ data: Slot[] | null; error: { message: string } | null }>),
+      fetchAll<{ batch_id: string }>((from, to) => supabase.from('batch_planners').select('batch_id').eq('faculty_id', me).order('id').range(from, to)),
       // Faculty's own requests, so the calendar can flag pending/approved ones.
       supabase
         .from('reschedule_requests')
         .select('planner_id, status, request_type, created_at')
-        .eq('requested_by', appUser.id)
+        .eq('requested_by', me)
         .order('created_at', { ascending: true }),
     ])
-    // Only real classes: a lecture on a day its batch's timetable doesn't run
-    // is not a class (central must re-place it) — keep it off the calendar.
-    const lecs = (lecRes.data ?? []) as unknown as Lecture[]
-    const dates = lecs.map((l) => l.planned_date).filter(Boolean).sort()
-    const classIds = dates.length ? await classLectureIds(supabase, Array.from(new Set(lecs.map((l) => l.batch_id))), dates[0], dates[dates.length - 1]) : new Set<string>()
-    setLectures(lecs.filter((l) => classIds.has(l.id)))
+    const batchIds = Array.from(new Set([...mySlots.data.map((r) => r.batch_id), ...myLecs.data.map((r) => r.batch_id)]))
+    const [slotRes, lecRes] = await Promise.all([
+      fetchAllIn<Slot>(batchIds, (chunk, from, to) => supabase.from('batch_schedules').select(slotCols).in('batch_id', chunk).order('id').range(from, to) as unknown as PromiseLike<{ data: Slot[] | null; error: { message: string } | null }>),
+      fetchAllIn<Row>(batchIds, (chunk, from, to) => supabase.from('batch_planners').select(lecCols).in('batch_id', chunk).order('id').range(from, to) as unknown as PromiseLike<{ data: Row[] | null; error: { message: string } | null }>),
+    ])
+
+    const lecByDate = new Map<string, Row[]>()
+    for (const l of lecRes.data) if (l.planned_date) lecByDate.set(l.planned_date, [...(lecByDate.get(l.planned_date) ?? []), l])
+    // Dates to walk: every day any of these batches runs.
+    const spans = slotRes.data.map((r) => one(r.batches as never) as { start_date?: string; end_date?: string } | null)
+    const starts = spans.map((b) => b?.start_date).filter((d): d is string => !!d).sort()
+    const ends = spans.map((b) => b?.end_date).filter((d): d is string => !!d).sort()
+    const out: Lecture[] = []
+    if (starts.length && ends.length) {
+      const d = new Date(starts[0] + 'T12:00:00'), last = new Date(ends[ends.length - 1] + 'T12:00:00')
+      for (; d <= last; d.setDate(d.getDate() + 1)) {
+        const date = d.toISOString().slice(0, 10)
+        const running = slotRes.data.filter((r) => r.day_of_week === d.getDay() && weeklySlotActiveOn(r, date))
+        if (!running.length) continue
+        for (const pick of matchClasses(running, lecByDate.get(date) ?? [])) {
+          if (pick.kind === 'planned' && pick.p) {
+            if (pick.p.faculty_id === me) out.push(pick.p)
+          } else if (pick.slot.faculty_id === me) {
+            const sl = pick.slot
+            out.push({
+              id: `slot:${sl.id}:${date}`, batch_id: sl.batch_id, subject_id: sl.subject_id, planned_date: date,
+              start_time: sl.start_time, duration_minutes: toMinutes(sl.end_time.slice(0, 5)) - toMinutes(sl.start_time.slice(0, 5)),
+              topic_name: '', chapter: '', stage: '', slotOnly: true,
+              batches: sl.batches as Lecture['batches'], subjects: sl.subjects as Lecture['subjects'], classrooms: sl.classrooms as Lecture['classrooms'],
+            })
+          }
+        }
+      }
+    }
+    setLectures(out.sort((a, b) => a.planned_date.localeCompare(b.planned_date) || (a.start_time ?? '').localeCompare(b.start_time ?? '')))
     const map: Record<string, ReqInfo> = {}
     for (const r of (reqRes.data ?? []) as { planner_id: string | null; status: string; request_type: string }[]) {
       if (r.planner_id) map[r.planner_id] = { status: r.status, type: r.request_type } // latest wins (asc order)
@@ -325,7 +364,7 @@ export default function FacultyCalendarPage() {
 
   return (
     <div className="max-w-5xl mx-auto">
-      <PageHeader title="Calendar" description="Your confirmed lectures. Click an upcoming class to request a reschedule, extra class, or cancellation." />
+      <PageHeader title="Calendar" description="Every class on your timetable, with the planner's topic. Click an upcoming class to request a reschedule, extra class, or cancellation." />
 
       {message && <Alert type={message.type === 'info' ? 'info' : message.type}>{message.text}</Alert>}
 
@@ -368,8 +407,8 @@ export default function FacultyCalendarPage() {
                         return (
                           <button
                             key={l.id}
-                            onClick={(e) => { e.stopPropagation(); openModal(l) }}
-                            className={`w-full text-left rounded px-1 py-0.5 text-[9px] leading-tight border-l-2 ${conducted ? 'bg-neutral-100 text-neutral-500 border-neutral-300' : 'bg-emerald-50 text-emerald-900 border-emerald-400'}`}
+                            onClick={(e) => { e.stopPropagation(); if (l.slotOnly) setDayModal(date); else openModal(l) }}
+                            className={`w-full text-left rounded px-1 py-0.5 text-[9px] leading-tight border-l-2 ${conducted ? 'bg-neutral-100 text-neutral-500 border-neutral-300' : l.slotOnly ? 'bg-sky-50 text-sky-900 border-sky-400' : 'bg-emerald-50 text-emerald-900 border-emerald-400'}`}
                           >
                             <div className="font-bold truncate">{formatTime(l.start_time)}</div>
                             <div className="truncate">{one(l.batches)?.name ?? 'Batch'}</div>
@@ -428,8 +467,8 @@ export default function FacultyCalendarPage() {
                       return (
                         <button
                           key={l.id}
-                          onClick={() => openModal(l)}
-                          className={`w-full text-left rounded-xl px-3 py-2.5 mb-1 border-l-4 flex items-center gap-3 ${conducted ? 'bg-neutral-100 border-neutral-300' : 'bg-emerald-50 border-emerald-400'}`}
+                          onClick={() => { if (!l.slotOnly) openModal(l) }}
+                          className={`w-full text-left rounded-xl px-3 py-2.5 mb-1 border-l-4 flex items-center gap-3 ${conducted ? 'bg-neutral-100 border-neutral-300' : l.slotOnly ? 'bg-sky-50 border-sky-400' : 'bg-emerald-50 border-emerald-400'}`}
                         >
                           <div className="shrink-0 text-center">
                             <div className="text-xs font-bold text-neutral-700">{formatTime(l.start_time)}</div>
@@ -439,6 +478,7 @@ export default function FacultyCalendarPage() {
                             <div className="font-semibold text-sm text-neutral-900 truncate">{batch?.name ?? 'Batch'}</div>
                             {l.chapter && <div className="text-xs font-medium text-violet-700 truncate">{l.chapter}</div>}
                             {l.topic_name && <div className="text-xs text-neutral-500 truncate">{l.topic_name}</div>}
+                            {l.slotOnly && <div className="text-xs text-sky-700 truncate">{one(l.subjects)?.name ?? 'Class'} · no topic in planner yet</div>}
                             {req && (
                               <div className={`text-[10px] font-semibold mt-0.5 ${reqPending ? 'text-amber-600' : req.status === 'approved' ? 'text-emerald-600' : 'text-rose-500'}`}>
                                 {reqPending ? '⏳ Pending' : req.status === 'approved' ? '✓ Approved' : '✕ Rejected'}
@@ -461,6 +501,7 @@ export default function FacultyCalendarPage() {
 
         <div className="flex flex-wrap gap-3 mt-4 text-xs text-neutral-500">
           <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-100 inline-block" /> Upcoming</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-sky-100 inline-block" /> Class, no topic in planner yet</span>
           <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-neutral-200 inline-block" /> Conducted</span>
           <span className="flex items-center gap-1"><span className="text-amber-600 font-bold">⏳</span> Request pending</span>
         </div>
@@ -483,17 +524,22 @@ export default function FacultyCalendarPage() {
                 return (
                   <button
                     key={l.id}
-                    onClick={() => { setDayModal(null); openModal(l) }}
+                    onClick={() => { if (l.slotOnly) return; setDayModal(null); openModal(l) }}
                     style={{ animationDelay: `${li * 50}ms` }}
-                    className={`animate-fade-up w-full text-left rounded-xl p-3 border-l-4 transition-all hover:scale-[1.02] hover:shadow-sm ${conducted ? 'bg-neutral-100 border-neutral-300' : 'bg-emerald-50 border-emerald-400'}`}
+                    className={`animate-fade-up w-full text-left rounded-xl p-3 border-l-4 transition-all ${l.slotOnly ? 'cursor-default' : 'hover:scale-[1.02] hover:shadow-sm'} ${conducted ? 'bg-neutral-100 border-neutral-300' : l.slotOnly ? 'bg-sky-50 border-sky-400' : 'bg-emerald-50 border-emerald-400'}`}
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <div className="font-bold text-neutral-900 text-sm">{formatTime(l.start_time)} · {l.duration_minutes}m</div>
                         <div className="text-sm font-semibold text-neutral-800">{batch?.name ?? 'Batch'}</div>
                       </div>
-                      <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${conducted ? 'bg-neutral-200 text-neutral-700' : 'bg-emerald-200 text-emerald-800'}`}>{conducted ? 'Conducted' : 'Confirmed'}</span>
+                      <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${conducted ? 'bg-neutral-200 text-neutral-700' : l.slotOnly ? 'bg-sky-200 text-sky-800' : l.stage === 'Confirmed' ? 'bg-emerald-200 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{conducted ? 'Conducted' : l.slotOnly ? 'Class' : l.stage === 'Confirmed' ? 'Confirmed' : 'Not confirmed'}</span>
                     </div>
+                    {l.slotOnly && (
+                      <div className="mt-1.5 rounded-lg bg-sky-50 border border-sky-100 px-2 py-1 text-xs text-sky-800">
+                        <b>{one(l.subjects)?.name ?? 'Class'}</b> — on your timetable, but the planner has no topic for it yet (buffer / free class). Ask Central to plan it.
+                      </div>
+                    )}
                     {l.chapter && (
                       <div className="mt-1.5 rounded-lg bg-violet-50 border border-violet-100 px-2 py-1">
                         <div className="text-[10px] font-bold uppercase tracking-wider text-violet-500 mb-0.5">Chapter</div>

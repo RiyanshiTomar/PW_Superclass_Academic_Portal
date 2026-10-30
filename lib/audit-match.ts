@@ -26,7 +26,10 @@ export function matchClasses<S extends SlotLike, P extends LectureLike>(slots: S
   const picks: ClassPick<S, P>[] = []
   for (const s of [...slots].sort((a, b) => a.start_time.localeCompare(b.start_time))) {
     const cands = lectures.filter((p) => !used.has(p.id) && p.batch_id === s.batch_id && p.subject_id === s.subject_id)
-    cands.sort((a, b) => rank(a) - rank(b) || Math.abs(mins(a.start_time) - mins(s.start_time)) - Math.abs(mins(b.start_time) - mins(s.start_time)))
+    // A cancel/reschedule marker at exactly this slot's time belongs to THIS
+    // class (not to another class of the same subject that day) — it wins.
+    const exact = (p: P) => (p.status === 'cancelled' && mins(p.start_time) === mins(s.start_time) ? 0 : 1)
+    cands.sort((a, b) => exact(a) - exact(b) || rank(a) - rank(b) || Math.abs(mins(a.start_time) - mins(s.start_time)) - Math.abs(mins(b.start_time) - mins(s.start_time)))
     const p = cands[0] ?? null
     if (p) used.add(p.id)
     if (p?.status === 'cancelled') continue // class cancelled for this date

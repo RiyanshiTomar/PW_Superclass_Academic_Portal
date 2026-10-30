@@ -2,7 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { addDaysToDate, daysBetween, toMinutes } from '@/lib/utils'
 import { isDateInRange } from '@/lib/validation'
 import { notifyUsers } from '@/lib/notifications'
-import { resolveTestConflicts, shiftSubjectForward } from '@/lib/tests'
+import { resolveTestConflicts, shiftSubjectForward, validateTestSlot } from '@/lib/tests'
 import { fetchAll } from '@/lib/supabase/fetch-all'
 
 // ============================================================
@@ -704,6 +704,76 @@ export async function addExtraLecture(
     stage: anchor.stage,
     link_id: anchor.link_id,
   })
+  if (error) return { ok: false, error: error.message }
+  // A class exists only on a running timetable slot — add a one-day slot.
+  const slotErr = await addOneDaySlot(supabase, { batchId: anchor.batch_id, subjectId: anchor.subject_id, facultyId: anchor.faculty_id, classroomId: anchor.classroom_id, date: newDate, startTime, durationMinutes: dur })
+  if (slotErr) return { ok: false, error: `Extra lecture added, but its timetable slot failed: ${slotErr}` }
+  return { ok: true }
+}
+
+/** A one-day timetable slot (effective_from = effective_to = date). Every class
+ *  must sit on a running timetable slot (lib/audit-match), so a class added or
+ *  moved off the weekly pattern gets one of these. */
+async function addOneDaySlot(
+  supabase: SupabaseClient,
+  a: { batchId: string; subjectId: string | null; facultyId: string | null; classroomId: string | null; date: string; startTime: string; durationMinutes: number }
+): Promise<string | null> {
+  const st = a.startTime.slice(0, 5)
+  const end = toMinutes(st) + a.durationMinutes
+  const endTime = `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`
+  const { error } = await supabase.from('batch_schedules').insert({
+    batch_id: a.batchId, subject_id: a.subjectId, faculty_id: a.facultyId, classroom_id: a.classroomId,
+    day_of_week: new Date(a.date + 'T12:00:00').getDay(), start_time: st, end_time: endTime,
+    effective_from: a.date, effective_to: a.date,
+  })
+  return error ? error.message : null
+}
+
+/** Move ONE class to another date/time (reschedule) — used by Central's
+ *  approval and the Batch Manager. The new slot is validated (batch, faculty,
+ *  room, tests); the class gets a one-day timetable slot there, and the old
+ *  date keeps a "rescheduled" marker so its weekly slot doesn't show as an
+ *  empty class. Only this lecture moves; nothing else shifts. */
+export async function moveClass(
+  supabase: SupabaseClient,
+  rowId: string,
+  newDate: string,
+  newTime: string,
+  override?: { topic_name?: string | null; chapter?: string | null }
+): Promise<{ ok: boolean; error?: string }> {
+  const { data: lec } = await supabase
+    .from('batch_planners')
+    .select('id, batch_id, link_id, subject_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes, status, is_buffer, stage')
+    .eq('id', rowId)
+    .single<{ id: string; batch_id: string; link_id: string | null; subject_id: string | null; faculty_id: string | null; classroom_id: string | null; planned_date: string; start_time: string | null; duration_minutes: number; status: string; is_buffer: boolean; stage: string }>()
+  if (!lec) return { ok: false, error: 'Lecture not found.' }
+  if (lec.status === 'conducted') return { ok: false, error: 'This class is already conducted — it can’t be rescheduled.' }
+  if (lec.status === 'cancelled') return { ok: false, error: 'This class is cancelled.' }
+  if (lec.is_buffer) return { ok: false, error: 'This is a buffer slot with no topic — nothing to reschedule.' }
+  const startTime = newTime.slice(0, 5)
+  if (newDate === lec.planned_date && startTime === (lec.start_time ?? '').slice(0, 5)) return { ok: false, error: 'Pick a different date or time.' }
+
+  const clash = await validateTestSlot(supabase, {
+    batchId: lec.batch_id, facultyId: lec.faculty_id, classroomId: lec.classroom_id,
+    date: newDate, startTime, durationMinutes: lec.duration_minutes || 60,
+  })
+  if (clash) return { ok: false, error: `That slot isn’t free: ${clash}` }
+
+  const slotErr = await addOneDaySlot(supabase, { batchId: lec.batch_id, subjectId: lec.subject_id, facultyId: lec.faculty_id, classroomId: lec.classroom_id, date: newDate, startTime, durationMinutes: lec.duration_minutes || 60 })
+  if (slotErr) return { ok: false, error: `Could not add the new slot: ${slotErr}` }
+
+  // Old date: a marker so its weekly slot reads as "no class (rescheduled)".
+  const { error: mErr } = await supabase.from('batch_planners').insert({
+    batch_id: lec.batch_id, link_id: lec.link_id, subject_id: lec.subject_id, faculty_id: lec.faculty_id, classroom_id: lec.classroom_id,
+    planned_date: lec.planned_date, start_time: lec.start_time, duration_minutes: lec.duration_minutes,
+    chapter: '', topic_name: `Class rescheduled to ${newDate}`, is_buffer: false, status: 'cancelled', stage: lec.stage || 'Confirmed',
+  })
+  if (mErr) return { ok: false, error: `Could not mark the old date: ${mErr.message}` }
+
+  const patch: Record<string, unknown> = { planned_date: newDate, start_time: startTime }
+  if (override?.chapter?.trim()) patch.chapter = override.chapter.trim()
+  if (override?.topic_name?.trim()) patch.topic_name = override.topic_name.trim()
+  const { error } = await supabase.from('batch_planners').update(patch).eq('id', lec.id)
   if (error) return { ok: false, error: error.message }
   return { ok: true }
 }

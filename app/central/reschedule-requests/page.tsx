@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { getAppUser } from '@/lib/auth'
-import { cascadeCancel, addExtraLecture, preponeChapter } from '@/lib/planners'
+import { cascadeCancel, addExtraLecture, preponeChapter, moveClass } from '@/lib/planners'
 import { rescheduleTest, validateTestSlot } from '@/lib/tests'
 import { freeFacultyForSlot } from '@/lib/scheduling'
 import { notify } from '@/lib/notifications'
@@ -119,6 +119,70 @@ export default function RescheduleRequestsPage() {
           .update({ chapter: req.extra_chapter, topic_name: req.extra_topic })
           .eq('id', req.planner_id)
         if (contentError) result = { ok: false, error: contentError.message }
+      }
+      if (!result.ok) {
+        setReviewingId(null)
+        setMessage({ type: 'error', text: result.error ?? 'Could not reschedule the test.' })
+        return
+      }
+    }
+
+    // Apply the change to the planner first (cascade), so we don't mark it
+    // approved if the shift would create an overlap.
+    if (req.planner_id) {
+      // Light presence check only — topics are NOT validated against Concept Tags
+      // (they don't live there); prepone needs a chapter, reschedule/extra need a
+      // topic (chapter optional for demo/doubt classes).
+      if (isPrepone(req) && !req.extra_chapter) {
+        setReviewingId(null); setMessage({ type: 'error', text: 'This prepone request has no chapter.' }); return
+      }
+      if (!isPrepone(req) && !isCancellation(req) && !isTest(req) && !req.extra_topic) {
+        setReviewingId(null); setMessage({ type: 'error', text: 'This request is missing its topic.' }); return
+      }
+      let result: { ok: boolean; error?: string }
+      if (isExtra(req)) {
+        const dur = req.requested_start_time && req.requested_end_time
+          ? toMinutes(req.requested_end_time.slice(0, 5)) - toMinutes(req.requested_start_time.slice(0, 5))
+          : undefined
+        result = await addExtraLecture(supabase, req.planner_id, req.requested_date!, req.requested_start_time ?? null, dur && dur > 0 ? dur : undefined, { topic_name: req.extra_topic ?? null, chapter: req.extra_chapter ?? null })
+      } else if (isCancellation(req)) {
+        // The lecture may have moved since the faculty asked (e.g. a test shift):
+        // never cancel a different day's class than the one requested.
+        const { data: cur } = await supabase.from('batch_planners').select('planned_date').eq('id', req.planner_id).maybeSingle<{ planned_date: string }>()
+        const today = new Date().toISOString().split('T')[0]
+        let c: Awaited<ReturnType<typeof cascadeCancel>>
+        if (cur && req.original_date && cur.planned_date !== req.original_date.slice(0, 10)) {
+          c = { ok: false, shifted: 0, error: `This lecture has moved from ${fmt(req.original_date)} to ${fmt(cur.planned_date)} since the request was raised, so cancelling it now would cancel a different day's class. Reject this request and ask the faculty to raise a fresh one if needed.` }
+        } else if (req.original_date && req.original_date.slice(0, 10) < today) {
+          c = { ok: false, shifted: 0, error: `${fmt(req.original_date)} has already passed — a past class can't be cancelled. Reject the request, or mark what happened in the Daily Lecture Audit.` }
+        } else {
+          c = await cascadeCancel(supabase, req.planner_id)
+        }
+        result = c
+        cancelInfo = c.topicUnplaced
+          ? 'Class cancelled. No buffer slot is left before the batch end date, so its topic is NOT re-placed — add it again from Edit Planner.'
+          : c.shifted > 0 ? `Class cancelled — its topic moved to the next class; ${c.shifted} lecture(s) shifted forward onto the buffer.` : 'Class cancelled.'
+      } else if (isPrepone(req)) {
+        // Prepone the WHOLE chapter from the faculty's chosen start date: its
+        // classes move to the front of the subject's class-dates from there.
+        const today = new Date().toISOString().split('T')[0]
+        const fromDate = req.requested_date || today
+        const { data: lec } = await supabase.from('batch_planners').select('batch_id, subject_id, chapter').eq('id', req.planner_id).single<{ batch_id: string; subject_id: string | null; chapter: string }>()
+        const chapter = req.extra_chapter || lec?.chapter || ''
+        if (!lec?.batch_id || !lec?.subject_id || !chapter) {
+          result = { ok: false, error: 'Could not find the chapter to prepone.' }
+        } else {
+          const r = await preponeChapter(supabase, lec.batch_id, lec.subject_id, chapter, fromDate)
+          result = r.ok ? { ok: true } : { ok: false, error: r.error }
+        }
+      } else {
+        // Reschedule = move THIS class to the faculty's chosen slot: re-validated,
+        // given a one-day timetable slot there, old date marked (lib/planners).
+        if (!req.requested_date || !req.requested_start_time) {
+          result = { ok: false, error: 'Could not find the requested slot.' }
+        } else {
+          result = await moveClass(supabase, req.planner_id, req.requested_date, req.requested_start_time, { topic_name: req.extra_topic ?? null, chapter: req.extra_chapter ?? null })
+        }
       }
       if (!result.ok) {
         setReviewingId(null)

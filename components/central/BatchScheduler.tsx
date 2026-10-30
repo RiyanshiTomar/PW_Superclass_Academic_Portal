@@ -116,6 +116,9 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
   // A branch head with the extra 'centre_admin' permission may also create
   // batches and edit their core details — for their own centre(s) only.
   const [isCentreAdmin, setIsCentreAdmin] = useState(false)
+  // Only an Admin may (deliberately) change the timetable of past dates.
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [unlockPast, setUnlockPast] = useState(false)
   const lockCore = isBranch && !isCentreAdmin
   // For branch scope: store the branch head's allowed centre IDs
   const [allowedCentreIds, setAllowedCentreIds] = useState<Set<string>>(new Set())
@@ -318,6 +321,11 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
     setLoading(true)
     setMessage(null)
 
+    {
+      const { data: { user } } = await supabase.auth.getUser()
+      const au = user ? await getAppUser(supabase, user) : null
+      setIsAdmin(hasRole(au, 'admin'))
+    }
     // For branch scope: resolve the branch head's allowed centres first
     let branchCentreIds: string[] = []
     let batchManagerUserId: string | null = null
@@ -474,6 +482,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
   }
 
   const resetForm = () => {
+    setUnlockPast(false)
     setEditingBatch(null)
     setName(''); setProgramId(''); setCentreId(''); setStartDate(''); setEndDate(''); 
     setManagerId(''); setOwnerId('')  // Reset both manager and owner
@@ -566,7 +575,50 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
     const missing = programSubjects.filter((s) => !covered.has(s.id))
     if (missing.length > 0) return fail(`No class yet for: ${missing.map((s) => s.name).join(', ')}. Every subject needs at least one row.`)
 
-    const flat = flattenRows(scheduleRows)
+    // ── The past is locked ──────────────────────────────────────────────
+    // Classes that already happened (and their audit) must never change, so an
+    // edit only changes the timetable from TODAY on: the old rows keep every
+    // date before today, the edited rows apply from today. An unchanged row is
+    // stitched back into one, so re-saving never splits rows.
+    let flat = flattenRows(scheduleRows)
+    let pastLockedNote = ''
+    const today = istToday()
+    if (editingBatch && editingBatch.start_date < today && !(isAdmin && unlockPast)) {
+      const yday = (() => { const d = new Date(today + 'T12:00:00'); d.setDate(d.getDate() - 1); return d.toISOString().slice(0, 10) })()
+      const { data: oldData, error: oldErr } = await supabase.from('batch_schedules')
+        .select('day_of_week, start_time, end_time, faculty_id, subject_id, classroom_id, effective_from, effective_to').eq('batch_id', editingBatch.id)
+      if (oldErr) return fail(`Could not read the current timetable: ${oldErr.message}`)
+      const hhmm = (t: string) => t.slice(0, 5)
+      const sig = (r: FlatSchedule) => [r.day_of_week, hhmm(r.start_time), hhmm(r.end_time), r.faculty_id ?? '', r.subject_id ?? '', r.classroom_id ?? ''].join('|')
+      const oldStart = editingBatch.start_date, oldEnd = editingBatch.end_date
+      // Old rows → only their part before today.
+      const past: FlatSchedule[] = ((oldData ?? []) as FlatSchedule[])
+        .map((r) => ({ ...r, start_time: hhmm(r.start_time), end_time: hhmm(r.end_time), effective_from: r.effective_from || oldStart, effective_to: (r.effective_to || oldEnd) < yday ? (r.effective_to || oldEnd) : yday }))
+        .filter((r) => r.effective_from! <= r.effective_to!)
+      // Edited rows → only their part from today.
+      const future: FlatSchedule[] = flat
+        .map((r) => ({ ...r, effective_from: (r.effective_from || startDate) > today ? (r.effective_from || startDate) : today, effective_to: r.effective_to || endDate }))
+        .filter((r) => r.effective_from! <= r.effective_to!)
+      // Did the edit try to change dates before today? (tell the user)
+      const pastOf = (rows: FlatSchedule[], from0: string, to0: string) => rows
+        .map((r) => ({ k: sig(r), f: r.effective_from || from0, t: (r.effective_to || to0) < yday ? (r.effective_to || to0) : yday }))
+        .filter((r) => r.f <= r.t).map((r) => `${r.k}|${r.f}|${r.t}`).sort().join(',')
+      if (pastOf(flat, startDate, endDate) !== pastOf((oldData ?? []) as FlatSchedule[], oldStart, oldEnd)) {
+        pastLockedNote = ' Changes before today were not applied — the past timetable is locked (classes already held and audited stay as they were).'
+      }
+      // Stitch: an unchanged row continues its past part instead of a new row.
+      const merged = past.map((r) => ({ ...r }))
+      const rest: FlatSchedule[] = []
+      for (const f of future) {
+        const cont = f.effective_from === today ? merged.find((p) => p.effective_to === yday && sig(p) === sig(f)) : undefined
+        if (cont) cont.effective_to = f.effective_to
+        else rest.push(f)
+      }
+      flat = [...merged, ...rest]
+    }
+    // Rows that end before today are history: not re-validated (they were
+    // valid when they ran, and are never re-saved differently).
+    const live = (r: FlatSchedule) => (r.effective_to || endDate) >= today
 
     // Two slots only clash if same weekday, overlapping time AND overlapping
     // active dates — so the same weekday+time in a different date-segment is OK.
@@ -579,6 +631,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
 
     for (let i = 0; i < flat.length; i++) {
       for (let j = i + 1; j < flat.length; j++) {
+        if (!live(flat[i]) && !live(flat[j])) continue
         if (flat[i].day_of_week !== flat[j].day_of_week) continue
         if (!timesOverlap(flat[i].start_time, flat[i].end_time, flat[j].start_time, flat[j].end_time)) continue
         if (!rangeHit(flat[i], flat[j])) continue
@@ -595,7 +648,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
       }
     }
 
-    for (const sch of flat) {
+    for (const sch of flat.filter(live)) {
       const rf = sch.effective_from || startDate
       const rt = sch.effective_to || endDate
       // A teacher can only clash if one is assigned; unassigned slots skip this.
@@ -665,7 +718,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
       if (editingBatch) syncNote = ' ' + (await alignPlanner(batchId, trimmedName, true))
     }
 
-    setMessage({ type: 'success', text: (editingBatch ? 'Batch updated.' : 'Batch created.') + syncNote })
+    setMessage({ type: 'success', text: (editingBatch ? 'Batch updated.' : 'Batch created.') + syncNote + pastLockedNote })
     resetForm()
     await loadData()
     setSaving(false)
@@ -963,6 +1016,16 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
               </>
             )}
 
+            {editingBatch && (
+              <p className="text-xs text-neutral-500">
+                🔒 Changes apply from <b>today</b> on — the timetable of past dates (classes already held and audited) stays as it was.
+                {isAdmin && (
+                  <label className="ml-2 inline-flex items-center gap-1.5 text-red-700 font-semibold">
+                    <input type="checkbox" checked={unlockPast} onChange={(e) => setUnlockPast(e.target.checked)} /> Admin: also change past dates
+                  </label>
+                )}
+              </p>
+            )}
             <div className="flex gap-3">
               <BtnPrimary type="submit" disabled={saving || !centreId}>{saving ? 'Saving…' : editingBatch ? 'Save Changes' : 'Create Batch'}</BtnPrimary>
               <BtnSecondary type="button" onClick={resetForm}>Cancel</BtnSecondary>

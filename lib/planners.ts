@@ -672,6 +672,7 @@ export async function addExtraLecture(
 
   const startTime = newTime || anchor.start_time
   if (!startTime) return { ok: false, error: 'Pick a start time for the extra class.' }
+  if (newDate < new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())) return { ok: false, error: 'That date has already passed — pick today or a later date.' }
   const dur = durationMinutes && durationMinutes > 0 ? durationMinutes : anchor.duration_minutes
 
   // Faculty must be free at the new slot (only when the lecture has a teacher).
@@ -750,6 +751,9 @@ export async function moveClass(
   if (lec.status === 'conducted') return { ok: false, error: 'This class is already conducted — it can’t be rescheduled.' }
   if (lec.status === 'cancelled') return { ok: false, error: 'This class is cancelled.' }
   if (lec.is_buffer) return { ok: false, error: 'This is a buffer slot with no topic — nothing to reschedule.' }
+  const todayIST = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())
+  if (newDate < todayIST) return { ok: false, error: 'The new date has already passed — pick today or a later date.' }
+  if (lec.planned_date < todayIST) return { ok: false, error: 'This class date has already passed — a past class can’t be rescheduled.' }
   const startTime = newTime.slice(0, 5)
   if (newDate === lec.planned_date && startTime === (lec.start_time ?? '').slice(0, 5)) return { ok: false, error: 'Pick a different date or time.' }
 

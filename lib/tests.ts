@@ -593,6 +593,45 @@ export async function updateTest(
   return { ok: true, shifted, unshiftable }
 }
 
+/** Cancel a test: it stays on record (stage 'Cancelled') with the reason, and
+ *  lectures that were shifted to make room for it move back. A test with marks
+ *  was held, so it can't be cancelled. */
+export async function cancelTest(
+  supabase: SupabaseClient,
+  testId: string,
+  reason: string,
+  userId: string | null
+): Promise<{ ok: boolean; error?: string; reverted?: number; skipped?: number }> {
+  if (!reason.trim()) return { ok: false, error: 'Enter the reason for cancelling.' }
+  const { data: marks, error: mErr } = await supabase.from('test_results').select('test_id').eq('test_id', testId).or('absent.eq.true,marks.not.is.null').limit(1)
+  if (mErr) return { ok: false, error: mErr.message }
+  if (marks?.length) return { ok: false, error: 'This test already has marks entered — a test that was held can’t be cancelled.' }
+
+  const { data: t, error } = await supabase.from('test_schedules')
+    .update({ stage: 'Cancelled', cancel_reason: reason.trim(), cancelled_at: new Date().toISOString(), cancelled_by: userId })
+    .eq('id', testId).select('name, faculty_id').single<{ name: string; faculty_id: string | null }>()
+  if (error) return { ok: false, error: /cancel_reason|cancelled_/.test(error.message) ? 'Run scripts/migration-test-cancel.sql in Supabase first (it adds the cancellation record).' : error.message }
+
+  const revert = await revertTestShift(supabase, testId)
+  await notify(supabase, t?.faculty_id, { type: 'test', title: 'Test cancelled', body: `“${t?.name ?? 'Test'}” was cancelled. Reason: ${reason.trim()}`, link: '/faculty/tests' })
+  return { ok: true, ...revert }
+}
+
+/** Undo a cancellation made by mistake — only if its slot is still free. */
+export async function restoreTest(supabase: SupabaseClient, testId: string): Promise<{ ok: boolean; error?: string }> {
+  const { data: t } = await supabase.from('test_schedules')
+    .select('id, name, batch_id, faculty_id, classroom_id, test_date, start_time, duration_minutes')
+    .eq('id', testId).single<{ id: string; name: string; batch_id: string; faculty_id: string | null; classroom_id: string | null; test_date: string; start_time: string; duration_minutes: number }>()
+  if (!t) return { ok: false, error: 'Test not found.' }
+  const clash = await validateTestSlot(supabase, {
+    batchId: t.batch_id, facultyId: t.faculty_id, classroomId: t.classroom_id, date: t.test_date,
+    startTime: t.start_time.slice(0, 5), durationMinutes: t.duration_minutes, ignoreTestId: t.id, name: t.name,
+  })
+  if (clash) return { ok: false, error: `Its slot is no longer free: ${clash}` }
+  const { error } = await supabase.from('test_schedules').update({ stage: 'Confirmed', cancel_reason: null, cancelled_at: null, cancelled_by: null }).eq('id', testId)
+  return error ? { ok: false, error: error.message } : { ok: true }
+}
+
 export async function setTestStage(
   supabase: SupabaseClient,
   testId: string,
@@ -780,6 +819,7 @@ export async function cascadeShiftTests(
     .from('test_schedules')
     .select('id, name, test_date, start_time, duration_minutes, classroom_id')
     .eq('batch_id', args.batchId)
+    .neq('stage', 'Cancelled')
     .gte('test_date', fromTest.test_date)
     .order('test_date', { ascending: true })
     .order('start_time', { ascending: true })

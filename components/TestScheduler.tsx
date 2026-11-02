@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { fetchAll, fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds, type AppUser } from '@/lib/auth'
 import {
-  createTest, updateTest, setTestStage, getEligibleChapters, getTestCompletion, getBatchFreeWindows, validateTestSlot, shiftPlannerForTest, detachBatchFromTest,
+  createTest, updateTest, setTestStage, cancelTest, restoreTest, getEligibleChapters, getTestCompletion, getBatchFreeWindows, validateTestSlot, shiftPlannerForTest, detachBatchFromTest,
   getFreeFacultyIds, getClashingClass, getFreeClassrooms, revertTestShift, cascadeShiftTests,
   type ClashingClass, type EligibleChapter, type TestInput, type TestCompletion,
   type FreeWindow, type FreeClassroom, type CascadeShiftPreviewItem,
@@ -121,6 +121,8 @@ type TestRow = {
 type TestChapterRow = { test_id: string; chapters: { name: string } | { name: string }[] | null }
 
 function one<T>(v: T | T[] | null): T | null { return !v ? null : Array.isArray(v) ? v[0] ?? null : v }
+const scopeAction = (a: 'edit' | 'delete' | 'cancel') => (a === 'edit' ? 'Edit' : a === 'cancel' ? 'Cancel' : 'Delete')
+const CANCEL_REASONS = ['Faculty unavailable', 'Syllabus not completed', 'Low student attendance', 'Holiday / centre closed', 'Exam clash', 'Technical issue']
 
 export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) {
   const supabase = createClient()
@@ -138,7 +140,15 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   const [msg, setMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   // Edit / delete of a multi-batch test: ask "only this batch" or "all batches".
-  const [scopeAsk, setScopeAsk] = useState<{ test: TestRow; action: 'edit' | 'delete'; batchId: string } | null>(null)
+  const [scopeAsk, setScopeAsk] = useState<{ test: TestRow; action: 'edit' | 'delete' | 'cancel'; batchId: string } | null>(null)
+  // Cancellation: the reason modal (batchId = only that batch of a shared test),
+  // and the record of cancelled tests.
+  const [cancelAsk, setCancelAsk] = useState<{ test: TestRow; batchId: string | null } | null>(null)
+  const [cancelReason, setCancelReason] = useState('')
+  const [cancelInfo, setCancelInfo] = useState<Record<string, { reason: string | null; at: string | null; by: string | null }>>({})
+  const [showCancelled, setShowCancelled] = useState(false)
+  const [cancelFrom, setCancelFrom] = useState('')
+  const [cancelTo, setCancelTo] = useState('')
 
   // Form
   const [showForm, setShowForm] = useState(false)
@@ -706,11 +716,28 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     await loadData()
   }
 
+  useEffect(() => {
+    const ids = tests.filter((t) => t.stage === 'Cancelled').map((t) => t.id)
+    if (!ids.length) return
+    let stop = false
+    ;(async () => {
+      const { data } = await fetchAllIn<{ id: string; cancel_reason: string | null; cancelled_at: string | null; app_users: unknown }>(ids, (chunk, from, to) => supabase.from('test_schedules')
+        .select('id, cancel_reason, cancelled_at, app_users!test_schedules_cancelled_by_fkey(full_name)').in('id', chunk).order('id').range(from, to) as never)
+      if (stop) return
+      const m: Record<string, { reason: string | null; at: string | null; by: string | null }> = {}
+      for (const r of data) m[r.id] = { reason: r.cancel_reason, at: r.cancelled_at, by: one(r.app_users as { full_name: string } | { full_name: string }[] | null)?.full_name ?? null }
+      setCancelInfo(m)
+    })()
+    return () => { stop = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tests])
+
   // Batches a test is held for (primary + multi-batch mappings).
   const batchesOfTest = (t: TestRow) => Array.from(new Set([t.batch_id, ...(testBatchMappings[t.id] ?? [])]))
-  const askOrRun = (t: TestRow, action: 'edit' | 'delete') => {
+  const openCancel = (t: TestRow, batchId: string | null) => { setCancelAsk({ test: t, batchId }); setCancelReason(''); setMsg(null) }
+  const askOrRun = (t: TestRow, action: 'edit' | 'delete' | 'cancel') => {
     const bs = batchesOfTest(t)
-    if (bs.length <= 1) { if (action === 'edit') startEdit(t); else void deleteTest(t); return }
+    if (bs.length <= 1) { if (action === 'edit') startEdit(t); else if (action === 'cancel') openCancel(t, null); else void deleteTest(t); return }
     setScopeAsk({ test: t, action, batchId: filterBatchId && bs.includes(filterBatchId) ? filterBatchId : bs[0] })
   }
   // "Only this batch": give that batch its own copy of the test, then edit /
@@ -719,6 +746,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     if (!scopeAsk) return
     const { test: t, action, batchId: bid } = scopeAsk
     const bn = batches.find((b) => b.id === bid)?.name ?? 'this batch'
+    if (action === 'cancel') { setScopeAsk(null); openCancel(t, bid); return }
     if (action === 'delete' && !confirm(`Delete "${t.name}" for ${bn} only? The other batches keep the test.`)) return
     setScopeAsk(null); setBusyId(t.id); setMsg(null)
     const res = await detachBatchFromTest(supabase, t.id, bid)
@@ -732,11 +760,42 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
     if (!scopeAsk) return
     const { test: t, action } = scopeAsk
     setScopeAsk(null)
-    if (action === 'edit') startEdit(t); else void deleteTest(t)
+    if (action === 'edit') startEdit(t); else if (action === 'cancel') openCancel(t, null); else void deleteTest(t)
+  }
+
+  // Cancel: the test stays on record with its reason. "Only this batch" first
+  // gives that batch its own copy, so the other batches keep their test.
+  const submitCancel = async () => {
+    if (!cancelAsk || !cancelReason.trim()) return
+    const { test: t, batchId: bid } = cancelAsk
+    setCancelAsk(null); setBusyId(t.id); setMsg(null)
+    let id = t.id
+    if (bid) {
+      const d = await detachBatchFromTest(supabase, t.id, bid)
+      if (!d.ok || !d.testId) { setBusyId(null); return setMsg({ type: 'error', text: d.error ?? 'Could not separate the test for this batch.' }) }
+      id = d.testId
+    }
+    const res = await cancelTest(supabase, id, cancelReason, appUser?.id ?? null)
+    setBusyId(null)
+    if (!res.ok) { await loadData(); return setMsg({ type: 'error', text: res.error ?? 'Could not cancel the test.' }) }
+    let note = ''
+    if (res.reverted) note += ` ${res.reverted} lecture(s) moved back to their original date.`
+    if (res.skipped) note += ` ${res.skipped} lecture(s) couldn't auto-revert (their original slot is now used) — check Edit Planner.`
+    setMsg({ type: 'success', text: `Test cancelled and kept on record.${note}` })
+    await loadData()
+  }
+  const undoCancel = async (t: TestRow) => {
+    if (!confirm(`Restore "${t.name}"? It will be scheduled again on its original date and time.`)) return
+    setBusyId(t.id); setMsg(null)
+    const res = await restoreTest(supabase, t.id)
+    setBusyId(null)
+    if (!res.ok) return setMsg({ type: 'error', text: res.error ?? 'Could not restore the test.' })
+    setMsg({ type: 'success', text: 'Test restored.' })
+    await loadData()
   }
 
   const deleteTest = async (t: TestRow, confirmed = false) => {
-    if (!confirmed && !confirm(`Delete test "${t.name}"? This cannot be undone.`)) return
+    if (!confirmed && !confirm(`Delete test "${t.name}"? This cannot be undone and leaves no record.\n\nIf the test was called off, press Cancel here and use "Cancel Test" instead, so it stays on record with its reason.`)) return
     setBusyId(t.id)
     const revert = await revertTestShift(supabase, t.id)
     const { error } = await supabase.from('test_schedules').delete().eq('id', t.id)
@@ -1179,6 +1238,28 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
   }, [visibleTests, filterCentre, filterBatchId, testSearch, batches, testBatchMappings])
 
   const filteredCentres = useMemo(() => centres.filter((c) => allowedCentreIds.has(c.id)), [centres, allowedCentreIds])
+
+  // Record of cancelled tests: same centre/batch/search filters + a date range.
+  const cancelledTests = useMemo(() => filteredTests
+    .filter((t) => t.stage === 'Cancelled' && (!cancelFrom || t.test_date >= cancelFrom) && (!cancelTo || t.test_date <= cancelTo))
+    .sort((a, b) => b.test_date.localeCompare(a.test_date)), [filteredTests, cancelFrom, cancelTo])
+  const centresOfTest = (t: TestRow) => Array.from(new Set(batchesOfTest(t).map((id) => batches.find((b) => b.id === id)?.centre_id).filter((x): x is string => !!x)))
+  const centreName = (id: string) => centres.find((c) => c.id === id)?.name ?? '—'
+  const cancelledByCentre = (() => {
+    const m = new Map<string, number>()
+    for (const t of cancelledTests) for (const c of centresOfTest(t)) m.set(c, (m.get(c) ?? 0) + 1)
+    return Array.from(m.entries()).map(([id, n]) => ({ id, name: centreName(id), n })).sort((a, b) => b.n - a.n)
+  })()
+  const exportCancelled = () => {
+    const cell = (v: string | number | null | undefined) => { const x = v == null ? '' : String(v); return /[",\n]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x }
+    const head = ['Centre', 'Test', 'Test date', 'Batch(es)', 'Type', 'Reason', 'Cancelled by', 'Cancelled on']
+    const rows = cancelledTests.map((t) => {
+      const c = cancelInfo[t.id]
+      return [centresOfTest(t).map(centreName).join(' / '), t.name, t.test_date, getTestBatchNames(t.id, t.batch_id), `${t.test_type} · ${t.part_type}`, c?.reason ?? '', c?.by ?? '', c?.at ? new Date(c.at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '']
+    })
+    const url = URL.createObjectURL(new Blob(['\uFEFF' + [head, ...rows].map((r) => r.map(cell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8;' }))
+    const a = document.createElement('a'); a.href = url; a.download = 'cancelled-tests.csv'; a.click(); URL.revokeObjectURL(url)
+  }
   const filteredBatches = useMemo(() => {
     if (!filterCentre) return visibleBatches
     return visibleBatches.filter((b) => b.centre_id === filterCentre)
@@ -1775,6 +1856,56 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
         )}
       </div>
 
+      {/* ---- Cancelled tests record ------------------------------------------ */}
+      <div className="mb-4">
+        <button onClick={() => setShowCancelled((v) => !v)} className={`px-4 py-2 text-sm font-semibold rounded-lg border ${showCancelled ? 'bg-red-600 border-red-600 text-white' : 'bg-white border-red-200 text-red-700 hover:bg-red-50'}`}>
+          🚫 Cancelled Tests ({visibleTests.filter((t) => t.stage === 'Cancelled').length})
+        </button>
+      </div>
+      {showCancelled && (
+        <div className="mb-6 rounded-xl border border-red-200 bg-white overflow-hidden">
+          <div className="px-4 py-3 border-b border-red-100 bg-red-50/50 flex flex-wrap items-end gap-3">
+            <div className="font-semibold text-neutral-950 mr-auto self-center">Cancelled tests record <span className="text-xs font-normal text-neutral-500">· uses the Centre / Batch / Search filters above</span></div>
+            <div><label className="block text-xs font-medium text-neutral-500 mb-1">Test date from</label><input type="date" value={cancelFrom} onChange={(e) => setCancelFrom(e.target.value)} className="px-2 py-1.5 border border-gray-300 rounded-lg text-sm" /></div>
+            <div><label className="block text-xs font-medium text-neutral-500 mb-1">to</label><input type="date" value={cancelTo} onChange={(e) => setCancelTo(e.target.value)} className="px-2 py-1.5 border border-gray-300 rounded-lg text-sm" /></div>
+            <button onClick={exportCancelled} disabled={!cancelledTests.length} className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-neutral-300 text-white text-sm font-semibold rounded-lg">⬇ Download CSV</button>
+          </div>
+          {cancelledTests.length === 0 ? (
+            <p className="p-6 text-center text-sm text-neutral-400">No cancelled tests for these filters.</p>
+          ) : (
+            <>
+              <div className="px-4 py-3 flex flex-wrap gap-2 border-b border-neutral-100">
+                <span className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-sm font-bold">Total {cancelledTests.length}</span>
+                {cancelledByCentre.map((c) => <span key={c.id} className="px-3 py-1.5 rounded-lg bg-red-50 border border-red-100 text-sm"><b className="text-red-700">{c.n}</b> <span className="text-neutral-700">{c.name}</span></span>)}
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm min-w-[860px]">
+                  <thead><tr className="bg-neutral-50 text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+                    <th className="px-3 py-2">Centre</th><th className="px-3 py-2">Test</th><th className="px-3 py-2">Test date</th><th className="px-3 py-2">Batch(es)</th><th className="px-3 py-2">Reason</th><th className="px-3 py-2">Cancelled by</th><th className="px-3 py-2">Cancelled on</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-neutral-100">
+                    {cancelledTests.map((t) => {
+                      const c = cancelInfo[t.id]
+                      return (
+                        <tr key={t.id} className="align-top">
+                          <td className="px-3 py-2 whitespace-nowrap">{centresOfTest(t).map(centreName).join(', ')}</td>
+                          <td className="px-3 py-2 font-semibold">{t.name}</td>
+                          <td className="px-3 py-2 whitespace-nowrap">{new Date(t.test_date + 'T12:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
+                          <td className="px-3 py-2 text-neutral-600">{getTestBatchNames(t.id, t.batch_id)}</td>
+                          <td className="px-3 py-2 text-neutral-800">{c?.reason || '—'}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-neutral-600">{c?.by ?? '—'}</td>
+                          <td className="px-3 py-2 whitespace-nowrap text-neutral-500">{c?.at ? new Date(c.at).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' }) : '—'}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* ---- Test List — Excel Table ---------------------------------------- */}
       {loading ? (
         <div className="text-center py-8 text-gray-500">Loading tests…</div>
@@ -1826,14 +1957,22 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                 }
                 const subjectGroupList = Array.from(subjectGroups.values())
                 return (
-                  <tr key={t.id} className={`hover:bg-neutral-50 ${!isUpcoming ? 'opacity-60' : ''}`}>
+                  <tr key={t.id} className={`hover:bg-neutral-50 ${t.stage === 'Cancelled' ? 'bg-red-50/50' : !isUpcoming ? 'opacity-60' : ''}`}>
                     <td className="px-3 py-2 whitespace-nowrap font-medium">
                       {new Date(t.test_date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap text-neutral-500">
                       {formatTime(t.start_time)} <span className="text-xs">({t.duration_minutes}m)</span>
                     </td>
-                    <td className="px-3 py-2 font-semibold">{t.name}</td>
+                    <td className="px-3 py-2 font-semibold">
+                      <span className={t.stage === 'Cancelled' ? 'line-through text-neutral-500' : ''}>{t.name}</span>
+                      {t.stage === 'Cancelled' && (
+                        <div className="mt-0.5 max-w-[240px] whitespace-normal font-normal">
+                          <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-red-100 text-red-700">Cancelled</span>
+                          {cancelInfo[t.id]?.reason && <span className="ml-1 text-xs text-red-800">{cancelInfo[t.id].reason}</span>}
+                        </div>
+                      )}
+                    </td>
                     <td className="px-3 py-2 max-w-[160px]">
                       <span className="truncate block text-neutral-700" title={getTestBatchNames(t.id, t.batch_id)}>
                         {getTestBatchNames(t.id, t.batch_id)}
@@ -1878,9 +2017,14 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                         {busyId === t.id
                           ? <span className="text-xs text-neutral-400">…</span>
                           : <>
-                              <button onClick={() => askOrRun(t, 'edit')} className="text-xs font-semibold text-violet-600 hover:text-violet-800 mr-3">Edit</button>
-                              {t.stage !== 'Cancelled' && (
-                                <button onClick={() => openCascade(t)} className="text-xs font-semibold text-orange-500 hover:text-orange-700 mr-3">Shift Forward</button>
+                              {t.stage === 'Cancelled' ? (
+                                <button onClick={() => undoCancel(t)} className="text-xs font-semibold text-emerald-600 hover:text-emerald-800 mr-3">Restore</button>
+                              ) : (
+                                <>
+                                  <button onClick={() => askOrRun(t, 'edit')} className="text-xs font-semibold text-violet-600 hover:text-violet-800 mr-3">Edit</button>
+                                  <button onClick={() => openCascade(t)} className="text-xs font-semibold text-orange-500 hover:text-orange-700 mr-3">Shift Forward</button>
+                                  <button onClick={() => askOrRun(t, 'cancel')} className="text-xs font-semibold text-red-700 hover:text-red-900 mr-3">Cancel Test</button>
+                                </>
                               )}
                               {isPrivileged && (
                                 <button onClick={() => askOrRun(t, 'delete')} className="text-xs font-semibold text-red-500 hover:text-red-700">Delete</button>
@@ -1895,12 +2039,38 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
           </table>
         </div>
       )}
+      {cancelAsk && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-950/50 backdrop-blur-sm" onClick={() => setCancelAsk(null)}>
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl border border-neutral-200 p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div>
+              <h3 className="text-lg font-bold text-neutral-950">Cancel “{cancelAsk.test.name}”</h3>
+              <p className="text-sm text-neutral-500 mt-1">
+                {new Date(cancelAsk.test.test_date + 'T12:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
+                {' · '}{cancelAsk.batchId ? `${batches.find((b) => b.id === cancelAsk.batchId)?.name ?? ''} only` : getTestBatchNames(cancelAsk.test.id, cancelAsk.test.batch_id)}
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-1">Reason *</label>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {CANCEL_REASONS.map((r) => <button key={r} type="button" onClick={() => setCancelReason(r)} className={`px-2 py-1 rounded-lg text-xs border ${cancelReason === r ? 'bg-red-600 border-red-600 text-white' : 'border-neutral-200 text-neutral-600 hover:bg-red-50'}`}>{r}</button>)}
+              </div>
+              <textarea value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} rows={3} placeholder="Why is this test cancelled?" className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-red-400" />
+            </div>
+            <p className="text-xs text-neutral-500">The test stays on record under Cancelled Tests. Lectures shifted for it move back to their dates.</p>
+            <div className="flex gap-3">
+              <button onClick={submitCancel} disabled={!cancelReason.trim()} className="flex-1 h-11 rounded-xl text-sm font-semibold text-white bg-red-600 hover:bg-red-700 disabled:bg-neutral-300">Cancel Test</button>
+              <button onClick={() => setCancelAsk(null)} className="flex-1 h-11 rounded-xl text-sm font-semibold border border-neutral-200 text-neutral-700 hover:bg-neutral-50">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ---- Cascade Shift Modal -------------------------------------------- */}
       {scopeAsk && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-950/50 backdrop-blur-sm" onClick={() => setScopeAsk(null)}>
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl border border-neutral-200 p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <div>
-              <h3 className="text-lg font-bold text-neutral-950">{scopeAsk.action === 'edit' ? 'Edit' : 'Delete'} “{scopeAsk.test.name}”</h3>
+              <h3 className="text-lg font-bold text-neutral-950">{scopeAction(scopeAsk.action)} “{scopeAsk.test.name}”</h3>
               <p className="text-sm text-neutral-500 mt-1">This test is shared by {batchesOfTest(scopeAsk.test).length} batches: {batchesOfTest(scopeAsk.test).map((id) => batches.find((b) => b.id === id)?.name ?? '—').join(', ')}.</p>
             </div>
             <div>
@@ -1910,11 +2080,11 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
               </select>
             </div>
             <div className="space-y-2">
-              <button onClick={runForOneBatch} className={`w-full h-11 rounded-xl text-sm font-semibold text-white ${scopeAsk.action === 'delete' ? 'bg-red-600 hover:bg-red-700' : 'bg-violet-600 hover:bg-violet-700'}`}>
-                {scopeAsk.action === 'edit' ? 'Edit' : 'Delete'} for {batches.find((b) => b.id === scopeAsk.batchId)?.name ?? 'this batch'} only
+              <button onClick={runForOneBatch} className={`w-full h-11 rounded-xl text-sm font-semibold text-white ${scopeAsk.action === 'edit' ? 'bg-violet-600 hover:bg-violet-700' : 'bg-red-600 hover:bg-red-700'}`}>
+                {scopeAction(scopeAsk.action)} for {batches.find((b) => b.id === scopeAsk.batchId)?.name ?? 'this batch'} only
               </button>
               <button onClick={runForAllBatches} className="w-full h-11 rounded-xl text-sm font-semibold border border-neutral-200 text-neutral-700 hover:bg-neutral-50">
-                {scopeAsk.action === 'edit' ? 'Edit' : 'Delete'} for all {batchesOfTest(scopeAsk.test).length} batches
+                {scopeAction(scopeAsk.action)} for all {batchesOfTest(scopeAsk.test).length} batches
               </button>
               <p className="text-xs text-neutral-500">“Only” gives that batch its own copy of the test (with its students’ marks); the other batches keep the original unchanged.</p>
             </div>

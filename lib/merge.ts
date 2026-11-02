@@ -129,19 +129,20 @@ export async function mergeBatch(
 
   // Every test this batch sits (its own or shared with other batches).
   const testIds = Array.from(new Set([...(mapRes.data ?? []).map((r) => r.test_id as string), ...(ownTestRes.data ?? []).map((r) => r.id as string)]))
-  const tests: { id: string; batch_id: string; test_date: string }[] = []
+  const tests: { id: string; batch_id: string; test_date: string; stage: string }[] = []
   const allMaps: { test_id: string; batch_id: string }[] = []
   const withMarks = new Set<string>()
   for (let i = 0; i < testIds.length; i += 150) {
     const ids = testIds.slice(i, i + 150)
     const [t, m, r] = await Promise.all([
-      supabase.from('test_schedules').select('id, batch_id, test_date').in('id', ids),
+      supabase.from('test_schedules').select('id, batch_id, test_date, stage').in('id', ids),
       supabase.from('test_batch_mappings').select('test_id, batch_id').in('test_id', ids),
       fetchAll<{ test_id: string }>((a, b) => supabase.from('test_results').select('test_id').in('test_id', ids).or('absent.eq.true,marks.not.is.null').order('test_id').range(a, b)),
     ])
     const e = t.error?.message ?? m.error?.message ?? r.error
     if (e) return { ok: false, error: e }
-    tests.push(...((t.data ?? []) as typeof tests))
+    // A cancelled test stays on record as it is.
+    tests.push(...((t.data ?? []) as typeof tests).filter((x) => x.stage !== 'Cancelled'))
     allMaps.push(...((m.data ?? []) as typeof allMaps))
     for (const x of r.data) withMarks.add(x.test_id)
   }

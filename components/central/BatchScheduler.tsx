@@ -101,6 +101,27 @@ function weekdayOccurrences(from: string, to: string, dow: number): number {
   return n
 }
 
+// Tidy a schedule before saving: a row whose weekday never falls inside its
+// dates holds no class (drop it), and identical rows (same day, time, subject,
+// faculty, room) whose dates touch or overlap become one row — so edits and
+// the past-lock never pile up extra rows.
+function tidySegments(rows: FlatSchedule[], batchStart: string, batchEnd: string): FlatSchedule[] {
+  const dayAfter = (d: string) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + 1); return x.toISOString().slice(0, 10) }
+  const sig = (r: FlatSchedule) => [r.day_of_week, r.start_time.slice(0, 5), r.end_time.slice(0, 5), r.faculty_id ?? '', r.subject_id ?? '', r.classroom_id ?? ''].join('|')
+  const withDates = rows
+    .map((r) => ({ ...r, effective_from: r.effective_from || batchStart, effective_to: r.effective_to || batchEnd }))
+    .filter((r) => weekdayOccurrences(r.effective_from!, r.effective_to!, r.day_of_week) > 0)
+    .sort((a, b) => sig(a).localeCompare(sig(b)) || a.effective_from!.localeCompare(b.effective_from!))
+  const out: FlatSchedule[] = []
+  for (const r of withDates) {
+    const last = out[out.length - 1]
+    if (last && sig(last) === sig(r) && r.effective_from! <= dayAfter(last.effective_to!)) {
+      if (r.effective_to! > last.effective_to!) last.effective_to = r.effective_to
+    } else out.push({ ...r })
+  }
+  return out
+}
+
 function plannerName(v: Link['planners']): string {
   if (!v) return 'Planner'
   if (Array.isArray(v)) return v[0]?.name ?? 'Planner'
@@ -616,6 +637,7 @@ export default function BatchScheduler({ scope = 'central' }: { scope?: 'central
       }
       flat = [...merged, ...rest]
     }
+    flat = tidySegments(flat, startDate, endDate)
     // Rows that end before today are history: not re-validated (they were
     // valid when they ran, and are never re-saved differently).
     const live = (r: FlatSchedule) => (r.effective_to || endDate) >= today

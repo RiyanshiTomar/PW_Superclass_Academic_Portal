@@ -750,7 +750,6 @@ export async function moveClass(
   if (!lec) return { ok: false, error: 'Lecture not found.' }
   if (lec.status === 'conducted') return { ok: false, error: 'This class is already conducted — it can’t be rescheduled.' }
   if (lec.status === 'cancelled') return { ok: false, error: 'This class is cancelled.' }
-  if (lec.is_buffer) return { ok: false, error: 'This is a buffer slot with no topic — nothing to reschedule.' }
   const todayIST = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())
   if (newDate < todayIST) return { ok: false, error: 'The new date has already passed — pick today or a later date.' }
   if (lec.planned_date < todayIST) return { ok: false, error: 'This class date has already passed — a past class can’t be rescheduled.' }
@@ -870,4 +869,125 @@ export async function preponeChapter(
     if (error) return { ok: false, moved: 0, error: error.message }
   }
   return { ok: true, moved: chosen.length }
+}
+
+// ============================================================
+// Cancel / reschedule "the class on DATE at TIME" — what a faculty or Batch
+// Manager actually asks for. The planner row may have moved since the request
+// was raised (another cancel or a test shifted it), so the class is found by
+// its batch + subject + date + time, not just by the row id.
+// ============================================================
+
+export type ClassRef = { plannerId?: string | null; scheduleId?: string | null; date: string; startTime: string | null }
+type ClassRow = {
+  id: string; batch_id: string; subject_id: string | null; link_id: string | null; faculty_id: string | null; classroom_id: string | null
+  planned_date: string; start_time: string | null; duration_minutes: number; status: string; is_buffer: boolean; stage: string
+  chapter: string | null; topic_name: string | null
+}
+const CLASS_COLS = 'id, batch_id, subject_id, link_id, faculty_id, classroom_id, planned_date, start_time, duration_minutes, status, is_buffer, stage, chapter, topic_name'
+const istTodayStr = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())
+
+async function findClass(supabase: SupabaseClient, ref: ClassRef): Promise<{
+  error?: string; row: ClassRow | null; cancelled: boolean
+  slot: { batch_id: string; subject_id: string | null; faculty_id: string | null; classroom_id: string | null; start_time: string; end_time: string } | null
+}> {
+  let batchId: string | null = null, subjectId: string | null = null
+  let slot = null as null | { batch_id: string; subject_id: string | null; faculty_id: string | null; classroom_id: string | null; start_time: string; end_time: string }
+  let own: ClassRow | null = null
+  if (ref.plannerId) {
+    const { data } = await supabase.from('batch_planners').select(CLASS_COLS).eq('id', ref.plannerId).maybeSingle<ClassRow>()
+    if (data) { own = data; batchId = data.batch_id; subjectId = data.subject_id }
+  }
+  if (ref.scheduleId) {
+    const { data } = await supabase.from('batch_schedules').select('batch_id, subject_id, faculty_id, classroom_id, start_time, end_time').eq('id', ref.scheduleId).maybeSingle()
+    if (data) { slot = data as typeof slot; batchId = batchId ?? slot!.batch_id; subjectId = subjectId ?? slot!.subject_id }
+  }
+  if (!batchId) return { error: 'Could not find this class (it may have been deleted).', row: null, cancelled: false, slot }
+  let q = supabase.from('batch_planners').select(CLASS_COLS).eq('batch_id', batchId).eq('planned_date', ref.date)
+  q = subjectId ? q.eq('subject_id', subjectId) : q.is('subject_id', null)
+  const { data: rows } = await q
+  const list = (rows ?? []) as ClassRow[]
+  const mins = (t: string | null) => (t ? toMinutes(t.slice(0, 5)) : 0)
+  const at = mins(ref.startTime)
+  if (list.some((r) => r.status === 'cancelled' && ref.startTime && mins(r.start_time) === at)) return { row: null, cancelled: true, slot }
+  if (own && own.planned_date === ref.date && own.status !== 'cancelled') return { row: own, cancelled: false, slot }
+  const live = list.filter((r) => r.status !== 'cancelled')
+    .sort((a, b) => Math.abs(mins(a.start_time) - at) - Math.abs(mins(b.start_time) - at) || Number(a.is_buffer) - Number(b.is_buffer))
+  return { row: live[0] ?? null, cancelled: false, slot }
+}
+
+/** Cancel the class on ref.date at ref.startTime. Already cancelled → nothing
+ *  to do. Today or later → the usual cascade (topic to the next class). A date
+ *  that has passed → the class is recorded as not held and its topic goes to
+ *  the subject's next free buffer slot (past classes never shift). */
+export async function cancelClassAt(supabase: SupabaseClient, ref: ClassRef): Promise<{ ok: boolean; error?: string; message?: string }> {
+  const f = await findClass(supabase, ref)
+  if (f.error) return { ok: false, error: f.error }
+  if (f.cancelled) return { ok: true, message: 'This class was already cancelled — the request is now closed.' }
+  const today = istTodayStr()
+  if (!f.row) {
+    // A timetable class with no planner row: a marker makes it "no class".
+    if (!f.slot) return { ok: false, error: 'Could not find this class on that date.' }
+    const { error } = await supabase.from('batch_planners').insert({
+      batch_id: f.slot.batch_id, subject_id: f.slot.subject_id, faculty_id: f.slot.faculty_id, classroom_id: f.slot.classroom_id,
+      planned_date: ref.date, start_time: ref.startTime ?? f.slot.start_time,
+      duration_minutes: toMinutes(f.slot.end_time.slice(0, 5)) - toMinutes(f.slot.start_time.slice(0, 5)),
+      chapter: '', topic_name: 'Class cancelled', is_buffer: false, status: 'cancelled', stage: 'Confirmed',
+    })
+    return error ? { ok: false, error: error.message } : { ok: true, message: 'Class cancelled.' }
+  }
+  const row = f.row
+  if (row.status === 'conducted') return { ok: false, error: 'This class is marked conducted — it was held, so it can’t be cancelled.' }
+  if (ref.date >= today) {
+    const c = await cascadeCancel(supabase, row.id)
+    if (!c.ok) return { ok: false, error: c.error }
+    return {
+      ok: true,
+      message: c.topicUnplaced ? 'Class cancelled. No buffer slot is left before the batch end date, so its topic is NOT re-placed — add it again from Edit Planner.'
+        : c.shifted > 0 ? `Class cancelled — its topic moved to the next class; ${c.shifted} lecture(s) shifted forward onto the buffer.` : 'Class cancelled.',
+    }
+  }
+  // Past date: record "not held"; re-place the topic on the next free buffer.
+  if (row.is_buffer) {
+    const { error } = await supabase.from('batch_planners').update({ status: 'cancelled' }).eq('id', row.id)
+    return error ? { ok: false, error: error.message } : { ok: true, message: 'Class recorded as not held (it had no topic).' }
+  }
+  const { data: buf } = await supabase.from('batch_planners').select('id, planned_date')
+    .eq('batch_id', row.batch_id).eq('subject_id', row.subject_id as string).eq('is_buffer', true).neq('status', 'cancelled')
+    .gte('planned_date', today).order('planned_date').order('start_time').limit(1)
+  const next = (buf ?? [])[0] as { id: string; planned_date: string } | undefined
+  if (next) {
+    const { error: e1 } = await supabase.from('batch_planners')
+      .update({ is_buffer: false, chapter: row.chapter, topic_name: row.topic_name, status: 'planned', stage: row.stage || 'Confirmed' }).eq('id', next.id)
+    if (e1) return { ok: false, error: e1.message }
+  }
+  const { error: e2 } = await supabase.from('batch_planners').update({ status: 'cancelled' }).eq('id', row.id)
+  if (e2) return { ok: false, error: e2.message }
+  return {
+    ok: true,
+    message: next ? `Class recorded as not held; its topic moved to the next free class on ${next.planned_date}.`
+      : 'Class recorded as not held. No free buffer slot is left, so its topic is NOT re-placed — add it again from Edit Planner.',
+  }
+}
+
+/** Move the class on ref.date at ref.startTime to newDate/newTime. */
+export async function moveClassAt(supabase: SupabaseClient, ref: ClassRef, newDate: string, newTime: string,
+  override?: { topic_name?: string | null; chapter?: string | null }): Promise<{ ok: boolean; error?: string }> {
+  const f = await findClass(supabase, ref)
+  if (f.error) return { ok: false, error: f.error }
+  if (f.cancelled) return { ok: false, error: 'This class was cancelled — there is nothing to move. Reject this request.' }
+  let id = f.row?.id
+  if (!id) {
+    // A timetable class with no planner row: give it a (buffer) row to move.
+    if (!f.slot) return { ok: false, error: 'Could not find this class on that date.' }
+    const { data, error } = await supabase.from('batch_planners').insert({
+      batch_id: f.slot.batch_id, subject_id: f.slot.subject_id, faculty_id: f.slot.faculty_id, classroom_id: f.slot.classroom_id,
+      planned_date: ref.date, start_time: ref.startTime ?? f.slot.start_time,
+      duration_minutes: toMinutes(f.slot.end_time.slice(0, 5)) - toMinutes(f.slot.start_time.slice(0, 5)),
+      chapter: '', topic_name: '', is_buffer: true, status: 'planned', stage: 'Confirmed',
+    }).select('id').single()
+    if (error || !data) return { ok: false, error: error?.message ?? 'Could not prepare the class to move.' }
+    id = data.id as string
+  }
+  return moveClass(supabase, id, newDate, newTime, override)
 }

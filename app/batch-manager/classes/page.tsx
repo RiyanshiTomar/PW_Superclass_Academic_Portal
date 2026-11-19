@@ -6,9 +6,8 @@ import { getAppUser, getUserCentreIds } from '@/lib/auth'
 import { formatTime, toMinutes, weeklySlotActiveOn } from '@/lib/utils'
 import { minutesToTimeString } from '@/lib/validation'
 import { matchClasses } from '@/lib/audit-match'
-import { cascadeCancel, moveClass } from '@/lib/planners'
 import { getBatchFreeWindows, type FreeWindow } from '@/lib/tests'
-import { notify, notifyRoles } from '@/lib/notifications'
+import { notifyRoles } from '@/lib/notifications'
 import { fetchAllIn } from '@/lib/supabase/fetch-all'
 import { Alert, BtnPrimary, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
@@ -46,6 +45,8 @@ export default function BatchManagerClasses() {
   const [batchFilter, setBatchFilter] = useState('')
   const [date, setDate] = useState(today)
   const [classes, setClasses] = useState<Cls[]>([])
+  // Requests already raised for a class on this date (key = planner row or slot).
+  const [reqs, setReqs] = useState<Record<string, { type: string; status: string }>>({})
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
 
@@ -104,6 +105,15 @@ export default function BatchManagerClasses() {
       }
     }).sort((a, c) => a.start.localeCompare(c.start) || a.batchName.localeCompare(c.batchName))
     setClasses(out)
+    const { data: rq } = await supabase.from('reschedule_requests')
+      .select('planner_id, schedule_id, request_type, status, original_start_time, created_at')
+      .eq('original_date', date).neq('status', 'rejected').order('created_at')
+    const m: Record<string, { type: string; status: string }> = {}
+    for (const r of (rq ?? []) as { planner_id: string | null; schedule_id: string | null; request_type: string; status: string; original_start_time: string | null }[]) {
+      const c = out.find((x) => (r.planner_id && x.lec?.id === r.planner_id) || (r.schedule_id && x.slot.id === r.schedule_id && (r.original_start_time ?? '').slice(0, 5) === x.start))
+      if (c) m[c.key] = { type: r.request_type, status: r.status }
+    }
+    setReqs(m)
     setLoading(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [batches, batchFilter, date])
@@ -130,58 +140,46 @@ export default function BatchManagerClasses() {
 
   const open = (mode: 'cancel' | 'reschedule', c: Cls) => { setAction({ mode, c }); setReason(''); setNewDate(''); setNewTime(''); setMessage(null) }
 
+  // A Batch Manager's cancel / reschedule is a REQUEST — Central approves it
+  // on Reschedule Requests, which then applies it (lib/planners cancelClassAt /
+  // moveClassAt) and tells the faculty.
   async function apply() {
     if (!action || !me || !reason.trim()) return
     const c = action.c
+    if (action.mode === 'reschedule' && (!newDate || !newTime)) { setMessage({ type: 'error', text: 'Pick the new date and a free time.' }); return }
     setSaving(true)
-    let ok = false, text = ''
-    if (action.mode === 'cancel') {
-      if (c.lec) {
-        const r = await cascadeCancel(supabase, c.lec.id)
-        ok = r.ok
-        text = !r.ok ? (r.error ?? 'Could not cancel.')
-          : r.topicUnplaced ? 'Class cancelled. No buffer slot is left before the batch end date, so its topic is NOT re-placed — Central must add it again from Edit Planner.'
-            : r.shifted > 0 ? `Class cancelled — its topic moved to the next class; ${r.shifted} lecture(s) shifted forward onto the buffer.` : 'Class cancelled.'
-      } else {
-        // A timetable class with no planner row: a marker makes it "no class".
-        const { error } = await supabase.from('batch_planners').insert({
-          batch_id: c.batchId, subject_id: c.slot.subject_id, faculty_id: c.slot.faculty_id, classroom_id: c.slot.classroom_id,
-          planned_date: date, start_time: c.slot.start_time, duration_minutes: c.minutes, chapter: '', topic_name: 'Class cancelled',
-          is_buffer: false, status: 'cancelled', stage: 'Confirmed',
-        })
-        ok = !error; text = error ? error.message : 'Class cancelled.'
-      }
-    } else {
-      if (!c.lec || !newDate || !newTime) { setSaving(false); setMessage({ type: 'error', text: 'Pick the new date and a free time.' }); return }
-      const r = await moveClass(supabase, c.lec.id, newDate, newTime)
-      ok = r.ok
-      text = r.ok ? `Class moved to ${fmtDay(newDate)} at ${formatTime(newTime)}.` : (r.error ?? 'Could not reschedule.')
-    }
-    if (ok) {
-      const what = `${c.batchName} · ${c.subject} · ${fmtDay(date)} ${formatTime(c.start)}`
-      const title = action.mode === 'cancel' ? 'Class cancelled' : 'Class rescheduled'
-      const body = action.mode === 'cancel'
-        ? `${me.name} (Batch Manager) cancelled ${what}. Reason: ${reason.trim()}`
-        : `${me.name} (Batch Manager) moved ${what} to ${fmtDay(newDate)} ${formatTime(newTime)}. Reason: ${reason.trim()}`
-      await Promise.all([
-        notify(supabase, c.facultyId, { type: 'reschedule', title, body, link: '/faculty/calendar' }),
-        notifyRoles(supabase, ['central_team'], { type: 'reschedule', title, body, link: '/central/timetable' }),
-        supabase.from('audit_log').insert({
-          user_id: me.id, action: `${title} by Batch Manager — ${what}`, entity_type: 'lecture', entity_id: c.lec?.id ?? null,
-          details: { reason: reason.trim(), batch_id: c.batchId, date, start: c.start, ...(action.mode === 'reschedule' ? { new_date: newDate, new_time: newTime } : {}) },
-        }),
-      ])
-      setAction(null)
-      await load()
-    }
+    const endMin = toMinutes(newTime || '00:00') + (c.minutes || 60)
+    const { error } = await supabase.from('reschedule_requests').insert({
+      planner_id: c.lec?.id ?? null,
+      schedule_id: c.slot.id,
+      requested_by: me.id,
+      request_type: action.mode === 'cancel' ? 'cancel' : 'planner',
+      original_date: date,
+      original_start_time: c.start,
+      requested_date: action.mode === 'cancel' ? null : newDate,
+      requested_start_time: action.mode === 'cancel' ? null : newTime,
+      requested_end_time: action.mode === 'cancel' ? null : minutesToTimeString(endMin).slice(0, 5),
+      reason: reason.trim(),
+      status: 'pending',
+    })
     setSaving(false)
-    setMessage({ type: ok ? 'success' : 'error', text })
+    if (error) { setMessage({ type: 'error', text: `Could not send the request: ${error.message}` }); return }
+    const what = `${c.batchName} · ${c.subject} · ${fmtDay(date)} ${formatTime(c.start)}`
+    await notifyRoles(supabase, ['central_team'], {
+      type: 'reschedule',
+      title: action.mode === 'cancel' ? 'Cancellation request (Batch Manager)' : 'Reschedule request (Batch Manager)',
+      body: `${me.name}: ${what}${action.mode === 'reschedule' ? ` → ${fmtDay(newDate)} ${formatTime(newTime)}` : ''}. Reason: ${reason.trim()}`,
+      link: '/central/reschedule-requests',
+    })
+    setAction(null)
+    setMessage({ type: 'success', text: `Request sent to Central Team — the class ${action.mode === 'cancel' ? 'is cancelled' : 'moves'} once they approve it.` })
+    await load()
   }
 
   const past = date < today
   return (
     <div className="max-w-5xl mx-auto space-y-5">
-      <PageHeader title="Cancel / Reschedule" description="Classes of your batches, day by day. Cancel or move a class — it applies straight away, and the faculty and Central Team are notified." />
+      <PageHeader title="Cancel / Reschedule" description="Classes of your batches, day by day. Request a cancellation or a new slot — Central Team approves it, then the faculty is notified." />
       {message && <Alert type={message.type}>{message.text}</Alert>}
 
       <Card className="p-4">
@@ -226,9 +224,14 @@ export default function BatchManagerClasses() {
                     <td className="px-3 py-2.5 text-neutral-500">{c.room}</td>
                     <td className="px-3 py-2.5 text-right whitespace-nowrap">
                       {c.conducted ? <span className="text-xs font-semibold text-neutral-400">Conducted</span>
+                        : reqs[c.key] ? (
+                          <span className={`text-xs font-semibold ${reqs[c.key].status === 'pending' ? 'text-amber-600' : 'text-emerald-600'}`}>
+                            {reqs[c.key].status === 'pending' ? '⏳ ' : '✓ '}{reqs[c.key].type === 'cancel' ? 'Cancel' : 'Reschedule'} {reqs[c.key].status === 'pending' ? 'requested' : 'approved'}
+                          </span>
+                        )
                         : past ? <span className="text-xs text-neutral-300">—</span> : (
                         <div className="inline-flex gap-1.5">
-                          {c.kind === 'planned' && <button onClick={() => open('reschedule', c)} className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 hover:bg-violet-100">Reschedule</button>}
+                          <button onClick={() => open('reschedule', c)} className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200 hover:bg-violet-100">Reschedule</button>
                           <button onClick={() => open('cancel', c)} className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-red-50 text-red-700 border border-red-200 hover:bg-red-100">Cancel</button>
                         </div>
                       )}
@@ -244,12 +247,12 @@ export default function BatchManagerClasses() {
       {action && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-950/50 backdrop-blur-sm">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl border border-neutral-200 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg font-bold text-neutral-950 mb-1">{action.mode === 'cancel' ? 'Cancel class' : 'Reschedule class'}</h3>
+            <h3 className="text-lg font-bold text-neutral-950 mb-1">{action.mode === 'cancel' ? 'Request cancellation' : 'Request reschedule'}</h3>
             <p className="text-sm text-neutral-500 mb-4">{action.c.batchName} · {action.c.subject} · {fmtDay(date)} at {formatTime(action.c.start)} · {action.c.faculty}</p>
 
             {action.mode === 'cancel' ? (
               <p className="text-xs text-neutral-500 mb-3 rounded-lg bg-neutral-50 border border-neutral-200 p-3">
-                {action.c.kind === 'planned' ? 'The class won’t happen. Its topic moves to this subject’s next class and later lectures shift forward onto a buffer slot (never past the batch end date).' : 'This class has no topic in the planner — it is simply marked as not happening.'}
+                {action.c.kind === 'planned' ? 'Once Central approves, the class won’t happen: its topic moves to this subject’s next class and later lectures shift forward onto a buffer slot (never past the batch end date).' : 'This class has no topic in the planner — once Central approves, it is simply marked as not happening.'}
               </p>
             ) : (
               <>
@@ -265,14 +268,14 @@ export default function BatchManagerClasses() {
                     ))}
                   </div>
                 )}
-                <p className="text-xs text-neutral-500 mb-3 rounded-lg bg-neutral-50 border border-neutral-200 p-3">Only this class moves (same topic, faculty and room). Faculty, room and batch are re-checked, so nothing can clash. Its old time shows as “rescheduled”.</p>
+                <p className="text-xs text-neutral-500 mb-3 rounded-lg bg-neutral-50 border border-neutral-200 p-3">Once Central approves, only this class moves (same topic, faculty and room). Faculty, room and batch are re-checked at approval, so nothing can clash. Its old time shows as “rescheduled”.</p>
               </>
             )}
 
             <label className="block text-xs font-medium text-neutral-500 mb-1">Reason *</label>
             <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} className="w-full px-3 py-2 border border-neutral-200 rounded-lg text-sm mb-4" placeholder={action.mode === 'cancel' ? 'Why is the class cancelled?' : 'Why is the class moved?'} />
             <div className="flex gap-3">
-              <BtnPrimary className="flex-1" onClick={apply} disabled={saving || !reason.trim() || (action.mode === 'reschedule' && (!newDate || !newTime))}>{saving ? 'Saving…' : action.mode === 'cancel' ? 'Cancel class' : 'Reschedule'}</BtnPrimary>
+              <BtnPrimary className="flex-1" onClick={apply} disabled={saving || !reason.trim() || (action.mode === 'reschedule' && (!newDate || !newTime))}>{saving ? 'Sending…' : 'Send to Central'}</BtnPrimary>
               <BtnSecondary className="flex-1" onClick={() => setAction(null)}>Close</BtnSecondary>
             </div>
           </div>

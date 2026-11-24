@@ -16,14 +16,19 @@ type SlotLike = { batch_id: string; subject_id: string | null; start_time: strin
 type LectureLike = { id: string; batch_id: string; subject_id: string | null; start_time: string | null; is_buffer: boolean; status: string }
 
 export type ClassPick<S, P> = { kind: 'planned' | 'buffer' | 'unplanned'; p: P | null; slot: S }
+export type CancelledPick<S, P> = { kind: 'cancelled'; p: P; slot: S }
 
 /** `slots` = the weekly slots RUNNING on the date; `lectures` = that date's planner rows. */
-export function matchClasses<S extends SlotLike, P extends LectureLike>(slots: S[], lectures: P[]): ClassPick<S, P>[] {
+/** With keepCancelled, a cancelled class is returned as kind 'cancelled' (for
+ *  showing it); otherwise it is left out. */
+export function matchClasses<S extends SlotLike, P extends LectureLike>(slots: S[], lectures: P[]): ClassPick<S, P>[]
+export function matchClasses<S extends SlotLike, P extends LectureLike>(slots: S[], lectures: P[], opts: { keepCancelled: true }): (ClassPick<S, P> | CancelledPick<S, P>)[]
+export function matchClasses<S extends SlotLike, P extends LectureLike>(slots: S[], lectures: P[], opts?: { keepCancelled?: boolean }): (ClassPick<S, P> | CancelledPick<S, P>)[] {
   const used = new Set<string>()
   const mins = (t: string | null) => (t ? toMinutes(t.slice(0, 5)) : 0)
   // Prefer a real lecture, then a cancellation marker, then a buffer.
   const rank = (p: P) => (!p.is_buffer && p.status !== 'cancelled' ? 0 : p.status === 'cancelled' ? 1 : 2)
-  const picks: ClassPick<S, P>[] = []
+  const picks: (ClassPick<S, P> | CancelledPick<S, P>)[] = []
   for (const s of [...slots].sort((a, b) => a.start_time.localeCompare(b.start_time))) {
     const cands = lectures.filter((p) => !used.has(p.id) && p.batch_id === s.batch_id && p.subject_id === s.subject_id)
     // A cancel/reschedule marker at exactly this slot's time belongs to THIS
@@ -32,7 +37,7 @@ export function matchClasses<S extends SlotLike, P extends LectureLike>(slots: S
     cands.sort((a, b) => exact(a) - exact(b) || rank(a) - rank(b) || Math.abs(mins(a.start_time) - mins(s.start_time)) - Math.abs(mins(b.start_time) - mins(s.start_time)))
     const p = cands[0] ?? null
     if (p) used.add(p.id)
-    if (p?.status === 'cancelled') continue // class cancelled for this date
+    if (p?.status === 'cancelled') { if (opts?.keepCancelled) picks.push({ kind: 'cancelled', p, slot: s }); continue } // class cancelled for this date
     if (p && !p.is_buffer) picks.push({ kind: 'planned', p, slot: s })
     else picks.push({ kind: p ? 'buffer' : 'unplanned', p, slot: s })
   }

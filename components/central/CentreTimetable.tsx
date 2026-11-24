@@ -4,12 +4,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { fetchAllIn } from '@/lib/supabase/fetch-all'
 import { getAppUser, getUserCentreIds } from '@/lib/auth'
-import { toMinutes, formatTime } from '@/lib/utils'
+import { toMinutes, formatTime, weeklySlotActiveOn } from '@/lib/utils'
+import { matchClasses } from '@/lib/audit-match'
 import { Alert, BtnSecondary, Card, PageHeader } from '@/components/PortalShell'
 
 type Centre = { id: string; name: string; branch_head_id: string | null }
 type Classroom = { id: string; name: string; room_no: string | null; centre_id: string; is_active: boolean }
-type Kind = 'class' | 'lecture' | 'test'
+type Kind = 'class' | 'lecture' | 'test' | 'cancelled'
 type Block = {
   key: string; roomId: string; startMin: number; endMin: number; kind: Kind
   batch: string; subject: string; topic: string; faculty: string; tag?: string
@@ -99,17 +100,15 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
 
       const [schedRes, planRes, testRes] = await Promise.all([
         supabase.from('batch_schedules')
-          .select('start_time, end_time, classroom_id, batch_id, subjects(name), app_users(full_name)')
+          .select('id, start_time, end_time, classroom_id, batch_id, subject_id, faculty_id, effective_from, effective_to, batches(start_date, end_date, status), subjects(name), app_users(full_name)')
           .in('batch_id', batchIds)
-          .eq('day_of_week', weekday)
-          .lte('effective_from', date)   // segment must have started by this date
-          .or(`effective_to.is.null,effective_to.gte.${date}`),  // segment must not have ended yet
+          .eq('day_of_week', weekday),
+        // Every planner row of the date — buffers and cancel markers too, they
+        // decide which class is cancelled / topic-less (lib/audit-match).
         supabase.from('batch_planners')
-          .select('start_time, duration_minutes, classroom_id, topic_name, batch_id, subjects(name), app_users!batch_planners_faculty_id_fkey(full_name)')
+          .select('id, start_time, duration_minutes, classroom_id, topic_name, batch_id, subject_id, faculty_id, is_buffer, status, subjects(name), app_users!batch_planners_faculty_id_fkey(full_name)')
           .in('batch_id', batchIds)
-          .eq('planned_date', date)
-          .eq('is_buffer', false)
-          .not('start_time', 'is', null),
+          .eq('planned_date', date),
         supabase.from('test_schedules')
           .select('id, start_time, duration_minutes, classroom_id, name, test_type, batch_id, subjects(name), app_users!test_schedules_faculty_id_fkey(full_name)')
           .in('batch_id', batchIds)
@@ -141,61 +140,32 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
         }
       }
 
-      // Build a set of valid (batch_id + subject_name + start_time) slots from
-      // today's batch_schedules. Planner rows that don't match a valid slot for
-      // their batch+subject on this weekday are ghost entries (stale from an old
-      // schedule) and must be excluded from the calendar.
-      type SchedSlot = { start: number; end: number; classroom: string }
-      const validSlots = new Map<string, SchedSlot[]>() // key: `${batch_id}||${subject_name}`
-      ;(schedRes.data ?? []).forEach((s) => {
-        const sn = one(s.subjects as never)?.['name'] as string | undefined ?? ''
-        const key = `${s.batch_id as string}||${sn}`
-        const arr = validSlots.get(key) ?? []
-        arr.push({ start: toMinutes((s.start_time as string).slice(0, 5)), end: toMinutes((s.end_time as string).slice(0, 5)), classroom: (s.classroom_id as string) ?? '' })
-        validSlots.set(key, arr)
-      })
-
-      // A planner row is valid if its batch+subject has a matching slot on this
-      // weekday in batch_schedules — the planner time must actually OVERLAP with
-      // the current schedule slot (no tolerance). If the schedule was moved from
-      // 7:30 to 8:00, the 7:30 planner row no longer overlaps the 8:00 slot and
-      // is treated as a stale ghost entry — dropped from the calendar.
-      const validPlanners = (planRes.data ?? []).filter((p) => {
-        const sn = one(p.subjects as never)?.['name'] as string | undefined ?? ''
-        const key = `${p.batch_id as string}||${sn}`
-        const slots = validSlots.get(key)
-        if (!slots || slots.length === 0) return false // no schedule for this subject today → ghost
-        const pStart = toMinutes((p.start_time as string).slice(0, 5))
-        const pEnd = pStart + (p.duration_minutes as number)
-        // Must genuinely overlap with the current scheduled slot (no time tolerance)
-        return slots.some((sl) => pStart < sl.end && pEnd > sl.start)
-      })
-
-      // The planner drives what topic a class covers on a given day. Build a
-      // batch+subject → topic(s) lookup from valid planner lectures only.
-      const planTopics = new Map<string, string[]>()
-      validPlanners.forEach((p) => {
-        const bn = batchNameById.get(p.batch_id as string)
-        const sn = one(p.subjects as never)?.['name'] as string | undefined
-        const t = ((p.topic_name as string) || '').trim()
-        if (!bn || !sn || !t) return
-        const k = `${bn}||${sn}`
-        const arr = planTopics.get(k) ?? []
-        arr.push(t)
-        planTopics.set(k, arr)
-      })
-
+      // Each class running today = a weekly slot matched to its planner row by
+      // the shared rule (lib/audit-match) — the same set the audit and faculty
+      // calendars use. A cancelled class still shows, marked; a substitute's
+      // name shows when the lecture's faculty differs from the slot's.
+      type SlotRow = { id: string; start_time: string; end_time: string; classroom_id: string | null; batch_id: string; subject_id: string | null; faculty_id: string | null; effective_from: string | null; effective_to: string | null; batches: unknown; subjects: unknown; app_users: unknown }
+      type LecRow = { id: string; start_time: string | null; duration_minutes: number; classroom_id: string | null; topic_name: string | null; batch_id: string; subject_id: string | null; faculty_id: string | null; is_buffer: boolean; status: string; subjects: unknown; app_users: unknown }
+      const running = ((schedRes.data ?? []) as unknown as SlotRow[]).filter((s) => weeklySlotActiveOn(s, date))
       const out: Block[] = []
-      ;(schedRes.data ?? []).forEach((s, i) => {
-        const st = toMinutes((s.start_time as string).slice(0, 5))
-        const batch = batchNameById.get(s.batch_id as string) ?? 'Batch'
-        const subject = one(s.subjects as never)?.['name'] ?? '—'
-        out.push({ key: `c${i}`, roomId: (s.classroom_id as string) ?? '∅', startMin: st, endMin: toMinutes((s.end_time as string).slice(0, 5)), kind: 'class', batch, subject, topic: (planTopics.get(`${batch}||${subject}`) ?? []).join(', '), faculty: one(s.app_users as never)?.['full_name'] ?? '—' })
-      })
-      validPlanners.forEach((p, i) => {
-        const st = toMinutes((p.start_time as string).slice(0, 5))
-        const batch = batchNameById.get(p.batch_id as string) ?? 'Batch'
-        out.push({ key: `p${i}`, roomId: (p.classroom_id as string) ?? '∅', startMin: st, endMin: st + (p.duration_minutes as number), kind: 'lecture', batch, subject: one(p.subjects as never)?.['name'] ?? 'Lecture', topic: (p.topic_name as string) || '', faculty: one(p.app_users as never)?.['full_name'] ?? '—', tag: 'Planner' })
+      matchClasses(running, (planRes.data ?? []) as unknown as LecRow[], { keepCancelled: true }).forEach(({ kind, p, slot }, i) => {
+        const batch = batchNameById.get(slot.batch_id) ?? 'Batch'
+        const subject = one(slot.subjects as never)?.['name'] ?? '—'
+        const slotFaculty = one(slot.app_users as never)?.['full_name'] ?? '—'
+        const lecFaculty = p ? one(p.app_users as never)?.['full_name'] ?? null : null
+        const substitute = !!p?.faculty_id && p.faculty_id !== slot.faculty_id && !!lecFaculty
+        const startMin = toMinutes(slot.start_time.slice(0, 5)), endMin = toMinutes(slot.end_time.slice(0, 5))
+        if (kind === 'cancelled') {
+          const why = (p?.topic_name ?? '').startsWith('Class rescheduled') ? p!.topic_name! : 'Class cancelled'
+          out.push({ key: `x${i}`, roomId: slot.classroom_id ?? '∅', startMin, endMin, kind: 'cancelled', batch, subject, topic: why, faculty: slotFaculty, tag: why.startsWith('Class rescheduled') ? 'Rescheduled' : 'Cancelled' })
+          return
+        }
+        out.push({
+          key: `c${i}`, roomId: slot.classroom_id ?? '∅', startMin, endMin, kind: 'class', batch, subject,
+          topic: kind === 'planned' ? (p?.topic_name ?? '') : '',
+          faculty: substitute ? `${lecFaculty} (for ${slotFaculty})` : slotFaculty,
+          tag: substitute ? 'Substitute' : undefined,
+        })
       })
       ;(testRes.data ?? []).forEach((t, i) => {
         const st = toMinutes((t.start_time as string).slice(0, 5))
@@ -203,19 +173,7 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
         out.push({ key: `t${i}`, roomId: (t.classroom_id as string) ?? '∅', startMin: st, endMin: st + (t.duration_minutes as number), kind: 'test', batch, subject: (t.name as string) || 'Test', topic: '', faculty: one(t.app_users as never)?.['full_name'] ?? '—', tag: (t.test_type as string) })
       })
 
-      // A planner lecture block is a duplicate of its recurring class block when
-      // they share the same batch + subject + overlapping time — regardless of room
-      // (the planner row may still have the old room after a schedule room change).
-      // Drop these duplicates; keep only genuinely off-schedule planner entries.
-      const classBlocks = out.filter((b) => b.kind === 'class')
-      const deduped = out.filter(
-        (b) => b.kind !== 'lecture' ||
-        !classBlocks.some(
-          (c) => c.batch === b.batch && c.subject === b.subject &&
-          b.startMin < c.endMin && b.endMin > c.startMin
-        )
-      )
-      setBlocks(deduped)
+      setBlocks(out)
       setLoadingDay(false)
     })()
     return () => { cancelled = true }
@@ -250,6 +208,7 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
 
   const blockClass = (b: Block) =>
     b.kind === 'test' ? 'bg-neutral-900 border-neutral-900 text-white'
+      : b.kind === 'cancelled' ? 'bg-neutral-50 border-dashed border-red-300 text-neutral-400'
       : `${batchColor.get(b.batch) ?? PALETTE[0]} ${b.kind === 'lecture' ? 'border-l-4' : ''}`
 
   const centreName = centres.find((c) => c.id === centreId)?.name ?? ''
@@ -284,7 +243,8 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
       {centreId && (
         <div className="flex flex-wrap gap-3 mb-4 text-xs text-neutral-500">
           <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-violet-200 border border-violet-300 inline-block" /> Class</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-violet-200 border-l-4 border-violet-400 inline-block" /> Planner lecture</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-neutral-50 border border-dashed border-red-300 inline-block" /> Cancelled / rescheduled</span>
+          <span className="flex items-center gap-1"><span className="px-1 rounded text-[8px] font-bold uppercase bg-amber-200 text-amber-900">Substitute</span> Substitute faculty</span>
           <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-neutral-900 inline-block" /> Test</span>
         </div>
       )}
@@ -299,7 +259,7 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
         <Card className="p-0 overflow-hidden">
           <div className="px-5 py-3 border-b border-neutral-100 flex items-center justify-between">
             <h3 className="font-semibold text-neutral-950">{centreName} · {dateLabel}</h3>
-            <span className="text-xs text-neutral-400">{blocks.length} event(s) · {columns.length} hall(s)</span>
+            <span className="text-xs text-neutral-400">{blocks.filter((b) => b.kind !== 'cancelled').length} event(s){blocks.some((b) => b.kind === 'cancelled') ? ` · ${blocks.filter((b) => b.kind === 'cancelled').length} cancelled` : ''} · {columns.length} hall(s)</span>
           </div>
           {blocks.length === 0 ? (
             <p className="p-8 text-center text-sm text-neutral-400">Nothing scheduled at this centre on this date.</p>
@@ -338,9 +298,9 @@ export default function CentreTimetable({ scope = 'central' }: { scope?: 'centra
                             >
                               <div className="flex items-center gap-1 text-[10px] font-bold leading-tight">
                                 {formatTime(minToHHMM(b.startMin))}
-                                {b.tag && <span className={`px-1 rounded text-[8px] uppercase tracking-wide ${b.kind === 'test' ? 'bg-white/25' : 'bg-black/10'}`}>{b.tag}</span>}
+                                {b.tag && <span className={`px-1 rounded text-[8px] uppercase tracking-wide ${b.kind === 'test' ? 'bg-white/25' : b.kind === 'cancelled' ? 'bg-red-100 text-red-700' : b.tag === 'Substitute' ? 'bg-amber-200 text-amber-900' : 'bg-black/10'}`}>{b.tag}</span>}
                               </div>
-                              <div className="text-[11px] font-semibold leading-tight truncate">{b.batch}</div>
+                              <div className={`text-[11px] font-semibold leading-tight truncate ${b.kind === 'cancelled' ? 'line-through' : ''}`}>{b.batch}</div>
                               <div className="text-[10px] leading-tight truncate">{b.subject}</div>
                               {b.topic && <div className="text-[10px] leading-tight truncate italic opacity-90">{b.topic}</div>}
                               <div className="text-[10px] leading-tight truncate opacity-80">{b.faculty}</div>

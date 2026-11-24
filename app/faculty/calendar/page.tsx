@@ -125,7 +125,7 @@ export default function FacultyCalendarPage() {
         for (const pick of matchClasses(running, lecByDate.get(date) ?? [])) {
           if (pick.kind === 'planned' && pick.p) {
             if (pick.p.faculty_id === me) out.push(pick.p)
-          } else if (pick.slot.faculty_id === me) {
+          } else if ((pick.p?.faculty_id ?? pick.slot.faculty_id) === me) { // a substitute on a topic-less class
             const sl = pick.slot
             out.push({
               id: `slot:${sl.id}:${date}`, batch_id: sl.batch_id, subject_id: sl.subject_id, planned_date: date,

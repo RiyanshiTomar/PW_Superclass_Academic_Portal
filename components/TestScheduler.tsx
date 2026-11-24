@@ -1986,7 +1986,7 @@ export default function TestScheduler({ scope = 'central' }: { scope?: Scope }) 
                     </td>
                     <td className="px-3 py-2 max-w-[180px]">
                       {t.part_type === 'Full'
-                        ? <span className="text-xs text-neutral-400">Full syllabus</span>
+                        ? <div>{subject && <span className="text-xs font-medium">{subject.name}</span>}<p className="text-xs text-neutral-400">Full syllabus</p></div>
                         : subjectGroupList.length > 1
                           ? <div className="space-y-0.5">
                               {subjectGroupList.map((g) => (

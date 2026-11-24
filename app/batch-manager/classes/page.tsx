@@ -92,12 +92,12 @@ export default function BatchManagerClasses() {
     const out: Cls[] = matchClasses(running, lRes.data).map(({ kind, p, slot }) => {
       const b = one(slot.batches as never) as { name: string; centres: unknown } | null
       const realLec = kind === 'planned' ? p : null
-      const fac = one((realLec?.app_users ?? slot.app_users) as never) as { full_name: string } | null
+      const fac = one(((p?.faculty_id ? p.app_users : null) ?? slot.app_users) as never) as { full_name: string } | null
       return {
         key: p?.id ?? `slot:${slot.id}`, kind, lec: p, slot,
         batchId: slot.batch_id, batchName: b?.name ?? 'Batch', centre: (one(b?.centres as never) as { name: string } | null)?.name ?? '',
         subject: (one(slot.subjects as never) as { name: string } | null)?.name ?? '—',
-        faculty: fac?.full_name ?? '—', facultyId: realLec?.faculty_id ?? slot.faculty_id,
+        faculty: fac?.full_name ?? '—', facultyId: p?.faculty_id ?? slot.faculty_id,
         room: (one(slot.classrooms as never) as { name: string } | null)?.name ?? '—',
         start: (realLec?.start_time ?? slot.start_time).slice(0, 5),
         minutes: realLec?.duration_minutes ?? toMinutes(slot.end_time.slice(0, 5)) - toMinutes(slot.start_time.slice(0, 5)),

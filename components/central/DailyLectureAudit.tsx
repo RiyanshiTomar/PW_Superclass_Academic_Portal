@@ -212,7 +212,7 @@ export default function DailyLectureAudit() {
         const batch  = one((slot ?? p)!.batches as never) as { id: string; name: string; centre_id: string; batch_owner_id: string | null; centres: unknown } | null
         const centre = one(batch?.centres as never) as { name: string } | null
         const subj   = one(src.subjects as never) as { name: string } | null
-        const fac    = one((kind === 'planned' ? p!.app_users : slot?.app_users ?? p?.app_users) as never) as { full_name: string } | null
+        const fac    = one((kind === 'planned' ? p!.app_users : (p?.faculty_id ? p.app_users : slot?.app_users ?? p?.app_users)) as never) as { full_name: string } | null
         const a      = p ? auditMap.get(p.id) : undefined
         const start  = kind === 'planned' ? p!.start_time : slot!.start_time
         return {
@@ -228,7 +228,7 @@ export default function DailyLectureAudit() {
           centre_name:     centre?.name     ?? '—',
           subject_id:      src.subject_id,
           subject_name:    subj?.name       ?? '—',
-          faculty_id:      kind === 'planned' ? p!.faculty_id : (slot?.faculty_id ?? p?.faculty_id ?? null),
+          faculty_id:      kind === 'planned' ? p!.faculty_id : (p?.faculty_id ?? slot?.faculty_id ?? null),
           faculty_name:    fac?.full_name   ?? '—',
           classroom_id:    slot?.classroom_id ?? p?.classroom_id ?? null,
           link_id:         p?.link_id ?? null,
